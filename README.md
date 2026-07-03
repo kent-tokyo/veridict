@@ -60,6 +60,13 @@ points stronger (fail), or it needs more data (inconclusive):
 veridict sprt results.jsonl --elo0 0 --elo1 10 --alpha 0.05 --beta 0.05
 ```
 
+Compare more than two candidates at once, each measured against the same
+shared baseline, and tabulate pairwise Elo differences:
+
+```bash
+veridict matrix prompt_a.jsonl prompt_b.jsonl prompt_c.jsonl
+```
+
 ### Exit codes
 
 | Code | Meaning |
@@ -134,6 +141,23 @@ the candidate is at least `--elo1` points stronger"; `fail` means
 "keep collecting data". `--alpha`/`--beta` are its actual guaranteed false
 positive/negative rates, not tunable knobs on a report - there's no
 `--min-effect`/`--confidence` for this subcommand.
+
+## Comparison matrix
+
+`veridict matrix` takes one file per candidate - each measured against the
+*same shared baseline*, using the same `result`-field win/loss/draw records
+as `--metric elo`/`--metric winrate` - and tabulates pairwise Elo
+differences. It's report-only (no verdict, always exits 0 on success):
+there's no single pass/fail for a whole matrix.
+
+Every candidate only ever plays the shared baseline (never each other), so
+the underlying model is a star graph: each candidate's rating is exactly
+its own Elo-vs-baseline (the Bradley-Terry MLE on a star graph has no
+shared terms to solve jointly - no iterative solver needed). Cells against
+`baseline` are direct data; candidate-vs-candidate cells are
+model-extrapolated (`elo_i - elo_j`, marked `*` in the Markdown table)
+with a CI from normal-approximation error propagation across the two
+independent samples - wider than either direct cell's CI, as expected.
 
 ## Verdict logic
 

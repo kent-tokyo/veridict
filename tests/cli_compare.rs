@@ -341,3 +341,51 @@ fn sprt_report_md_flag_writes_markdown_file() {
     assert!(contents.contains("# Veridict SPRT Report"));
     std::fs::remove_file(&path).ok();
 }
+
+fn write_winloss_file(path: &std::path::Path, candidate_wins: usize, baseline_wins: usize) {
+    let mut content = String::new();
+    for _ in 0..candidate_wins {
+        content.push_str("{\"result\":\"candidate_win\"}\n");
+    }
+    for _ in 0..baseline_wins {
+        content.push_str("{\"result\":\"baseline_win\"}\n");
+    }
+    std::fs::write(path, content).unwrap();
+}
+
+#[test]
+fn matrix_tabulates_direct_and_extrapolated_cells() {
+    let dir = std::env::temp_dir();
+    let a = dir.join("veridict_cli_test_matrix_a.jsonl");
+    let b = dir.join("veridict_cli_test_matrix_b.jsonl");
+    write_winloss_file(&a, 30, 10);
+    write_winloss_file(&b, 10, 30);
+    veridict()
+        .args(["matrix", a.to_str().unwrap(), b.to_str().unwrap()])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains(
+            "\"row\": \"veridict_cli_test_matrix_a\"",
+        ))
+        .stdout(predicate::str::contains("\"direct\": false"));
+    std::fs::remove_file(&a).ok();
+    std::fs::remove_file(&b).ok();
+}
+
+#[test]
+fn matrix_rejects_duplicate_candidate_names() {
+    let dir = std::env::temp_dir().join("veridict_cli_test_matrix_dup");
+    std::fs::create_dir_all(&dir).unwrap();
+    let a1 = dir.join("same.jsonl");
+    let sub = dir.join("nested");
+    std::fs::create_dir_all(&sub).unwrap();
+    let a2 = sub.join("same.jsonl");
+    write_winloss_file(&a1, 5, 5);
+    write_winloss_file(&a2, 5, 5);
+    veridict()
+        .args(["matrix", a1.to_str().unwrap(), a2.to_str().unwrap()])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("duplicate candidate name"));
+    std::fs::remove_dir_all(&dir).ok();
+}

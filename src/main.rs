@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use veridict::sprt::SprtConfig;
 use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
-use veridict::{MetricKind, Verdict, VeridictError, input};
+use veridict::{MetricKind, Verdict, VeridictError, input, matrix};
 
 #[derive(Parser)]
 #[command(
@@ -30,6 +30,10 @@ enum Command {
     /// Sequential probability ratio test: accumulate evidence until the candidate is clearly
     /// at least elo1 stronger (pass), clearly at most elo0 stronger (fail), or keep testing.
     Sprt(SprtArgs),
+    /// Compare more than two candidates, each measured against the same shared baseline, and
+    /// tabulate pairwise Elo differences. Report-only: always exits 0 on success (no single
+    /// pass/fail verdict applies to a whole matrix).
+    Matrix(MatrixArgs),
 }
 
 #[derive(clap::Args)]
@@ -115,6 +119,29 @@ struct SprtArgs {
     report_md: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct MatrixArgs {
+    /// One file per candidate, each measured against the same shared baseline. Candidate names
+    /// come from each file's stem (e.g. "prompt_a.jsonl" -> "prompt_a").
+    #[arg(required = true, num_args = 1..)]
+    files: Vec<PathBuf>,
+
+    /// Input format, applied to every file. Defaults to sniffing each file's extension.
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    #[arg(long, default_value_t = 0.95)]
+    confidence: f64,
+
+    /// Also write the JSON report to this file.
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum MetricArg {
     Winrate,
@@ -155,6 +182,7 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
     match command {
         Command::Compare(args) => run_compare(args),
         Command::Sprt(args) => run_sprt(args),
+        Command::Matrix(args) => run_matrix(args),
     }
 }
 
@@ -212,6 +240,33 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     println!("{json}");
     write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
     Ok(exit_code_for(report.verdict))
+}
+
+fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
+    let mut named_records = Vec::with_capacity(args.files.len());
+    let mut seen_names = std::collections::HashSet::new();
+    for path in &args.files {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("candidate")
+            .to_string();
+        if !seen_names.insert(name.clone()) {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "duplicate candidate name '{name}' from input file stems; rename one of the files"
+            )));
+        }
+        let format = resolve_format(path, args.format);
+        named_records.push((name, read_records(path, format)?));
+    }
+
+    let matrix = matrix::run(&named_records, args.confidence)?;
+    let json = matrix.to_json_pretty();
+    let markdown = matrix.to_markdown();
+
+    println!("{json}");
+    write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
+    Ok(ExitCode::from(0))
 }
 
 fn write_reports(
