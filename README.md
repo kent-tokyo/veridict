@@ -1,5 +1,7 @@
 # veridict
 
+English | [日本語](README_ja.md)
+
 A small, domain-agnostic evaluation gate: decide whether a candidate is
 actually better than a baseline, from a file of trial results.
 
