@@ -159,6 +159,24 @@ model-extrapolated (`elo_i - elo_j`, marked `*` in the Markdown table)
 with a CI from normal-approximation error propagation across the two
 independent samples - wider than either direct cell's CI, as expected.
 
+## Paired testcases
+
+`--paired-by-id` (on `compare`, `sprt`, and `matrix`) treats two records
+sharing the same `id` as one testcase played twice - e.g. re-run with roles
+swapped to cancel that testcase's own bias - and combines them into a
+single net observation instead of two independent ones:
+
+* `winrate`/`elo`: net by total points across the pair (win=1, draw=0.5,
+  loss=0, the standard "paired game" convention) - `>1` is a net candidate
+  win, `<1` a net baseline win, exactly `1` a net draw.
+* `mean-diff`/`sign-test`: net by averaging the pair's two diffs.
+
+An `id` used only once is an ordinary unpaired sample (mixing paired and
+unpaired testcases in one file is fine). Three or more records sharing an
+`id` is rejected as a data error, not silently truncated to a pair. Without
+`--paired-by-id`, a duplicate `id` on `mean-diff`/`sign-test` records is
+still rejected outright, same as before this flag existed.
+
 ## Verdict logic
 
 The gate compares the confidence interval, not the point estimate, against

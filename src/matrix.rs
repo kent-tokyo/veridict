@@ -63,6 +63,7 @@ pub struct ComparisonMatrix {
 pub fn run(
     named_records: &[(String, Vec<(usize, Record)>)],
     confidence: f64,
+    paired_by_id: bool,
 ) -> Result<ComparisonMatrix, VeridictError> {
     if named_records.is_empty() {
         return Err(VeridictError::EmptyInput);
@@ -72,7 +73,7 @@ pub fn run(
     for (name, records) in named_records {
         // resamples/seed are bootstrap-only knobs; the elo metric ignores
         // them, same as every other non-mean-diff metric already does.
-        let out = metrics::compute(records, MetricKind::Elo, confidence, 1, 0)?;
+        let out = metrics::compute(records, MetricKind::Elo, confidence, 1, 0, paired_by_id)?;
         candidates.push(CandidateSummary {
             name: name.clone(),
             elo: out.effect,
@@ -201,7 +202,7 @@ mod tests {
     #[test]
     fn baseline_vs_candidate_is_direct() {
         let data = vec![("a".to_string(), stream("candidate_win", 20))];
-        let m = run(&data, 0.95).unwrap();
+        let m = run(&data, 0.95, false).unwrap();
         assert_eq!(m.matrix.len(), 1);
         assert!(m.matrix[0].direct);
         assert_eq!(m.matrix[0].row, "baseline");
@@ -215,7 +216,7 @@ mod tests {
             ("a".to_string(), stream("candidate_win", 20)),
             ("b".to_string(), stream("baseline_win", 20)),
         ];
-        let m = run(&data, 0.95).unwrap();
+        let m = run(&data, 0.95, false).unwrap();
         let cross = m
             .matrix
             .iter()
@@ -228,7 +229,7 @@ mod tests {
     #[test]
     fn markdown_mirrors_into_a_full_grid() {
         let data = vec![("a".to_string(), stream("candidate_win", 20))];
-        let md = run(&data, 0.95).unwrap().to_markdown();
+        let md = run(&data, 0.95, false).unwrap().to_markdown();
         assert!(md.contains("| baseline |"));
         assert!(md.contains("| a |"));
         assert!(md.contains(" - |"));
@@ -236,6 +237,9 @@ mod tests {
 
     #[test]
     fn empty_input_is_an_error() {
-        assert!(matches!(run(&[], 0.95), Err(VeridictError::EmptyInput)));
+        assert!(matches!(
+            run(&[], 0.95, false),
+            Err(VeridictError::EmptyInput)
+        ));
     }
 }

@@ -80,7 +80,8 @@ pub enum MetricKind {
 }
 
 /// Runs one metric end to end: classify records, compute its effect and
-/// confidence interval, and apply the pass/fail thresholds.
+/// confidence interval, and apply the pass/fail thresholds. `paired_by_id`
+/// enables paired-testcase variance reduction (see `metrics::compute`).
 pub fn compare_one(
     records: &[(usize, input::Record)],
     metric: MetricKind,
@@ -88,8 +89,9 @@ pub fn compare_one(
     thresholds: &verdict::Thresholds,
     resamples: usize,
     seed: u64,
+    paired_by_id: bool,
 ) -> Result<Report, VeridictError> {
-    let out = metrics::compute(records, metric, confidence, resamples, seed)?;
+    let out = metrics::compute(records, metric, confidence, resamples, seed, paired_by_id)?;
 
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
@@ -131,10 +133,21 @@ pub fn compare_many(
     thresholds: &verdict::Thresholds,
     resamples: usize,
     seed: u64,
+    paired_by_id: bool,
 ) -> Result<MultiReport, VeridictError> {
     let reports = metrics
         .iter()
-        .map(|&metric| compare_one(records, metric, confidence, thresholds, resamples, seed))
+        .map(|&metric| {
+            compare_one(
+                records,
+                metric,
+                confidence,
+                thresholds,
+                resamples,
+                seed,
+                paired_by_id,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
     Ok(MultiReport { verdict, reports })
@@ -202,6 +215,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -223,6 +237,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -239,6 +254,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -256,6 +272,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
     }
@@ -285,6 +302,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -319,6 +337,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
         )
         .unwrap();
         assert_eq!(report.reports[0].verdict, Verdict::Fail);

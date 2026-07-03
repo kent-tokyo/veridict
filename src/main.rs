@@ -75,6 +75,14 @@ struct CompareArgs {
     #[arg(long)]
     seed: Option<u64>,
 
+    /// Treat two records sharing an id as one testcase played twice (e.g.
+    /// roles swapped to cancel the testcase's own bias) and combine them
+    /// into a single net observation instead of two independent ones. An id
+    /// used only once is an ordinary unpaired sample; 3+ uses of the same
+    /// id is rejected as a data error.
+    #[arg(long)]
+    paired_by_id: bool,
+
     /// Also write the JSON report to this file.
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -110,6 +118,12 @@ struct SprtArgs {
     #[arg(long, default_value_t = 0.05)]
     beta: f64,
 
+    /// Treat two records sharing an id as one testcase played twice and
+    /// combine them into a single net observation. See `compare
+    /// --paired-by-id` for the exact semantics.
+    #[arg(long)]
+    paired_by_id: bool,
+
     /// Also write the JSON report to this file.
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -132,6 +146,13 @@ struct MatrixArgs {
 
     #[arg(long, default_value_t = 0.95)]
     confidence: f64,
+
+    /// Treat two records sharing an id as one testcase played twice and
+    /// combine them into a single net observation. See `compare
+    /// --paired-by-id` for the exact semantics; applied independently to
+    /// each file.
+    #[arg(long)]
+    paired_by_id: bool,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -205,6 +226,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             &thresholds,
             args.resamples,
             seed,
+            args.paired_by_id,
         )?;
         (
             report.verdict,
@@ -219,6 +241,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             &thresholds,
             args.resamples,
             seed,
+            args.paired_by_id,
         )?;
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };
@@ -233,7 +256,7 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;
 
-    let report = veridict::sprt::run(&records, &config)?;
+    let report = veridict::sprt::run(&records, &config, args.paired_by_id)?;
     let json = report.to_json_pretty();
     let markdown = report.to_markdown();
 
@@ -260,7 +283,7 @@ fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
         named_records.push((name, read_records(path, format)?));
     }
 
-    let matrix = matrix::run(&named_records, args.confidence)?;
+    let matrix = matrix::run(&named_records, args.confidence, args.paired_by_id)?;
     let json = matrix.to_json_pretty();
     let markdown = matrix.to_markdown();
 

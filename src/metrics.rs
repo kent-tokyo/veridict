@@ -5,14 +5,14 @@
 //! matches neither is rejected as `SchemaMismatch` rather than silently
 //! dropped, per AGENTS.md's "never silently ignore invalid data" rule.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
 use crate::stats::{bootstrap, elo, wilson};
-use crate::{MetricKind, TrialStatus};
+use crate::{MetricKind, Outcome, TrialStatus};
 
 /// Per-side failure tally, so a report can distinguish "the baseline kept
 /// crashing" from "the candidate kept timing out" instead of one opaque
@@ -48,12 +48,21 @@ pub struct MetricOutput {
     pub warning: Option<String>,
 }
 
+/// `paired_by_id`: when true, two records sharing the same `id` are treated
+/// as one testcase played twice (e.g. roles swapped to cancel the
+/// testcase's own bias) and combined into a single net observation instead
+/// of two independent ones - see [`reduce_outcome_pairs`]/
+/// [`reduce_diff_pairs`] for exactly how. An `id` seen only once is an
+/// ordinary unpaired sample; three or more is a data error, not a pair.
+/// When false (the default), every record is its own independent sample,
+/// same as before this flag existed.
 pub fn compute(
     records: &[(usize, Record)],
     metric: MetricKind,
     confidence: f64,
     resamples: usize,
     seed: u64,
+    paired_by_id: bool,
 ) -> Result<MetricOutput, VeridictError> {
     if records.is_empty() {
         return Err(VeridictError::EmptyInput);
@@ -64,14 +73,13 @@ pub fn compute(
 
     let mut failures = FailureBreakdown::default();
 
-    let mut baseline_wins = 0u64;
-    let mut candidate_wins = 0u64;
-    let mut draws = 0u64;
-
+    // Shared by WinRate and Elo: both need a win/loss/draw observation per
+    // record; they only differ in how the collected observations are
+    // turned into an effect size below.
+    let mut outcomes: Vec<(usize, Option<&str>, Outcome)> = Vec::new();
     // Shared by MeanDiff and SignTest: both need a paired (baseline,
-    // candidate) numeric observation per record; they only differ in how
-    // that observation is turned into an effect size below.
-    let mut diffs: Vec<f64> = Vec::new();
+    // candidate) numeric observation per record.
+    let mut numeric: Vec<(usize, Option<&str>, f64)> = Vec::new();
     let mut seen_ids: HashSet<&str> = HashSet::new();
 
     for (line, record) in records {
@@ -90,10 +98,8 @@ pub fn compute(
             MetricKind::WinRate | MetricKind::Elo => {
                 if let Some(result) = record.result.as_deref() {
                     used = true;
-                    match crate::Outcome::parse(result) {
-                        Some(crate::Outcome::BaselineWin) => baseline_wins += 1,
-                        Some(crate::Outcome::CandidateWin) => candidate_wins += 1,
-                        Some(crate::Outcome::Draw) => draws += 1,
+                    match Outcome::parse(result) {
+                        Some(outcome) => outcomes.push((*line, record.id.as_deref(), outcome)),
                         None => {
                             return Err(VeridictError::UnrecognizedOutcome {
                                 line: *line,
@@ -119,7 +125,12 @@ pub fn compute(
                             value: c,
                         });
                     }
-                    if let Some(id) = record.id.as_deref()
+                    // Without pairing, a repeated id is almost always a data
+                    // mistake, so it's rejected up front. With pairing, a
+                    // repeated id is the whole point - reduce_diff_pairs
+                    // validates it (exactly 2, not more) instead.
+                    if !paired_by_id
+                        && let Some(id) = record.id.as_deref()
                         && !seen_ids.insert(id)
                     {
                         return Err(VeridictError::DuplicateId {
@@ -128,7 +139,7 @@ pub fn compute(
                         });
                     }
                     used = true;
-                    diffs.push(c - b);
+                    numeric.push((*line, record.id.as_deref(), c - b));
                 }
             }
         }
@@ -146,6 +157,17 @@ pub fn compute(
     let timeouts = failures.baseline.timeout + failures.candidate.timeout;
     let crashes = failures.baseline.crash + failures.candidate.crash;
     let invalid = failures.baseline.invalid + failures.candidate.invalid;
+
+    let (baseline_wins, candidate_wins, draws) = if paired_by_id {
+        reduce_outcome_pairs(&outcomes)?
+    } else {
+        tally_outcomes(&outcomes)
+    };
+    let diffs = if paired_by_id {
+        reduce_diff_pairs(&numeric)?
+    } else {
+        numeric.iter().map(|(_, _, d)| *d).collect()
+    };
 
     match metric {
         MetricKind::WinRate => compute_winrate(
@@ -174,6 +196,113 @@ pub fn compute(
             compute_sign_test(&diffs, confidence, timeouts, crashes, invalid, failures)
         }
     }
+}
+
+fn tally_outcomes(outcomes: &[(usize, Option<&str>, Outcome)]) -> (u64, u64, u64) {
+    let (mut baseline_wins, mut candidate_wins, mut draws) = (0u64, 0u64, 0u64);
+    for (_, _, outcome) in outcomes {
+        match outcome {
+            Outcome::BaselineWin => baseline_wins += 1,
+            Outcome::CandidateWin => candidate_wins += 1,
+            Outcome::Draw => draws += 1,
+        }
+    }
+    (baseline_wins, candidate_wins, draws)
+}
+
+/// Combines each pair of same-id outcomes by total points scored (win=1,
+/// draw=0.5, loss=0, from the candidate's perspective): >1 point across the
+/// pair is a net candidate win, <1 a net baseline win, exactly 1 a net draw,
+/// the standard "paired game" scoring convention. An id-less outcome is
+/// always its own singleton (there's nothing to match it to).
+pub(crate) fn reduce_outcome_pairs(
+    outcomes: &[(usize, Option<&str>, Outcome)],
+) -> Result<(u64, u64, u64), VeridictError> {
+    let mut groups: HashMap<&str, Vec<(usize, Outcome)>> = HashMap::new();
+    let (mut baseline_wins, mut candidate_wins, mut draws) = (0u64, 0u64, 0u64);
+
+    let mut tally = |outcome: Outcome| match outcome {
+        Outcome::BaselineWin => baseline_wins += 1,
+        Outcome::CandidateWin => candidate_wins += 1,
+        Outcome::Draw => draws += 1,
+    };
+
+    for (line, id, outcome) in outcomes {
+        match id {
+            Some(id) => groups.entry(id).or_default().push((*line, *outcome)),
+            None => tally(*outcome),
+        }
+    }
+
+    for (id, group) in groups {
+        match group.as_slice() {
+            [(_, outcome)] => tally(*outcome),
+            [(_, a), (_, b)] => {
+                let points = |o: &Outcome| match o {
+                    Outcome::CandidateWin => 1.0,
+                    Outcome::Draw => 0.5,
+                    Outcome::BaselineWin => 0.0,
+                };
+                let total = points(a) + points(b);
+                #[allow(clippy::float_cmp)]
+                tally(if total > 1.0 {
+                    Outcome::CandidateWin
+                } else if total < 1.0 {
+                    Outcome::BaselineWin
+                } else {
+                    Outcome::Draw
+                });
+            }
+            more => {
+                return Err(VeridictError::SchemaMismatch {
+                    line: more[0].0,
+                    context: "paired-by-id",
+                    detail: format!(
+                        "id '{id}' appears {} times; paired mode expects at most 2 records per id",
+                        more.len()
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok((baseline_wins, candidate_wins, draws))
+}
+
+/// Combines each pair of same-id diffs by averaging them, so a testcase
+/// played twice contributes one net-of-bias sample instead of two raw
+/// ones. An id-less diff is always its own singleton.
+pub(crate) fn reduce_diff_pairs(
+    numeric: &[(usize, Option<&str>, f64)],
+) -> Result<Vec<f64>, VeridictError> {
+    let mut groups: HashMap<&str, Vec<(usize, f64)>> = HashMap::new();
+    let mut diffs: Vec<f64> = Vec::new();
+
+    for (line, id, diff) in numeric {
+        match id {
+            Some(id) => groups.entry(id).or_default().push((*line, *diff)),
+            None => diffs.push(*diff),
+        }
+    }
+
+    for (id, group) in groups {
+        match group.as_slice() {
+            [(_, d)] => diffs.push(*d),
+            [(_, a), (_, b)] => diffs.push((a + b) / 2.0),
+            more => {
+                return Err(VeridictError::SchemaMismatch {
+                    line: more[0].0,
+                    context: "paired-by-id",
+                    detail: format!(
+                        "id '{id}' appears {} times; paired mode expects at most 2 records per id",
+                        more.len()
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(diffs)
 }
 
 /// A record-level `SchemaMismatch` needs a short label for what it failed
@@ -440,7 +569,7 @@ mod tests {
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
             (3, rec("c", None, None, Some("draw"), None, None)),
         ];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false).unwrap();
         assert_eq!(out.paired_count, 2);
         assert_eq!(out.candidate_count, 1);
     }
@@ -448,7 +577,7 @@ mod tests {
     #[test]
     fn winrate_all_draws_is_zero_n_warning() {
         let records = vec![(1, rec("a", None, None, Some("draw"), None, None))];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false).unwrap();
         assert!(out.warning.is_some());
         assert_eq!(out.paired_count, 0);
     }
@@ -459,7 +588,7 @@ mod tests {
             (1, rec("a", Some(1.0), Some(1.5), None, None, None)),
             (2, rec("b", Some(2.0), Some(2.5), None, None, None)),
         ];
-        let out = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED, false).unwrap();
         assert_eq!(out.paired_count, 2);
         assert!((out.effect - 0.5).abs() < 1e-9);
     }
@@ -467,7 +596,7 @@ mod tests {
     #[test]
     fn mean_diff_rejects_nan() {
         let records = vec![(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
-        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED);
+        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED, false);
         assert!(matches!(
             result,
             Err(VeridictError::InvalidValue {
@@ -483,14 +612,14 @@ mod tests {
             (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
-        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED);
+        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED, false);
         assert!(matches!(result, Err(VeridictError::DuplicateId { .. })));
     }
 
     #[test]
     fn status_only_records_count_but_are_not_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, Some("ok"), Some("timeout")))];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false).unwrap();
         assert_eq!(out.timeouts, 1);
         assert_eq!(out.failures.candidate.timeout, 1);
         assert_eq!(out.failures.baseline.timeout, 0);
@@ -499,14 +628,14 @@ mod tests {
     #[test]
     fn unusable_record_is_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, None, None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false);
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
     }
 
     #[test]
     fn unrecognized_status_is_an_error() {
         let records = vec![(1, rec("a", None, None, None, Some("bogus"), None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false);
         assert!(matches!(
             result,
             Err(VeridictError::UnrecognizedStatus { .. })
@@ -516,7 +645,7 @@ mod tests {
     #[test]
     fn unrecognized_outcome_is_an_error() {
         let records = vec![(1, rec("a", None, None, Some("bogus"), None, None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, false);
         assert!(matches!(
             result,
             Err(VeridictError::UnrecognizedOutcome { .. })
@@ -525,7 +654,7 @@ mod tests {
 
     #[test]
     fn empty_records_is_empty_input() {
-        let result = compute(&[], MetricKind::WinRate, 0.95, 1000, SEED);
+        let result = compute(&[], MetricKind::WinRate, 0.95, 1000, SEED, false);
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
     }
 
@@ -536,7 +665,7 @@ mod tests {
             (2, rec("b", Some(2.0), Some(1.0), None, None, None)), // negative
             (3, rec("c", Some(3.0), Some(3.0), None, None, None)), // tie, excluded
         ];
-        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED, false).unwrap();
         assert_eq!(out.paired_count, 2);
         assert_eq!(out.candidate_count, 1);
         assert_eq!(out.baseline_count, 1);
@@ -545,7 +674,7 @@ mod tests {
     #[test]
     fn sign_test_all_ties_is_zero_n_warning() {
         let records = vec![(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
-        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED, false).unwrap();
         assert!(out.warning.is_some());
     }
 
@@ -555,7 +684,7 @@ mod tests {
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
             (2, rec("b", None, None, Some("draw"), None, None)),
         ];
-        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED, false).unwrap();
         // score = (1 + 0.5) / 2 = 0.75 -> a positive Elo effect.
         assert!(out.effect > 0.0);
         assert_eq!(out.paired_count, 2);
@@ -567,14 +696,111 @@ mod tests {
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
         ];
-        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED, false).unwrap();
         assert!(out.effect.abs() < 1e-9);
     }
 
     #[test]
     fn elo_zero_trials_is_a_warning_not_an_error() {
         let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
-        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED, false).unwrap();
         assert!(out.warning.is_some());
+    }
+
+    // --- paired_by_id ---
+
+    #[test]
+    fn paired_winrate_nets_two_games_per_id_by_points() {
+        let records = vec![
+            // id "op1": candidate wins one, loses the other -> net draw (1.0 pt).
+            (1, rec("op1", None, None, Some("candidate_win"), None, None)),
+            (2, rec("op1", None, None, Some("baseline_win"), None, None)),
+            // id "op2": candidate wins both -> net candidate win (2.0 pts).
+            (3, rec("op2", None, None, Some("candidate_win"), None, None)),
+            (4, rec("op2", None, None, Some("candidate_win"), None, None)),
+        ];
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, true).unwrap();
+        // 4 raw games -> 2 paired samples: 1 draw (excluded from n), 1 candidate win.
+        assert_eq!(out.paired_count, 1);
+        assert_eq!(out.candidate_count, 1);
+        assert_eq!(out.baseline_count, 0);
+    }
+
+    #[test]
+    fn paired_winrate_unpaired_singleton_still_counts() {
+        let records = vec![(
+            1,
+            rec("solo", None, None, Some("candidate_win"), None, None),
+        )];
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, true).unwrap();
+        assert_eq!(out.paired_count, 1);
+        assert_eq!(out.candidate_count, 1);
+    }
+
+    #[test]
+    fn paired_winrate_rejects_triple_id() {
+        let records = vec![
+            (1, rec("op1", None, None, Some("candidate_win"), None, None)),
+            (2, rec("op1", None, None, Some("candidate_win"), None, None)),
+            (3, rec("op1", None, None, Some("candidate_win"), None, None)),
+        ];
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED, true);
+        assert!(matches!(
+            result,
+            Err(VeridictError::SchemaMismatch {
+                context: "paired-by-id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn paired_mean_diff_averages_the_pair() {
+        let records = vec![
+            (1, rec("op1", Some(1.0), Some(1.2), None, None, None)), // diff +0.2
+            (2, rec("op1", Some(1.0), Some(0.8), None, None, None)), // diff -0.2
+        ];
+        let out = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED, true).unwrap();
+        assert_eq!(out.paired_count, 1);
+        assert!(out.effect.abs() < 1e-9); // net-of-bias effect is ~0, not the two raw +-0.2 diffs
+    }
+
+    #[test]
+    fn paired_mean_diff_allows_duplicate_id_that_unpaired_mode_rejects() {
+        let records = vec![
+            (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
+            (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
+        ];
+        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn paired_sign_test_rejects_triple_id() {
+        let records = vec![
+            (1, rec("op1", Some(1.0), Some(1.1), None, None, None)),
+            (2, rec("op1", Some(1.0), Some(1.1), None, None, None)),
+            (3, rec("op1", Some(1.0), Some(1.1), None, None, None)),
+        ];
+        let result = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED, true);
+        assert!(matches!(
+            result,
+            Err(VeridictError::SchemaMismatch {
+                context: "paired-by-id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn paired_elo_nets_by_points_too() {
+        let records = vec![
+            (1, rec("op1", None, None, Some("candidate_win"), None, None)),
+            (2, rec("op1", None, None, Some("draw"), None, None)),
+        ];
+        // total = 1.0 + 0.5 = 1.5 pts across the pair -> net candidate win.
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED, true).unwrap();
+        assert_eq!(out.paired_count, 1);
+        assert!(out.effect > 0.0);
     }
 }

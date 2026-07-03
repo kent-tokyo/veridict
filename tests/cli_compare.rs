@@ -389,3 +389,69 @@ fn matrix_rejects_duplicate_candidate_names() {
         .stderr(predicate::str::contains("duplicate candidate name"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn paired_by_id_nets_asymmetric_pairs_to_a_pass() {
+    let stdin: String = (0..30)
+        .flat_map(|i| {
+            [
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+                format!("{{\"id\":\"op{i}\",\"result\":\"draw\"}}\n"),
+            ]
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--paired-by-id",
+            "--min-effect",
+            "0.05",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"paired_count\": 30"));
+}
+
+#[test]
+fn paired_by_id_allows_duplicate_ids_mean_diff_otherwise_rejects() {
+    let stdin = "{\"id\":\"dup\",\"baseline\":1.0,\"candidate\":1.1}\n{\"id\":\"dup\",\"baseline\":2.0,\"candidate\":2.1}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "mean-diff", "--paired-by-id"])
+        .write_stdin(stdin)
+        .assert()
+        .code(predicate::in_iter([0, 1, 2]))
+        .stdout(predicate::str::contains("\"paired_count\": 1"));
+}
+
+#[test]
+fn paired_by_id_rejects_triple_id() {
+    let stdin = "{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"candidate_win\"}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "winrate", "--paired-by-id"])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("paired-by-id"));
+}
+
+#[test]
+fn sprt_paired_by_id_nets_split_pairs_to_a_draw() {
+    let stdin: String = (0..1000)
+        .flat_map(|i| {
+            [
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+                format!("{{\"id\":\"op{i}\",\"result\":\"baseline_win\"}}\n"),
+            ]
+        })
+        .collect();
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10", "--paired-by-id"])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"llr\": 0.0"));
+}

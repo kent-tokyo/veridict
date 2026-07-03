@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::{FailureBreakdown, tally_status};
+use crate::metrics::{FailureBreakdown, reduce_outcome_pairs, tally_status};
 use crate::report::serde_str;
 use crate::stats::sprt as math;
 use crate::{Outcome, Verdict};
@@ -69,15 +69,20 @@ pub struct SprtReport {
     pub reason: String,
 }
 
-pub fn run(records: &[(usize, Record)], config: &SprtConfig) -> Result<SprtReport, VeridictError> {
+/// `paired_by_id`: see `metrics::compute` - two records sharing an `id` are
+/// combined into one net observation (by total points across the pair)
+/// instead of two independent trials.
+pub fn run(
+    records: &[(usize, Record)],
+    config: &SprtConfig,
+    paired_by_id: bool,
+) -> Result<SprtReport, VeridictError> {
     if records.is_empty() {
         return Err(VeridictError::EmptyInput);
     }
 
     let mut failures = FailureBreakdown::default();
-    let mut candidate_wins = 0u64;
-    let mut baseline_wins = 0u64;
-    let mut draws = 0u64;
+    let mut outcomes: Vec<(usize, Option<&str>, Outcome)> = Vec::new();
 
     for (line, record) in records {
         let mut used = false;
@@ -94,9 +99,7 @@ pub fn run(records: &[(usize, Record)], config: &SprtConfig) -> Result<SprtRepor
         if let Some(result) = record.result.as_deref() {
             used = true;
             match Outcome::parse(result) {
-                Some(Outcome::BaselineWin) => baseline_wins += 1,
-                Some(Outcome::CandidateWin) => candidate_wins += 1,
-                Some(Outcome::Draw) => draws += 1,
+                Some(outcome) => outcomes.push((*line, record.id.as_deref(), outcome)),
                 None => {
                     return Err(VeridictError::UnrecognizedOutcome {
                         line: *line,
@@ -114,6 +117,20 @@ pub fn run(records: &[(usize, Record)], config: &SprtConfig) -> Result<SprtRepor
             });
         }
     }
+
+    let (baseline_wins, candidate_wins, draws) = if paired_by_id {
+        reduce_outcome_pairs(&outcomes)?
+    } else {
+        let (mut bw, mut cw, mut dr) = (0u64, 0u64, 0u64);
+        for (_, _, outcome) in &outcomes {
+            match outcome {
+                Outcome::BaselineWin => bw += 1,
+                Outcome::CandidateWin => cw += 1,
+                Outcome::Draw => dr += 1,
+            }
+        }
+        (bw, cw, dr)
+    };
 
     let timeouts = failures.baseline.timeout + failures.candidate.timeout;
     let crashes = failures.baseline.crash + failures.candidate.crash;
@@ -224,8 +241,12 @@ mod tests {
     use super::*;
 
     fn rec(result: Option<&str>) -> Record {
+        rec_with_id(None, result)
+    }
+
+    fn rec_with_id(id: Option<&str>, result: Option<&str>) -> Record {
         Record {
-            id: None,
+            id: id.map(str::to_string),
             baseline: None,
             candidate: None,
             result: result.map(str::to_string),
@@ -240,7 +261,7 @@ mod tests {
         let records: Vec<_> = (0..2000)
             .map(|i| (i + 1, rec(Some("candidate_win"))))
             .collect();
-        let report = run(&records, &config).unwrap();
+        let report = run(&records, &config, false).unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
         assert!(report.llr >= report.upper_bound);
     }
@@ -251,7 +272,7 @@ mod tests {
         let records: Vec<_> = (0..2000)
             .map(|i| (i + 1, rec(Some("baseline_win"))))
             .collect();
-        let report = run(&records, &config).unwrap();
+        let report = run(&records, &config, false).unwrap();
         assert_eq!(report.verdict, Verdict::Fail);
         assert!(report.llr <= report.lower_bound);
     }
@@ -263,7 +284,7 @@ mod tests {
             (1, rec(Some("candidate_win"))),
             (2, rec(Some("baseline_win"))),
         ];
-        let report = run(&records, &config).unwrap();
+        let report = run(&records, &config, false).unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
     }
 
@@ -271,7 +292,7 @@ mod tests {
     fn draws_do_not_move_the_llr() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = vec![(1, rec(Some("draw"))), (2, rec(Some("draw")))];
-        let report = run(&records, &config).unwrap();
+        let report = run(&records, &config, false).unwrap();
         assert_eq!(report.llr, 0.0);
         assert_eq!(report.draws, 2);
     }
@@ -303,7 +324,10 @@ mod tests {
     #[test]
     fn empty_input_is_an_error() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
-        assert!(matches!(run(&[], &config), Err(VeridictError::EmptyInput)));
+        assert!(matches!(
+            run(&[], &config, false),
+            Err(VeridictError::EmptyInput)
+        ));
     }
 
     #[test]
@@ -311,8 +335,33 @@ mod tests {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = vec![(1, rec(None))];
         assert!(matches!(
-            run(&records, &config),
+            run(&records, &config, false),
             Err(VeridictError::SchemaMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn paired_by_id_nets_split_pairs_to_a_draw() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        // Every testcase splits 1-1 (net draw) when paired: LLR stays at 0,
+        // even though un-paired this would be 1000 wins + 1000 losses too -
+        // same total either way here, so assert the more telling case below.
+        let records: Vec<_> = (0..1000)
+            .flat_map(|i| {
+                [
+                    (
+                        i * 2 + 1,
+                        rec_with_id(Some(&format!("op{i}")), Some("candidate_win")),
+                    ),
+                    (
+                        i * 2 + 2,
+                        rec_with_id(Some(&format!("op{i}")), Some("baseline_win")),
+                    ),
+                ]
+            })
+            .collect();
+        let report = run(&records, &config, true).unwrap();
+        assert_eq!(report.llr, 0.0);
+        assert_eq!(report.draws, 1000);
     }
 }
