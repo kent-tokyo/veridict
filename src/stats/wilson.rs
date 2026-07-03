@@ -61,31 +61,52 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     }
 }
 
-/// Wilson score interval for `successes` out of `n` trials at the given
-/// two-sided confidence level.
+/// Wilson score interval for a proportion `p_hat` estimated from `n` (real-
+/// valued, so a caller with fractional "successes" - e.g. Elo's draw-counts-
+/// as-half-a-win scoring - doesn't need to pretend it has an integer count)
+/// trials, at the given two-sided confidence level.
 ///
 /// Preconditions (caller's responsibility, not re-validated here since this
-/// is an internal helper always called after `n > 0` is already known):
-/// `n > 0`. `confidence` is validated here since it comes straight from
-/// user-supplied CLI input and `f64::from_str` happily parses `"nan"`.
-pub fn wilson_ci(successes: u64, n: u64, confidence: f64) -> Result<(f64, f64), VeridictError> {
+/// is an internal helper always called after they're already known): `n >
+/// 0`, `0.0 <= p_hat <= 1.0`. `confidence` is validated here since it comes
+/// straight from user-supplied CLI input and `f64::from_str` happily parses
+/// `"nan"`.
+pub fn wilson_ci_from_proportion(
+    p_hat: f64,
+    n: f64,
+    confidence: f64,
+) -> Result<(f64, f64), VeridictError> {
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    debug_assert!(n > 0, "wilson_ci called with n == 0; caller must guard");
+    debug_assert!(
+        n > 0.0,
+        "wilson_ci_from_proportion called with n == 0; caller must guard"
+    );
+    debug_assert!(
+        (0.0..=1.0).contains(&p_hat),
+        "p_hat {p_hat} out of [0, 1]; caller must guard"
+    );
 
     let alpha = 1.0 - confidence;
     let z = inverse_normal_cdf(1.0 - alpha / 2.0);
-    let n_f = n as f64;
-    let p_hat = successes as f64 / n_f;
 
-    let denom = 1.0 + z * z / n_f;
-    let center = (p_hat + z * z / (2.0 * n_f)) / denom;
-    let margin = (z / denom) * (p_hat * (1.0 - p_hat) / n_f + z * z / (4.0 * n_f * n_f)).sqrt();
+    let denom = 1.0 + z * z / n;
+    let center = (p_hat + z * z / (2.0 * n)) / denom;
+    let margin = (z / denom) * (p_hat * (1.0 - p_hat) / n + z * z / (4.0 * n * n)).sqrt();
 
     let low = (center - margin).clamp(0.0, 1.0);
     let high = (center + margin).clamp(0.0, 1.0);
     Ok((low, high))
+}
+
+/// Wilson score interval for `successes` out of `n` trials. Convenience
+/// wrapper around [`wilson_ci_from_proportion`] for the common integer-count
+/// case (winrate, sign-test).
+pub fn wilson_ci(successes: u64, n: u64, confidence: f64) -> Result<(f64, f64), VeridictError> {
+    debug_assert!(n > 0, "wilson_ci called with n == 0; caller must guard");
+    let p_hat = successes as f64 / n as f64;
+    wilson_ci_from_proportion(p_hat, n as f64, confidence)
 }
 
 #[cfg(test)]

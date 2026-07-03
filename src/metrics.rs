@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::stats::{bootstrap, wilson};
+use crate::stats::{bootstrap, elo, wilson};
 use crate::{MetricKind, TrialStatus};
 
 /// Per-side failure tally, so a report can distinguish "the baseline kept
@@ -66,6 +66,7 @@ pub fn compute(
 
     let mut baseline_wins = 0u64;
     let mut candidate_wins = 0u64;
+    let mut draws = 0u64;
 
     // Shared by MeanDiff and SignTest: both need a paired (baseline,
     // candidate) numeric observation per record; they only differ in how
@@ -86,13 +87,13 @@ pub fn compute(
         }
 
         match metric {
-            MetricKind::WinRate => {
+            MetricKind::WinRate | MetricKind::Elo => {
                 if let Some(result) = record.result.as_deref() {
                     used = true;
                     match crate::Outcome::parse(result) {
                         Some(crate::Outcome::BaselineWin) => baseline_wins += 1,
                         Some(crate::Outcome::CandidateWin) => candidate_wins += 1,
-                        Some(crate::Outcome::Draw) => {}
+                        Some(crate::Outcome::Draw) => draws += 1,
                         None => {
                             return Err(VeridictError::UnrecognizedOutcome {
                                 line: *line,
@@ -135,7 +136,7 @@ pub fn compute(
         if !used {
             return Err(VeridictError::SchemaMismatch {
                 line: *line,
-                metric,
+                context: metric_label(metric),
                 detail: "record has no fields usable by this metric and no status fields"
                     .to_string(),
             });
@@ -156,6 +157,16 @@ pub fn compute(
             invalid,
             failures,
         ),
+        MetricKind::Elo => compute_elo(
+            baseline_wins,
+            candidate_wins,
+            draws,
+            confidence,
+            timeouts,
+            crashes,
+            invalid,
+            failures,
+        ),
         MetricKind::MeanDiff => Ok(compute_mean_diff(
             &diffs, confidence, resamples, seed, timeouts, crashes, invalid, failures,
         )),
@@ -165,7 +176,18 @@ pub fn compute(
     }
 }
 
-fn tally_status(
+/// A record-level `SchemaMismatch` needs a short label for what it failed
+/// to match; matches the CLI's `--metric` spelling.
+pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
+    match metric {
+        MetricKind::WinRate => "metric winrate",
+        MetricKind::MeanDiff => "metric mean-diff",
+        MetricKind::SignTest => "metric sign-test",
+        MetricKind::Elo => "metric elo",
+    }
+}
+
+pub(crate) fn tally_status(
     raw: &str,
     line: usize,
     field: &'static str,
@@ -232,6 +254,57 @@ fn compute_winrate(
         effect: p_hat - 0.5,
         ci_low: lo - 0.5,
         ci_high: hi - 0.5,
+        baseline_count: baseline_wins,
+        candidate_count: candidate_wins,
+        paired_count: n,
+        timeouts,
+        crashes,
+        invalid,
+        failures,
+        warning: None,
+    })
+}
+
+/// Elo difference from win/loss/draw counts: `score = (candidate_wins + 0.5
+/// * draws) / n`, converted via the standard logistic Elo model. The score
+/// rate's Wilson CI treats each trial as a plain Bernoulli draw, which
+/// overstates variance versus the true trinomial distribution (a draw's
+/// half-point carries less variance than a coin flip) - a deliberately
+/// conservative (too-wide, never too-narrow) approximation, same tradeoff
+/// already accepted for `sign-test`.
+#[allow(clippy::too_many_arguments)]
+fn compute_elo(
+    baseline_wins: u64,
+    candidate_wins: u64,
+    draws: u64,
+    confidence: f64,
+    timeouts: u64,
+    crashes: u64,
+    invalid: u64,
+    failures: FailureBreakdown,
+) -> Result<MetricOutput, VeridictError> {
+    let n = baseline_wins + candidate_wins + draws;
+    if n == 0 {
+        return Ok(MetricOutput {
+            effect: 0.0,
+            ci_low: 0.0,
+            ci_high: 0.0,
+            baseline_count: 0,
+            candidate_count: 0,
+            paired_count: 0,
+            timeouts,
+            crashes,
+            invalid,
+            failures,
+            warning: Some("no trials to compute an Elo difference".to_string()),
+        });
+    }
+    let score = (candidate_wins as f64 + 0.5 * draws as f64) / n as f64;
+    let (lo, hi) = wilson::wilson_ci_from_proportion(score, n as f64, confidence)?;
+    Ok(MetricOutput {
+        effect: elo::elo_from_score(score),
+        ci_low: elo::elo_from_score(lo),
+        ci_high: elo::elo_from_score(hi),
         baseline_count: baseline_wins,
         candidate_count: candidate_wins,
         paired_count: n,
@@ -473,6 +546,35 @@ mod tests {
     fn sign_test_all_ties_is_zero_n_warning() {
         let records = vec![(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
         let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED).unwrap();
+        assert!(out.warning.is_some());
+    }
+
+    #[test]
+    fn elo_counts_draws_as_half_a_point() {
+        let records = vec![
+            (1, rec("a", None, None, Some("candidate_win"), None, None)),
+            (2, rec("b", None, None, Some("draw"), None, None)),
+        ];
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
+        // score = (1 + 0.5) / 2 = 0.75 -> a positive Elo effect.
+        assert!(out.effect > 0.0);
+        assert_eq!(out.paired_count, 2);
+    }
+
+    #[test]
+    fn elo_even_record_is_zero_effect() {
+        let records = vec![
+            (1, rec("a", None, None, Some("candidate_win"), None, None)),
+            (2, rec("b", None, None, Some("baseline_win"), None, None)),
+        ];
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
+        assert!(out.effect.abs() < 1e-9);
+    }
+
+    #[test]
+    fn elo_zero_trials_is_a_warning_not_an_error() {
+        let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
+        let out = compute(&records, MetricKind::Elo, 0.95, 1000, SEED).unwrap();
         assert!(out.warning.is_some());
     }
 }

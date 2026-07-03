@@ -30,23 +30,21 @@ pub struct Report {
     pub reason: String,
 }
 
-/// A metric's effect/CI/thresholds are proportions (winrate, sign-test) or
-/// raw units (mean-diff); proportions read better as percentage points.
-fn is_proportion(metric: MetricKind) -> bool {
-    matches!(metric, MetricKind::WinRate | MetricKind::SignTest)
-}
-
+/// A metric's effect/CI/thresholds are proportions (winrate, sign-test),
+/// Elo points, or raw input units (mean-diff); each reads better in its own
+/// unit than as a bare float.
 fn fmt_effect(metric: MetricKind, value: f64) -> String {
-    if is_proportion(metric) {
-        format!("{:+.1} pp", value * 100.0)
-    } else {
-        format!("{value:+.4}")
+    match metric {
+        MetricKind::WinRate | MetricKind::SignTest => format!("{:+.1} pp", value * 100.0),
+        MetricKind::Elo => format!("{value:+.1} elo"),
+        MetricKind::MeanDiff => format!("{value:+.4}"),
     }
 }
 
 /// Renders any `Serialize`-derived enum via its own serde representation,
-/// so Markdown output can never drift from the JSON field it mirrors.
-fn serde_str<T: Serialize>(value: &T) -> String {
+/// so Markdown output can never drift from the JSON field it mirrors. Also
+/// used by `sprt`'s report, which shares the same `Verdict` type.
+pub(crate) fn serde_str<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -182,6 +180,15 @@ mod tests {
         report.effect = 0.032;
         let md = report.to_markdown();
         assert!(md.contains("+0.0320"));
+    }
+
+    #[test]
+    fn markdown_reports_effect_in_elo_units() {
+        let mut report = sample_report();
+        report.metric = MetricKind::Elo;
+        report.effect = 12.3;
+        let md = report.to_markdown();
+        assert!(md.contains("+12.3 elo"));
     }
 
     #[test]

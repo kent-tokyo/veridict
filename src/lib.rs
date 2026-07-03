@@ -7,6 +7,7 @@ pub mod error;
 pub mod input;
 pub mod metrics;
 pub mod report;
+pub mod sprt;
 pub mod stats;
 pub mod verdict;
 
@@ -73,6 +74,8 @@ pub enum MetricKind {
     MeanDiff,
     #[serde(rename = "sign-test")]
     SignTest,
+    #[serde(rename = "elo")]
+    Elo,
 }
 
 /// Runs one metric end to end: classify records, compute its effect and

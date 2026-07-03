@@ -1,5 +1,3 @@
-use crate::MetricKind;
-
 /// All errors the library can return. Every variant represents bad input or
 /// bad configuration; the CLI maps every one of them to exit code 3.
 #[derive(Debug, thiserror::Error)]
@@ -18,10 +16,15 @@ pub enum VeridictError {
         source: csv::Error,
     },
 
-    #[error("line {line}: record incompatible with metric {metric:?}: {detail}")]
+    /// `context` names what was being computed (e.g. "metric winrate",
+    /// "sprt") when a record turned out to carry none of the fields that
+    /// computation understands. A plain label rather than `MetricKind`
+    /// because not every consumer of this error is a `MetricKind` (SPRT
+    /// isn't one of the `compare` metrics).
+    #[error("line {line}: record incompatible with {context}: {detail}")]
     SchemaMismatch {
         line: usize,
-        metric: MetricKind,
+        context: &'static str,
         detail: String,
     },
 

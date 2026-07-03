@@ -255,3 +255,89 @@ fn report_md_flag_writes_markdown_file() {
     assert!(contents.contains("# Veridict Report"));
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn elo_metric_clear_pass_exits_zero() {
+    let stdin = (0..30)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .chain((0..10).map(|_| "{\"result\":\"baseline_win\"}\n"))
+        .collect::<String>();
+    veridict()
+        .args(["compare", "-", "--metric", "elo", "--min-effect", "10"])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"metric\": \"elo\""));
+}
+
+#[test]
+fn sprt_clear_h1_stream_passes() {
+    let stdin = (0..200)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""));
+}
+
+#[test]
+fn sprt_clear_h0_stream_fails() {
+    let stdin = (0..200)
+        .map(|_| "{\"result\":\"baseline_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
+        .write_stdin(stdin)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"verdict\": \"fail\""));
+}
+
+#[test]
+fn sprt_small_sample_stays_inconclusive() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""));
+}
+
+#[test]
+fn sprt_rejects_elo0_not_less_than_elo1() {
+    veridict()
+        .args(["sprt", "-", "--elo0", "10", "--elo1", "0"])
+        .write_stdin("{\"result\":\"draw\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("error:"));
+}
+
+#[test]
+fn sprt_report_md_flag_writes_markdown_file() {
+    let path = std::env::temp_dir().join("veridict_cli_test_sprt_report.md");
+    let stdin = (0..200)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--report-md",
+            path.to_str().unwrap(),
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0);
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("# Veridict SPRT Report"));
+    std::fs::remove_file(&path).ok();
+}
