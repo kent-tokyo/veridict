@@ -2,11 +2,12 @@
 //! output and exit codes; the library itself never prints.
 
 use std::io::{self, BufRead, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
 use veridict::{MetricKind, Verdict, VeridictError, input};
 
@@ -29,11 +30,18 @@ enum Command {
 
 #[derive(clap::Args)]
 struct CompareArgs {
-    /// JSONL input file. Use "-" to read from stdin.
+    /// Input file. Use "-" to read from stdin.
     input: PathBuf,
 
+    /// Repeat to run several metrics against the same input and combine
+    /// them into one verdict (fail dominates, then inconclusive, then pass).
+    #[arg(long = "metric", value_enum, required = true)]
+    metrics: Vec<MetricArg>,
+
+    /// Input format. Defaults to sniffing the file extension (.csv vs
+    /// everything else); pass explicitly when reading CSV from stdin.
     #[arg(long, value_enum)]
-    metric: MetricArg,
+    format: Option<FormatArg>,
 
     #[arg(long, default_value_t = 0.95)]
     confidence: f64,
@@ -54,15 +62,25 @@ struct CompareArgs {
     #[arg(long, default_value_t = 10_000)]
     resamples: usize,
 
+    /// Bootstrap RNG seed, used only by --metric mean-diff. Defaults to a
+    /// fixed seed, so the same input reproduces bit-identical output in CI.
+    #[arg(long)]
+    seed: Option<u64>,
+
     /// Also write the JSON report to this file.
     #[arg(long)]
     report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum MetricArg {
     Winrate,
     MeanDiff,
+    SignTest,
 }
 
 impl From<MetricArg> for MetricKind {
@@ -70,8 +88,15 @@ impl From<MetricArg> for MetricKind {
         match m {
             MetricArg::Winrate => MetricKind::WinRate,
             MetricArg::MeanDiff => MetricKind::MeanDiff,
+            MetricArg::SignTest => MetricKind::SignTest,
         }
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum FormatArg {
+    Jsonl,
+    Csv,
 }
 
 fn main() -> ExitCode {
@@ -93,19 +118,37 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
         _ => Thresholds::symmetric(args.min_effect.unwrap_or(0.0))?,
     };
 
-    let reader = open_input(&args.input)?;
-    let records: Vec<(usize, input::Record)> =
-        input::parse_jsonl(reader).collect::<Result<_, _>>()?;
+    let format = resolve_format(&args.input, args.format);
+    let records = read_records(&args.input, format)?;
+    let seed = args.seed.unwrap_or(DEFAULT_SEED);
+    let metrics: Vec<MetricKind> = args.metrics.into_iter().map(Into::into).collect();
 
-    let report = veridict::compare(
-        &records,
-        args.metric.into(),
-        args.confidence,
-        &thresholds,
-        args.resamples,
-    )?;
+    let (verdict, json, markdown) = if let [only] = metrics[..] {
+        let report = veridict::compare_one(
+            &records,
+            only,
+            args.confidence,
+            &thresholds,
+            args.resamples,
+            seed,
+        )?;
+        (
+            report.verdict,
+            report.to_json_pretty(),
+            report.to_markdown(),
+        )
+    } else {
+        let multi = veridict::compare_many(
+            &records,
+            &metrics,
+            args.confidence,
+            &thresholds,
+            args.resamples,
+            seed,
+        )?;
+        (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
+    };
 
-    let json = report.to_json_pretty();
     println!("{json}");
     if let Some(path) = &args.report_json {
         std::fs::write(path, &json).map_err(|source| VeridictError::Io {
@@ -113,12 +156,36 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
             source,
         })?;
     }
+    if let Some(path) = &args.report_md {
+        std::fs::write(path, &markdown).map_err(|source| VeridictError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
 
-    Ok(match report.verdict {
+    Ok(match verdict {
         Verdict::Pass => ExitCode::from(0),
         Verdict::Fail => ExitCode::from(1),
         Verdict::Inconclusive => ExitCode::from(2),
     })
+}
+
+fn resolve_format(path: &Path, explicit: Option<FormatArg>) -> FormatArg {
+    explicit.unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("csv") => FormatArg::Csv,
+        _ => FormatArg::Jsonl,
+    })
+}
+
+fn read_records(
+    path: &PathBuf,
+    format: FormatArg,
+) -> Result<Vec<(usize, input::Record)>, VeridictError> {
+    let reader = open_input(path)?;
+    match format {
+        FormatArg::Jsonl => input::parse_jsonl(reader).collect(),
+        FormatArg::Csv => input::parse_csv(reader).collect(),
+    }
 }
 
 fn open_input(path: &PathBuf) -> Result<Box<dyn BufRead>, VeridictError> {

@@ -3,26 +3,30 @@
 //! Method: percentile bootstrap (not bias-corrected/accelerated — BCa is
 //! materially more code and isn't needed for an MVP regression gate).
 //!
-//! Seeding: a fixed internal seed, not a CLI flag. AGENTS.md lists
-//! "deterministic bootstrap seed" (i.e. user-chosen seed) as a Phase 2 item,
-//! but CI-friendly determinism itself is required now — a fixed seed gives
-//! bit-identical output across runs of the same input without adding CLI
-//! surface for a user-chosen seed.
+//! Seeding: caller-supplied, defaulting to `DEFAULT_SEED` (see `--seed` on
+//! the CLI). Same input + same seed gives bit-identical output across runs,
+//! which is what CI needs; the seed is configurable per AGENTS.md's Phase 2
+//! "deterministic bootstrap seed" item.
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
-const FIXED_SEED: u64 = 0x5EED;
+pub const DEFAULT_SEED: u64 = 0x5EED;
 
 /// 95% (or whatever `confidence` requests) percentile bootstrap CI for the
 /// mean of `diffs`. The point estimate `effect` comes from the original
 /// sample, not from the resampled means. `diffs` must be non-empty.
-pub fn bootstrap_mean_diff_ci(diffs: &[f64], confidence: f64, resamples: usize) -> (f64, f64) {
+pub fn bootstrap_mean_diff_ci(
+    diffs: &[f64],
+    confidence: f64,
+    resamples: usize,
+    seed: u64,
+) -> (f64, f64) {
     debug_assert!(!diffs.is_empty(), "bootstrap called with empty sample");
     debug_assert!(resamples > 0, "bootstrap called with zero resamples");
 
     let n = diffs.len();
-    let mut rng = StdRng::seed_from_u64(FIXED_SEED);
+    let mut rng = StdRng::seed_from_u64(seed);
     let mut means: Vec<f64> = Vec::with_capacity(resamples);
 
     for _ in 0..resamples {
@@ -55,16 +59,24 @@ mod tests {
     #[test]
     fn deterministic_across_calls() {
         let diffs = vec![0.1, 0.2, -0.05, 0.3, 0.0, 0.15];
-        let (lo1, hi1) = bootstrap_mean_diff_ci(&diffs, 0.95, 2000);
-        let (lo2, hi2) = bootstrap_mean_diff_ci(&diffs, 0.95, 2000);
+        let (lo1, hi1) = bootstrap_mean_diff_ci(&diffs, 0.95, 2000, DEFAULT_SEED);
+        let (lo2, hi2) = bootstrap_mean_diff_ci(&diffs, 0.95, 2000, DEFAULT_SEED);
         assert_eq!(lo1, lo2);
         assert_eq!(hi1, hi2);
     }
 
     #[test]
+    fn different_seed_can_change_output() {
+        let diffs = vec![0.1, 0.2, -0.05, 0.3, 0.0, 0.15, 0.4, -0.2, 0.05, 0.25];
+        let a = bootstrap_mean_diff_ci(&diffs, 0.95, 2000, DEFAULT_SEED);
+        let b = bootstrap_mean_diff_ci(&diffs, 0.95, 2000, 42);
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn brackets_true_mean() {
         let diffs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let (lo, hi) = bootstrap_mean_diff_ci(&diffs, 0.95, 5000);
+        let (lo, hi) = bootstrap_mean_diff_ci(&diffs, 0.95, 5000, DEFAULT_SEED);
         assert!(
             lo <= 3.0 && 3.0 <= hi,
             "expected [{lo}, {hi}] to bracket 3.0"
@@ -74,7 +86,7 @@ mod tests {
     #[test]
     fn single_sample_no_panic() {
         let diffs = vec![2.5];
-        let (lo, hi) = bootstrap_mean_diff_ci(&diffs, 0.95, 1000);
+        let (lo, hi) = bootstrap_mean_diff_ci(&diffs, 0.95, 1000, DEFAULT_SEED);
         assert!(lo.is_finite() && hi.is_finite());
         assert_eq!(lo, 2.5);
         assert_eq!(hi, 2.5);

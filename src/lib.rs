@@ -11,7 +11,7 @@ pub mod stats;
 pub mod verdict;
 
 pub use error::VeridictError;
-pub use report::Report;
+pub use report::{MultiReport, Report};
 
 use serde::Serialize;
 
@@ -71,19 +71,21 @@ pub enum MetricKind {
     WinRate,
     #[serde(rename = "mean-diff")]
     MeanDiff,
+    #[serde(rename = "sign-test")]
+    SignTest,
 }
 
-/// Runs the full pipeline: classify records, compute the metric's effect and
-/// confidence interval, and apply the pass/fail thresholds. This is the only
-/// function the CLI needs to call.
-pub fn compare(
+/// Runs one metric end to end: classify records, compute its effect and
+/// confidence interval, and apply the pass/fail thresholds.
+pub fn compare_one(
     records: &[(usize, input::Record)],
     metric: MetricKind,
     confidence: f64,
     thresholds: &verdict::Thresholds,
     resamples: usize,
+    seed: u64,
 ) -> Result<Report, VeridictError> {
-    let out = metrics::compute(records, metric, confidence, resamples)?;
+    let out = metrics::compute(records, metric, confidence, resamples, seed)?;
 
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
@@ -103,17 +105,42 @@ pub fn compare(
         confidence,
         ci_low: out.ci_low,
         ci_high: out.ci_high,
+        pass_above: thresholds.pass_above,
+        fail_below: thresholds.fail_below,
         timeouts: out.timeouts,
         crashes: out.crashes,
         invalid: out.invalid,
+        failure_breakdown: out.failures,
         reason,
     })
+}
+
+/// Runs several metrics against the same records and thresholds, and
+/// combines them into one overall verdict: `Fail` if any metric fails,
+/// else `Inconclusive` if any metric is inconclusive, else `Pass`. Matches
+/// the "a false pass is worse than an inconclusive result" rule: one
+/// metric failing sinks the whole run.
+pub fn compare_many(
+    records: &[(usize, input::Record)],
+    metrics: &[MetricKind],
+    confidence: f64,
+    thresholds: &verdict::Thresholds,
+    resamples: usize,
+    seed: u64,
+) -> Result<MultiReport, VeridictError> {
+    let reports = metrics
+        .iter()
+        .map(|&metric| compare_one(records, metric, confidence, thresholds, resamples, seed))
+        .collect::<Result<Vec<_>, _>>()?;
+    let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
+    Ok(MultiReport { verdict, reports })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::input::Record;
+    use crate::stats::bootstrap::DEFAULT_SEED;
     use crate::verdict::Thresholds;
 
     fn rec(
@@ -164,7 +191,15 @@ mod tests {
             ));
         }
         let thresholds = Thresholds::symmetric(0.02).unwrap();
-        let report = compare(&records, MetricKind::WinRate, 0.95, &thresholds, 2000).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
         assert_eq!(report.candidate_count, 80);
         assert_eq!(report.baseline_count, 20);
@@ -177,7 +212,15 @@ mod tests {
             (2, rec("b", Some(2.0), Some(1.9), None, None, None)),
         ];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
-        let report = compare(&records, MetricKind::MeanDiff, 0.95, &thresholds, 2000).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::MeanDiff,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
     }
 
@@ -185,7 +228,15 @@ mod tests {
     fn zero_usable_trials_is_inconclusive_not_error() {
         let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
-        let report = compare(&records, MetricKind::WinRate, 0.95, &thresholds, 2000).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
         assert_eq!(report.timeouts, 1);
     }
@@ -194,7 +245,80 @@ mod tests {
     fn empty_input_is_an_error() {
         let records: Vec<(usize, Record)> = Vec::new();
         let thresholds = Thresholds::symmetric(0.02).unwrap();
-        let result = compare(&records, MetricKind::WinRate, 0.95, &thresholds, 2000);
+        let result = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
+    }
+
+    #[test]
+    fn compare_many_passes_overall_when_every_metric_passes() {
+        let records: Vec<_> = (0..20)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        Some(1.0),
+                        Some(2.0),
+                        Some("candidate_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(0.1).unwrap();
+        let report = compare_many(
+            &records,
+            &[MetricKind::WinRate, MetricKind::MeanDiff],
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Pass);
+        assert_eq!(report.reports.len(), 2);
+    }
+
+    #[test]
+    fn compare_many_fails_overall_if_any_metric_fails() {
+        // Each record carries both fields: result says the candidate always
+        // loses (winrate -> Fail), but the numeric score always favors the
+        // candidate (mean-diff -> Pass). Fail must dominate the aggregate.
+        let records: Vec<_> = (0..20)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        Some(1.0),
+                        Some(2.0),
+                        Some("baseline_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(0.1).unwrap();
+        let report = compare_many(
+            &records,
+            &[MetricKind::WinRate, MetricKind::MeanDiff],
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+        )
+        .unwrap();
+        assert_eq!(report.reports[0].verdict, Verdict::Fail);
+        assert_eq!(report.reports[1].verdict, Verdict::Pass);
+        assert_eq!(report.verdict, Verdict::Fail);
     }
 }

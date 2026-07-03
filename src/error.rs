@@ -11,6 +11,13 @@ pub enum VeridictError {
         source: serde_json::Error,
     },
 
+    #[error("invalid CSV on line {line}: {source}")]
+    InvalidCsv {
+        line: usize,
+        #[source]
+        source: csv::Error,
+    },
+
     #[error("line {line}: record incompatible with metric {metric:?}: {detail}")]
     SchemaMismatch {
         line: usize,

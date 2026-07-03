@@ -5,7 +5,7 @@
 //! match any variant" error on mismatch, which conflicts with the
 //! requirement that bad input produce a clear, line-numbered error.
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 
 use serde::Deserialize;
 
@@ -52,6 +52,32 @@ pub fn parse_jsonl<R: BufRead>(
     })
 }
 
+/// Parses one record per CSV row, using the header row to map columns onto
+/// `Record`'s fields (same field names as the JSONL shape: id, baseline,
+/// candidate, result, baseline_status, candidate_status). Empty cells
+/// deserialize to `None`, same as an absent JSON field.
+///
+/// // ponytail: line numbers here are record indices (header=1, first data
+/// // row=2), not physical file lines; a quoted field containing a newline
+/// // will make this number diverge from `wc -l`. Upgrade to
+/// // `csv::Error::position()` if that precision is ever needed.
+pub fn parse_csv<R: Read>(
+    reader: R,
+) -> impl Iterator<Item = Result<(usize, Record), VeridictError>> {
+    let rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(reader);
+    rdr.into_deserialize::<Record>()
+        .enumerate()
+        .map(|(idx, result)| {
+            let line = idx + 2;
+            match result {
+                Ok(record) => Ok((line, record)),
+                Err(source) => Err(VeridictError::InvalidCsv { line, source }),
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +118,32 @@ mod tests {
         match &results[1] {
             Err(VeridictError::InvalidJson { line, .. }) => assert_eq!(*line, 2),
             other => panic!("expected InvalidJson on line 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_csv_with_empty_cells_as_none() {
+        let input = "id,baseline,candidate,result,baseline_status,candidate_status\n\
+                      case-001,0.81,0.84,,,\n\
+                      case-002,,,candidate_win,,\n\
+                      case-004,,,,ok,timeout\n";
+        let records: Vec<_> = parse_csv(Cursor::new(input))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].1.baseline, Some(0.81));
+        assert_eq!(records[0].1.result, None);
+        assert_eq!(records[1].1.result.as_deref(), Some("candidate_win"));
+        assert_eq!(records[2].1.candidate_status.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn malformed_csv_reports_a_record_number() {
+        let input = "id,baseline,candidate\ncase-001,not-a-number,0.5\n";
+        let results: Vec<_> = parse_csv(Cursor::new(input)).collect();
+        match &results[0] {
+            Err(VeridictError::InvalidCsv { line, .. }) => assert_eq!(*line, 2),
+            other => panic!("expected InvalidCsv on line 2, got {other:?}"),
         }
     }
 }

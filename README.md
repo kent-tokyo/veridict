@@ -1,7 +1,7 @@
 # veridict
 
 A small, domain-agnostic evaluation gate: decide whether a candidate is
-actually better than a baseline, from a JSONL file of trial results.
+actually better than a baseline, from a file of trial results.
 
 `veridict` is not a benchmark runner or an experiment tracker. It is the
 statistical decision layer that consumes results and returns a verdict:
@@ -34,13 +34,22 @@ veridict compare results.jsonl \
   --fail-below -0.01 \
   --pass-above 0.02 \
   --confidence 0.95 \
-  --report-json report.json
+  --report-json report.json \
+  --report-md report.md
 ```
 
 Read from stdin with `-`:
 
 ```bash
 cat results.jsonl | veridict compare - --metric winrate
+```
+
+Run several metrics against the same input in one pass; the overall verdict
+is the strictest of the individual ones (any `fail` wins, then any
+`inconclusive`, else `pass`):
+
+```bash
+veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
 ### Exit codes
@@ -54,10 +63,12 @@ cat results.jsonl | veridict compare - --metric winrate
 
 ## Input format
 
-One JSON object per line. See `examples/`:
+One record per line: JSONL by default, or CSV (`--format csv`, or
+auto-detected from a `.csv` file extension). Both share the same fields.
+See `examples/`:
 
-* `examples/winloss.jsonl` - win/loss/draw records, for `--metric winrate`.
-* `examples/paired_scores.jsonl` - paired baseline/candidate scores, for `--metric mean-diff`.
+* `examples/winloss.jsonl` - win/loss/draw records, for `--metric winrate` / `--metric sign-test`.
+* `examples/paired_scores.jsonl` - paired baseline/candidate scores, for `--metric mean-diff` / `--metric sign-test`.
 * `examples/status_failures.jsonl` - all supported record shapes together, illustrating the format (not meant to be run against a single metric as-is: a record must carry a field the chosen metric understands, or a `baseline_status`/`candidate_status` field, or it is rejected as a schema mismatch).
 
 ```json
@@ -68,16 +79,36 @@ One JSON object per line. See `examples/`:
 {"id":"case-005","baseline_status":"ok","candidate_status":"invalid"}
 ```
 
+Same shape as CSV, with empty cells treated as absent fields:
+
+```csv
+id,baseline,candidate,result,baseline_status,candidate_status
+case-001,0.81,0.84,,,
+case-002,,,candidate_win,,
+case-004,,,,ok,timeout
+```
+
 ## Metrics
 
 * **`winrate`** - Wilson score interval on decisive (non-draw) `result`
-  records. `effect`/`ci_low`/`ci_high` are centered on 0 (deviation from a
-  50/50 split), so they compose directly with `--min-effect`.
+  records.
+* **`sign-test`** - Wilson score interval on the proportion of paired
+  numeric records where the candidate beat the baseline (ties excluded).
+  Nonparametric alternative to `mean-diff`: only the direction of each pair
+  matters, not its magnitude.
 * **`mean-diff`** - percentile bootstrap confidence interval on
-  `candidate - baseline` for paired numeric records.
+  `candidate - baseline` for paired numeric records. `--resamples` controls
+  the bootstrap sample count; `--seed` controls its RNG seed (fixed by
+  default, so output is bit-identical across CI runs of the same input).
+
+`winrate` and `sign-test` report `effect`/`ci_low`/`ci_high` centered on 0
+(deviation from a 50/50 split), so they compose directly with
+`--min-effect`. `mean-diff` reports them in the input's own units.
 
 Every trial's `baseline_status`/`candidate_status` (`timeout`, `crash`,
-`invalid`) is tallied and reported regardless of which metric you run.
+`invalid`) is tallied and reported regardless of which metric you run, both
+combined and broken down by which side failed (`failure_breakdown` in the
+JSON report).
 
 ## Verdict logic
 

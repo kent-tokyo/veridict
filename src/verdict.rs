@@ -41,6 +41,24 @@ impl Thresholds {
     }
 }
 
+/// Combines several metrics' verdicts into one overall verdict for a
+/// multi-metric run: any `Fail` sinks the whole run, else any
+/// `Inconclusive` holds it back, else `Pass`. An empty iterator has nothing
+/// to fail or hold back on, so it counts as `Pass` (compare_many never
+/// calls this with zero metrics in practice, since the CLI requires at
+/// least one `--metric`).
+pub fn aggregate(verdicts: impl IntoIterator<Item = Verdict>) -> Verdict {
+    let mut worst = Verdict::Pass;
+    for v in verdicts {
+        match v {
+            Verdict::Fail => return Verdict::Fail,
+            Verdict::Inconclusive => worst = Verdict::Inconclusive,
+            Verdict::Pass => {}
+        }
+    }
+    worst
+}
+
 pub fn decide(ci_low: f64, ci_high: f64, thresholds: &Thresholds) -> (Verdict, String) {
     if ci_low >= thresholds.pass_above {
         (
@@ -72,6 +90,24 @@ pub fn decide(ci_low: f64, ci_high: f64, thresholds: &Thresholds) -> (Verdict, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregate_fail_dominates_pass() {
+        let v = aggregate([Verdict::Pass, Verdict::Fail, Verdict::Pass]);
+        assert_eq!(v, Verdict::Fail);
+    }
+
+    #[test]
+    fn aggregate_inconclusive_holds_back_pass() {
+        let v = aggregate([Verdict::Pass, Verdict::Inconclusive, Verdict::Pass]);
+        assert_eq!(v, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn aggregate_all_pass_is_pass() {
+        let v = aggregate([Verdict::Pass, Verdict::Pass]);
+        assert_eq!(v, Verdict::Pass);
+    }
 
     #[test]
     fn passes_when_lower_bound_clears_threshold() {

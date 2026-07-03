@@ -7,10 +7,28 @@
 
 use std::collections::HashSet;
 
+use serde::Serialize;
+
 use crate::error::VeridictError;
 use crate::input::Record;
 use crate::stats::{bootstrap, wilson};
 use crate::{MetricKind, TrialStatus};
+
+/// Per-side failure tally, so a report can distinguish "the baseline kept
+/// crashing" from "the candidate kept timing out" instead of one opaque
+/// combined number.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct FailureCounts {
+    pub timeout: u64,
+    pub crash: u64,
+    pub invalid: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct FailureBreakdown {
+    pub baseline: FailureCounts,
+    pub candidate: FailureCounts,
+}
 
 /// Everything the report needs from a metric computation, before thresholds
 /// are applied.
@@ -24,6 +42,7 @@ pub struct MetricOutput {
     pub timeouts: u64,
     pub crashes: u64,
     pub invalid: u64,
+    pub failures: FailureBreakdown,
     /// Set when there were zero trials usable by the metric; the caller must
     /// treat this as Inconclusive rather than running it through thresholds.
     pub warning: Option<String>,
@@ -34,6 +53,7 @@ pub fn compute(
     metric: MetricKind,
     confidence: f64,
     resamples: usize,
+    seed: u64,
 ) -> Result<MetricOutput, VeridictError> {
     if records.is_empty() {
         return Err(VeridictError::EmptyInput);
@@ -42,13 +62,14 @@ pub fn compute(
         return Err(VeridictError::InvalidConfidence(confidence));
     }
 
-    let mut timeouts = 0u64;
-    let mut crashes = 0u64;
-    let mut invalid = 0u64;
+    let mut failures = FailureBreakdown::default();
 
     let mut baseline_wins = 0u64;
     let mut candidate_wins = 0u64;
 
+    // Shared by MeanDiff and SignTest: both need a paired (baseline,
+    // candidate) numeric observation per record; they only differ in how
+    // that observation is turned into an effect size below.
     let mut diffs: Vec<f64> = Vec::new();
     let mut seen_ids: HashSet<&str> = HashSet::new();
 
@@ -57,25 +78,11 @@ pub fn compute(
 
         if let Some(status) = record.baseline_status.as_deref() {
             used = true;
-            tally_status(
-                status,
-                *line,
-                "baseline_status",
-                &mut timeouts,
-                &mut crashes,
-                &mut invalid,
-            )?;
+            tally_status(status, *line, "baseline_status", &mut failures.baseline)?;
         }
         if let Some(status) = record.candidate_status.as_deref() {
             used = true;
-            tally_status(
-                status,
-                *line,
-                "candidate_status",
-                &mut timeouts,
-                &mut crashes,
-                &mut invalid,
-            )?;
+            tally_status(status, *line, "candidate_status", &mut failures.candidate)?;
         }
 
         match metric {
@@ -95,7 +102,7 @@ pub fn compute(
                     }
                 }
             }
-            MetricKind::MeanDiff => {
+            MetricKind::MeanDiff | MetricKind::SignTest => {
                 if let (Some(b), Some(c)) = (record.baseline, record.candidate) {
                     if !b.is_finite() {
                         return Err(VeridictError::InvalidValue {
@@ -135,18 +142,26 @@ pub fn compute(
         }
     }
 
+    let timeouts = failures.baseline.timeout + failures.candidate.timeout;
+    let crashes = failures.baseline.crash + failures.candidate.crash;
+    let invalid = failures.baseline.invalid + failures.candidate.invalid;
+
     match metric {
-        MetricKind::WinRate => Ok(compute_winrate(
+        MetricKind::WinRate => compute_winrate(
             baseline_wins,
             candidate_wins,
             confidence,
             timeouts,
             crashes,
             invalid,
-        )?),
+            failures,
+        ),
         MetricKind::MeanDiff => Ok(compute_mean_diff(
-            &diffs, confidence, resamples, timeouts, crashes, invalid,
+            &diffs, confidence, resamples, seed, timeouts, crashes, invalid, failures,
         )),
+        MetricKind::SignTest => {
+            compute_sign_test(&diffs, confidence, timeouts, crashes, invalid, failures)
+        }
     }
 }
 
@@ -154,22 +169,20 @@ fn tally_status(
     raw: &str,
     line: usize,
     field: &'static str,
-    timeouts: &mut u64,
-    crashes: &mut u64,
-    invalid: &mut u64,
+    counts: &mut FailureCounts,
 ) -> Result<(), VeridictError> {
     match TrialStatus::parse(raw) {
         Some(TrialStatus::Ok) => Ok(()),
         Some(TrialStatus::Timeout) => {
-            *timeouts += 1;
+            counts.timeout += 1;
             Ok(())
         }
         Some(TrialStatus::Crash) => {
-            *crashes += 1;
+            counts.crash += 1;
             Ok(())
         }
         Some(TrialStatus::Invalid) => {
-            *invalid += 1;
+            counts.invalid += 1;
             Ok(())
         }
         None => Err(VeridictError::UnrecognizedStatus {
@@ -187,6 +200,7 @@ fn tally_status(
 /// `effect`/`ci_low`/`ci_high` are centered on 0 (deviation from a 50/50
 /// split) so they compose with `--min-effect`/`--pass-above`/`--fail-below`,
 /// which are expressed as signed deltas.
+#[allow(clippy::too_many_arguments)]
 fn compute_winrate(
     baseline_wins: u64,
     candidate_wins: u64,
@@ -194,6 +208,7 @@ fn compute_winrate(
     timeouts: u64,
     crashes: u64,
     invalid: u64,
+    failures: FailureBreakdown,
 ) -> Result<MetricOutput, VeridictError> {
     let n = baseline_wins + candidate_wins;
     if n == 0 {
@@ -207,6 +222,7 @@ fn compute_winrate(
             timeouts,
             crashes,
             invalid,
+            failures,
             warning: Some("no decisive (non-draw) trials to compute win rate".to_string()),
         });
     }
@@ -222,17 +238,21 @@ fn compute_winrate(
         timeouts,
         crashes,
         invalid,
+        failures,
         warning: None,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_mean_diff(
     diffs: &[f64],
     confidence: f64,
     resamples: usize,
+    seed: u64,
     timeouts: u64,
     crashes: u64,
     invalid: u64,
+    failures: FailureBreakdown,
 ) -> MetricOutput {
     if diffs.is_empty() {
         return MetricOutput {
@@ -245,11 +265,12 @@ fn compute_mean_diff(
             timeouts,
             crashes,
             invalid,
+            failures,
             warning: Some("no paired numeric trials to compute mean difference".to_string()),
         };
     }
     let effect = bootstrap::mean(diffs);
-    let (ci_low, ci_high) = bootstrap::bootstrap_mean_diff_ci(diffs, confidence, resamples);
+    let (ci_low, ci_high) = bootstrap::bootstrap_mean_diff_ci(diffs, confidence, resamples, seed);
     MetricOutput {
         effect,
         ci_low,
@@ -260,13 +281,66 @@ fn compute_mean_diff(
         timeouts,
         crashes,
         invalid,
+        failures,
         warning: None,
     }
+}
+
+/// Nonparametric alternative to `mean-diff`: only the *direction* of each
+/// pair's difference matters, not its magnitude. Ties (`candidate ==
+/// baseline`) are excluded from `n`, same treatment as draws in `winrate`.
+/// The proportion of positive signs is run through the same Wilson CI as
+/// `winrate` and centered the same way, since "is the sign test's underlying
+/// proportion above 50%, with what confidence" is exactly a binomial
+/// proportion question.
+fn compute_sign_test(
+    diffs: &[f64],
+    confidence: f64,
+    timeouts: u64,
+    crashes: u64,
+    invalid: u64,
+    failures: FailureBreakdown,
+) -> Result<MetricOutput, VeridictError> {
+    let positive = diffs.iter().filter(|d| **d > 0.0).count() as u64;
+    let negative = diffs.iter().filter(|d| **d < 0.0).count() as u64;
+    let n = positive + negative;
+    if n == 0 {
+        return Ok(MetricOutput {
+            effect: 0.0,
+            ci_low: 0.0,
+            ci_high: 0.0,
+            baseline_count: 0,
+            candidate_count: 0,
+            paired_count: 0,
+            timeouts,
+            crashes,
+            invalid,
+            failures,
+            warning: Some("no non-tied paired trials to compute the sign test".to_string()),
+        });
+    }
+    let (lo, hi) = wilson::wilson_ci(positive, n, confidence)?;
+    let p_hat = positive as f64 / n as f64;
+    Ok(MetricOutput {
+        effect: p_hat - 0.5,
+        ci_low: lo - 0.5,
+        ci_high: hi - 0.5,
+        baseline_count: negative,
+        candidate_count: positive,
+        paired_count: n,
+        timeouts,
+        crashes,
+        invalid,
+        failures,
+        warning: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SEED: u64 = bootstrap::DEFAULT_SEED;
 
     fn rec(
         id: &str,
@@ -293,7 +367,7 @@ mod tests {
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
             (3, rec("c", None, None, Some("draw"), None, None)),
         ];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
         assert_eq!(out.paired_count, 2);
         assert_eq!(out.candidate_count, 1);
     }
@@ -301,7 +375,7 @@ mod tests {
     #[test]
     fn winrate_all_draws_is_zero_n_warning() {
         let records = vec![(1, rec("a", None, None, Some("draw"), None, None))];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
         assert!(out.warning.is_some());
         assert_eq!(out.paired_count, 0);
     }
@@ -312,7 +386,7 @@ mod tests {
             (1, rec("a", Some(1.0), Some(1.5), None, None, None)),
             (2, rec("b", Some(2.0), Some(2.5), None, None, None)),
         ];
-        let out = compute(&records, MetricKind::MeanDiff, 0.95, 1000).unwrap();
+        let out = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED).unwrap();
         assert_eq!(out.paired_count, 2);
         assert!((out.effect - 0.5).abs() < 1e-9);
     }
@@ -320,7 +394,7 @@ mod tests {
     #[test]
     fn mean_diff_rejects_nan() {
         let records = vec![(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
-        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000);
+        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED);
         assert!(matches!(
             result,
             Err(VeridictError::InvalidValue {
@@ -336,28 +410,30 @@ mod tests {
             (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
-        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000);
+        let result = compute(&records, MetricKind::MeanDiff, 0.95, 1000, SEED);
         assert!(matches!(result, Err(VeridictError::DuplicateId { .. })));
     }
 
     #[test]
     fn status_only_records_count_but_are_not_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, Some("ok"), Some("timeout")))];
-        let out = compute(&records, MetricKind::WinRate, 0.95, 1000).unwrap();
+        let out = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED).unwrap();
         assert_eq!(out.timeouts, 1);
+        assert_eq!(out.failures.candidate.timeout, 1);
+        assert_eq!(out.failures.baseline.timeout, 0);
     }
 
     #[test]
     fn unusable_record_is_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, None, None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
     }
 
     #[test]
     fn unrecognized_status_is_an_error() {
         let records = vec![(1, rec("a", None, None, None, Some("bogus"), None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
         assert!(matches!(
             result,
             Err(VeridictError::UnrecognizedStatus { .. })
@@ -367,7 +443,7 @@ mod tests {
     #[test]
     fn unrecognized_outcome_is_an_error() {
         let records = vec![(1, rec("a", None, None, Some("bogus"), None, None))];
-        let result = compute(&records, MetricKind::WinRate, 0.95, 1000);
+        let result = compute(&records, MetricKind::WinRate, 0.95, 1000, SEED);
         assert!(matches!(
             result,
             Err(VeridictError::UnrecognizedOutcome { .. })
@@ -376,7 +452,27 @@ mod tests {
 
     #[test]
     fn empty_records_is_empty_input() {
-        let result = compute(&[], MetricKind::WinRate, 0.95, 1000);
+        let result = compute(&[], MetricKind::WinRate, 0.95, 1000, SEED);
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
+    }
+
+    #[test]
+    fn sign_test_excludes_ties() {
+        let records = vec![
+            (1, rec("a", Some(1.0), Some(1.5), None, None, None)), // positive
+            (2, rec("b", Some(2.0), Some(1.0), None, None, None)), // negative
+            (3, rec("c", Some(3.0), Some(3.0), None, None, None)), // tie, excluded
+        ];
+        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED).unwrap();
+        assert_eq!(out.paired_count, 2);
+        assert_eq!(out.candidate_count, 1);
+        assert_eq!(out.baseline_count, 1);
+    }
+
+    #[test]
+    fn sign_test_all_ties_is_zero_n_warning() {
+        let records = vec![(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
+        let out = compute(&records, MetricKind::SignTest, 0.95, 1000, SEED).unwrap();
+        assert!(out.warning.is_some());
     }
 }
