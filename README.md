@@ -76,6 +76,13 @@ is the strictest of the individual ones (any `fail` wins, then any
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
+Exact binomial CI on a small sample, BCa bootstrap on a skewed one:
+
+```bash
+veridict compare results.jsonl --metric winrate --ci-method exact
+veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
+```
+
 Sequential testing: keep feeding it results until it can confidently say
 the candidate is at least `--elo1` points stronger (pass), at most `--elo0`
 points stronger (fail), or it needs more data (inconclusive):
@@ -129,19 +136,27 @@ case-004,,,,ok,timeout
 
 ## Metrics
 
-* **`winrate`** - Wilson score interval on decisive (non-draw) `result`
-  records.
-* **`sign-test`** - Wilson score interval on the proportion of paired
-  numeric records where the candidate beat the baseline (ties excluded).
-  Nonparametric alternative to `mean-diff`: only the direction of each pair
-  matters, not its magnitude.
-* **`mean-diff`** - percentile bootstrap confidence interval on
-  `candidate - baseline` for paired numeric records. `--resamples` controls
-  the bootstrap sample count; `--seed` controls its RNG seed (fixed by
-  default, so output is bit-identical across CI runs of the same input).
+* **`winrate`** - confidence interval on decisive (non-draw) `result`
+  records. `--ci-method wilson` (default) or `--ci-method exact`
+  (Clopper-Pearson - exact coverage at any sample size, but always at least
+  as wide as Wilson's).
+* **`sign-test`** - same CI, on the proportion of paired numeric records
+  where the candidate beat the baseline (ties excluded). Nonparametric
+  alternative to `mean-diff`: only the direction of each pair matters, not
+  its magnitude. Also takes `--ci-method`.
+* **`mean-diff`** - bootstrap confidence interval on `candidate - baseline`
+  for paired numeric records. `--bootstrap-method percentile` (default) or
+  `--bootstrap-method bca` (bias-corrected and accelerated - corrects for a
+  skewed diff distribution; `percentile` stays the default so existing CI
+  numbers don't shift under you). `--resamples` controls the bootstrap
+  sample count; `--seed` controls its RNG seed (fixed by default, so output
+  is bit-identical across CI runs of the same input).
 * **`elo`** - Elo rating difference from win/loss/draw `result` records
   (draws count as half a win, unlike `winrate`/`sign-test` which exclude
-  them). Reported in Elo points, via the standard logistic model.
+  them). Reported in Elo points, via the standard logistic model. Doesn't
+  support `--ci-method exact`: its win rate is fractional (a draw is half a
+  win), and Clopper-Pearson's coverage guarantee only holds for a true
+  integer-count binomial.
 
 `winrate` and `sign-test` report `effect`/`ci_low`/`ci_high` centered on 0
 (deviation from a 50/50 split); `elo` is centered on 0 by construction (an
@@ -152,6 +167,30 @@ Every trial's `baseline_status`/`candidate_status` (`timeout`, `crash`,
 `invalid`) is tallied and reported regardless of which metric you run, both
 combined and broken down by which side failed (`failure_breakdown` in the
 JSON report).
+
+Requesting several `--metric` flags together scans the input once, feeding
+every record to every requested metric, rather than one full pass per
+metric.
+
+## Report extras
+
+Every `compare` report also carries two advisory fields that never affect
+`verdict`:
+
+* **`estimated_additional_trials`** - a rough estimate (`O(1/sqrt(n))` CI
+  scaling) of how many more trials would likely turn an `inconclusive`
+  result decisive, assuming the effect size itself doesn't move. `null`
+  when there's nothing useful to suggest - already decided, zero trials, or
+  the effect sits *inside* the pass/fail threshold band (the "dead zone"):
+  shrinking the CI around a point estimate that's already in the dead zone
+  can never cross either boundary, no matter how much data you add.
+  Treat the number as "roughly this many, plausibly more," not a
+  guarantee - it has a documented, quantified bias (e.g. an ~18%
+  under-estimate at n=100 for one verified case).
+* **`warnings`** - data-quality flags, empty when there's nothing to flag:
+  a tiny sample (under 30 paired trials), an excessive failure rate (over
+  20% timeout/crash/invalid), or, for `elo`, a draw-heavy run (over 50%
+  draws leaves few decisive outcomes to rate from).
 
 ## SPRT
 

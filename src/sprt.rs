@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::{FailureBreakdown, reduce_outcome_pairs, tally_status};
+use crate::metrics::{FailureBreakdown, OutcomeCollector, tally_status};
 use crate::report::serde_str;
 use crate::stats::sprt as math;
 use crate::{Outcome, Verdict};
@@ -82,7 +82,7 @@ pub fn run(
     }
 
     let mut failures = FailureBreakdown::default();
-    let mut outcomes: Vec<(usize, Option<&str>, Outcome)> = Vec::new();
+    let mut collector = OutcomeCollector::new(paired_by_id);
 
     for (line, record) in records {
         let mut used = false;
@@ -99,7 +99,7 @@ pub fn run(
         if let Some(result) = record.result.as_deref() {
             used = true;
             match Outcome::parse(result) {
-                Some(outcome) => outcomes.push((*line, record.id.as_deref(), outcome)),
+                Some(outcome) => collector.record(*line, record.id.as_deref(), outcome),
                 None => {
                     return Err(VeridictError::UnrecognizedOutcome {
                         line: *line,
@@ -118,19 +118,7 @@ pub fn run(
         }
     }
 
-    let (baseline_wins, candidate_wins, draws) = if paired_by_id {
-        reduce_outcome_pairs(&outcomes)?
-    } else {
-        let (mut bw, mut cw, mut dr) = (0u64, 0u64, 0u64);
-        for (_, _, outcome) in &outcomes {
-            match outcome {
-                Outcome::BaselineWin => bw += 1,
-                Outcome::CandidateWin => cw += 1,
-                Outcome::Draw => dr += 1,
-            }
-        }
-        (bw, cw, dr)
-    };
+    let (baseline_wins, candidate_wins, draws) = collector.finish()?;
 
     let timeouts = failures.baseline.timeout + failures.candidate.timeout;
     let crashes = failures.baseline.crash + failures.candidate.crash;

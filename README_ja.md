@@ -70,6 +70,13 @@ cat results.jsonl | veridict compare - --metric winrate
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
+小さいサンプルには正確二項信頼区間、歪んだ分布にはBCaブートストラップ:
+
+```bash
+veridict compare results.jsonl --metric winrate --ci-method exact
+veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
+```
+
 逐次検定(sequential testing): 候補が少なくとも `--elo1` ポイント強いと確信できるまで(pass)、あるいは高々 `--elo0` ポイントの強さだと確信できるまで(fail)、もしくはデータが足りない(inconclusive)と判定されるまで、結果を投入し続けます:
 
 ```bash
@@ -118,14 +125,23 @@ case-004,,,,ok,timeout
 
 ## メトリクス
 
-* **`winrate`** - 決着がついた(引き分けを除く)`result` レコードに対するWilsonスコア区間。
-* **`sign-test`** - baseline/candidateのペア数値レコードのうち、candidateがbaselineを上回った割合(タイは除外)に対するWilsonスコア区間。`mean-diff` のノンパラメトリックな代替: 差の大きさではなく方向のみに着目します。
-* **`mean-diff`** - baseline/candidateのペア数値レコードに対する `candidate - baseline` のパーセンタイルブートストラップ信頼区間。`--resamples` でブートストラップのリサンプル数、`--seed` でRNGシードを制御できます(デフォルトは固定シードなので、同じ入力ならCI上でも出力がビット単位で一致します)。
-* **`elo`** - 勝敗/引き分けの `result` レコードから算出するEloレーティング差(`winrate`/`sign-test` と異なり、引き分けは半勝として数えます)。標準的なロジスティックモデルでEloポイントとして報告します。
+* **`winrate`** - 決着がついた(引き分けを除く)`result` レコードに対する信頼区間。`--ci-method wilson`(デフォルト)または `--ci-method exact`(Clopper-Pearson、正確二項信頼区間 - どんなサンプルサイズでも被覆確率が正確ですが、常にWilsonと同じかそれ以上に幅が広くなります)。
+* **`sign-test`** - baseline/candidateのペア数値レコードのうち、candidateがbaselineを上回った割合(タイは除外)に対する同じ信頼区間。`mean-diff` のノンパラメトリックな代替: 差の大きさではなく方向のみに着目します。こちらも `--ci-method` を指定できます。
+* **`mean-diff`** - baseline/candidateのペア数値レコードに対する `candidate - baseline` のブートストラップ信頼区間。`--bootstrap-method percentile`(デフォルト)または `--bootstrap-method bca`(バイアス補正・加速ブートストラップ - 歪んだ差分分布を補正します。既存のCI値が黙って変わらないよう、デフォルトは引き続き `percentile` です)。`--resamples` でブートストラップのリサンプル数、`--seed` でRNGシードを制御できます(デフォルトは固定シードなので、同じ入力ならCI上でも出力がビット単位で一致します)。
+* **`elo`** - 勝敗/引き分けの `result` レコードから算出するEloレーティング差(`winrate`/`sign-test` と異なり、引き分けは半勝として数えます)。標準的なロジスティックモデルでEloポイントとして報告します。`--ci-method exact` は非対応です: 勝率が小数(引き分けは半勝)になるため、Clopper-Pearsonの被覆保証が前提とする整数カウントの二項分布に当てはまりません。
 
 `winrate` と `sign-test` は `effect`/`ci_low`/`ci_high` を0を中心とした値(五分五分からの偏差)として報告します。`elo` も構造上0を中心とします(五分の成績は0 Elo)。この3つはいずれも `--min-effect` とそのまま組み合わせられます。`mean-diff` は入力そのものの単位で報告します。
 
 各トライアルの `baseline_status`/`candidate_status`(`timeout`、`crash`、`invalid`)は、どのメトリクスを実行してもタリーされ、レポートに含まれます。合計値だけでなく、どちら側で失敗したかの内訳(JSONレポートの `failure_breakdown`)も出力されます。
+
+複数の `--metric` を同時に指定した場合も、入力全体のスキャンは1回だけです(メトリクスの数だけスキャンを繰り返すのではなく、1回のスキャンで全メトリクスに各レコードを渡します)。
+
+## レポートの追加情報
+
+`compare` のレポートには、`verdict` に影響しない2つの付加的なフィールドが常に含まれます:
+
+* **`estimated_additional_trials`** - `inconclusive` な結果を決着させるのに必要な追加トライアル数のおおまかな見積もり(信頼区間が `O(1/√n)` で縮小するという前提、効果量自体は変わらないと仮定)。提案できることが何もない場合は `null` になります - 既に判定済み、トライアル数が0件、あるいは効果量がpass/failしきい値の"内側"(デッドゾーン)にある場合です: 効果量がすでにデッドゾーン内にある点推定を中心に信頼区間を縮めても、データをどれだけ追加してもどちらの境界も越えられません。この数値は「保証」ではなく「だいたいこのくらい、あるいはもっと必要」という目安として扱ってください - 既知の、定量化されたバイアスがあります(検証済みの一例では n=100 で約18%の過小評価)。
+* **`warnings`** - データ品質に関する警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、または `elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)。
 
 ## SPRT
 

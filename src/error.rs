@@ -41,6 +41,13 @@ pub enum VeridictError {
     InvalidThreshold(String),
 
     #[error(
+        "--ci-method exact is only supported for metric winrate or sign-test (got {metric}); \
+         elo's p_hat/n is fractional (draws count as 0.5) and mean-diff isn't a binomial \
+         proportion, so an exact binomial CI does not apply to either"
+    )]
+    IncompatibleCiMethod { metric: &'static str },
+
+    #[error(
         "line {line}: invalid numeric value in field '{field}': {value} (NaN/Infinity not allowed)"
     )]
     InvalidValue {

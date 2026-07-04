@@ -79,9 +79,31 @@ pub enum MetricKind {
     Elo,
 }
 
+/// Which confidence-interval method `winrate`/`sign-test` use. `Exact`
+/// (Clopper-Pearson) doesn't apply to `elo` (fractional successes) or
+/// `mean-diff` (not a binomial proportion at all) - requesting it for either
+/// is a config error (`VeridictError::IncompatibleCiMethod`), not a silent
+/// fallback to `Wilson`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiMethod {
+    Wilson,
+    Exact,
+}
+
+/// Which bootstrap variant `mean-diff` uses. `Percentile` is the default
+/// (unchanged from before this existed, so existing output doesn't shift);
+/// `Bca` corrects for bias and skewness at the cost of a little extra
+/// computation (a jackknife pass, still O(n)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapMethod {
+    Percentile,
+    Bca,
+}
+
 /// Runs one metric end to end: classify records, compute its effect and
 /// confidence interval, and apply the pass/fail thresholds. `paired_by_id`
 /// enables paired-testcase variance reduction (see `metrics::compute`).
+#[allow(clippy::too_many_arguments)]
 pub fn compare_one(
     records: &[(usize, input::Record)],
     metric: MetricKind,
@@ -90,9 +112,65 @@ pub fn compare_one(
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    ci_method: CiMethod,
+    bootstrap_method: BootstrapMethod,
 ) -> Result<Report, VeridictError> {
-    let out = metrics::compute(records, metric, confidence, resamples, seed, paired_by_id)?;
+    let out = metrics::compute(
+        records,
+        metric,
+        confidence,
+        resamples,
+        seed,
+        paired_by_id,
+        ci_method,
+        bootstrap_method,
+    )?;
+    Ok(build_report(metric, confidence, thresholds, out))
+}
 
+/// Runs several metrics against the same records and thresholds in a single
+/// pass over `records` (see `metrics::compute_many`), and combines them into
+/// one overall verdict: `Fail` if any metric fails, else `Inconclusive` if
+/// any metric is inconclusive, else `Pass`. Matches the "a false pass is
+/// worse than an inconclusive result" rule: one metric failing sinks the
+/// whole run.
+#[allow(clippy::too_many_arguments)]
+pub fn compare_many(
+    records: &[(usize, input::Record)],
+    metrics: &[MetricKind],
+    confidence: f64,
+    thresholds: &verdict::Thresholds,
+    resamples: usize,
+    seed: u64,
+    paired_by_id: bool,
+    ci_method: CiMethod,
+    bootstrap_method: BootstrapMethod,
+) -> Result<MultiReport, VeridictError> {
+    let outs = metrics::compute_many(
+        records,
+        metrics,
+        confidence,
+        resamples,
+        seed,
+        paired_by_id,
+        ci_method,
+        bootstrap_method,
+    )?;
+    let reports: Vec<Report> = metrics
+        .iter()
+        .zip(outs)
+        .map(|(&metric, out)| build_report(metric, confidence, thresholds, out))
+        .collect();
+    let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
+    Ok(MultiReport { verdict, reports })
+}
+
+fn build_report(
+    metric: MetricKind,
+    confidence: f64,
+    thresholds: &verdict::Thresholds,
+    out: metrics::MetricOutput,
+) -> Report {
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
     // (0.0, 0.0) accidentally satisfy a threshold that includes zero.
@@ -100,8 +178,17 @@ pub fn compare_one(
         Some(warning) => (Verdict::Inconclusive, warning.clone()),
         None => verdict::decide(out.ci_low, out.ci_high, thresholds),
     };
+    let estimated_additional_trials = verdict::estimate_additional_trials(
+        verdict,
+        out.effect,
+        out.ci_low,
+        out.ci_high,
+        out.paired_count,
+        thresholds,
+    );
+    let warnings = collect_warnings(metric, &out);
 
-    Ok(Report {
+    Report {
         verdict,
         metric,
         baseline_count: out.baseline_count,
@@ -118,39 +205,52 @@ pub fn compare_one(
         invalid: out.invalid,
         failure_breakdown: out.failures,
         reason,
-    })
+        estimated_additional_trials,
+        warnings,
+    }
 }
 
-/// Runs several metrics against the same records and thresholds, and
-/// combines them into one overall verdict: `Fail` if any metric fails,
-/// else `Inconclusive` if any metric is inconclusive, else `Pass`. Matches
-/// the "a false pass is worse than an inconclusive result" rule: one
-/// metric failing sinks the whole run.
-pub fn compare_many(
-    records: &[(usize, input::Record)],
-    metrics: &[MetricKind],
-    confidence: f64,
-    thresholds: &verdict::Thresholds,
-    resamples: usize,
-    seed: u64,
-    paired_by_id: bool,
-) -> Result<MultiReport, VeridictError> {
-    let reports = metrics
-        .iter()
-        .map(|&metric| {
-            compare_one(
-                records,
-                metric,
-                confidence,
-                thresholds,
-                resamples,
-                seed,
-                paired_by_id,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
-    Ok(MultiReport { verdict, reports })
+/// Advisory, verdict-independent data-quality flags. Kept separate from
+/// `MetricOutput.warning` (which forces `Inconclusive` on zero usable
+/// trials, a real verdict-changing decision) - these never affect `verdict`.
+fn collect_warnings(metric: MetricKind, out: &metrics::MetricOutput) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if out.paired_count < 30 {
+        warnings.push(format!(
+            "small sample: {} paired trial(s), below the conventional 30-trial threshold for confidence-interval methods to be reliable",
+            out.paired_count
+        ));
+    }
+
+    let total_trials = out.paired_count + out.timeouts + out.crashes + out.invalid;
+    if total_trials > 0 {
+        let failure_rate = (out.timeouts + out.crashes + out.invalid) as f64 / total_trials as f64;
+        if failure_rate > 0.2 {
+            warnings.push(format!(
+                "{:.0}% of trials failed to execute (timeout/crash/invalid) rather than producing a usable result",
+                failure_rate * 100.0
+            ));
+        }
+    }
+
+    // winrate/sign-test discard their tie/draw count before it reaches
+    // MetricOutput, so extending this warning to them would need a new
+    // tracked field - deferred, not silently dropped.
+    if metric == MetricKind::Elo && out.paired_count > 0 {
+        let draws = out
+            .paired_count
+            .saturating_sub(out.baseline_count + out.candidate_count);
+        let draw_rate = draws as f64 / out.paired_count as f64;
+        if draw_rate > 0.5 {
+            warnings.push(format!(
+                "{:.0}% of trials were draws, leaving few decisive outcomes to estimate Elo from",
+                draw_rate * 100.0
+            ));
+        }
+    }
+
+    warnings
 }
 
 #[cfg(test)]
@@ -216,6 +316,8 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -238,6 +340,8 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -255,6 +359,8 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -273,6 +379,8 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
     }
@@ -303,6 +411,8 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -338,10 +448,177 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.reports[0].verdict, Verdict::Fail);
         assert_eq!(report.reports[1].verdict, Verdict::Pass);
         assert_eq!(report.verdict, Verdict::Fail);
+    }
+
+    // --- Report.warnings ---
+
+    #[test]
+    fn tiny_sample_produces_a_warning() {
+        let records: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        None,
+                        None,
+                        Some("candidate_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )
+        .unwrap();
+        assert!(report.warnings.iter().any(|w| w.contains("small sample")));
+    }
+
+    #[test]
+    fn excessive_failures_produce_a_warning() {
+        let mut records: Vec<_> = (0..30)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        None,
+                        None,
+                        Some("candidate_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        for i in 0..8 {
+            records.push((
+                31 + i,
+                rec(&format!("t{i}"), None, None, None, Some("timeout"), None),
+            ));
+        }
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )
+        .unwrap();
+        assert_eq!(report.paired_count, 30);
+        assert!(!report.warnings.iter().any(|w| w.contains("small sample")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("failed to execute"))
+        );
+    }
+
+    #[test]
+    fn excessive_draws_produce_a_warning_for_elo() {
+        let mut records = Vec::new();
+        for i in 0..3 {
+            records.push((
+                i + 1,
+                rec(
+                    &format!("c{i}"),
+                    None,
+                    None,
+                    Some("candidate_win"),
+                    None,
+                    None,
+                ),
+            ));
+        }
+        for i in 0..2 {
+            records.push((
+                4 + i,
+                rec(
+                    &format!("b{i}"),
+                    None,
+                    None,
+                    Some("baseline_win"),
+                    None,
+                    None,
+                ),
+            ));
+        }
+        for i in 0..6 {
+            records.push((
+                6 + i,
+                rec(&format!("d{i}"), None, None, Some("draw"), None, None),
+            ));
+        }
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::Elo,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )
+        .unwrap();
+        assert!(report.warnings.iter().any(|w| w.contains("draws")));
+    }
+
+    #[test]
+    fn clean_large_sample_has_no_warnings() {
+        let records: Vec<_> = (0..40)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        None,
+                        None,
+                        Some("candidate_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            &records,
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )
+        .unwrap();
+        assert!(report.warnings.is_empty());
     }
 }

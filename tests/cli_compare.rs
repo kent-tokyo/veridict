@@ -455,3 +455,138 @@ fn sprt_paired_by_id_nets_split_pairs_to_a_draw() {
         .code(2)
         .stdout(predicate::str::contains("\"llr\": 0.0"));
 }
+
+#[test]
+fn ci_method_exact_widens_the_interval_versus_wilson() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    let wilson = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--ci-method",
+            "wilson",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let exact = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--ci-method",
+            "exact",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    assert_ne!(wilson.stdout, exact.stdout);
+}
+
+#[test]
+fn ci_method_exact_rejects_elo() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "elo", "--ci-method", "exact"])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--ci-method exact"));
+}
+
+#[test]
+fn ci_method_exact_rejects_mean_diff() {
+    let stdin = "{\"baseline\":1.0,\"candidate\":1.1}\n";
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--ci-method",
+            "exact",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--ci-method exact"));
+}
+
+#[test]
+fn bootstrap_method_bca_differs_from_percentile_on_skewed_data() {
+    let diffs = [
+        0.05, 0.08, 0.12, 0.02, 0.15, 0.01, 0.30, 0.04, 0.06, 0.50, 0.03, 0.09, 0.11, 0.07, 0.02,
+        0.60, 0.04, 0.08, 0.10, 0.05,
+    ];
+    let stdin: String = diffs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("{{\"baseline\":{i}.0,\"candidate\":{}}}\n", i as f64 + d))
+        .collect();
+    let percentile = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--bootstrap-method",
+            "percentile",
+        ])
+        .write_stdin(stdin.clone())
+        .output()
+        .unwrap();
+    let bca = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--bootstrap-method",
+            "bca",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    assert_ne!(percentile.stdout, bca.stdout);
+}
+
+#[test]
+fn tiny_sample_warning_appears_in_json_report() {
+    let stdin = (0..10)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("small sample"));
+}
+
+#[test]
+fn clean_large_sample_has_empty_warnings_array() {
+    let stdin = (0..40)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"warnings\": []"));
+}

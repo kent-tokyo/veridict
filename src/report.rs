@@ -28,6 +28,17 @@ pub struct Report {
     pub invalid: u64,
     pub failure_breakdown: FailureBreakdown,
     pub reason: String,
+    /// Rough estimate of additional trials needed to reach a decisive
+    /// verdict; see `verdict::estimate_additional_trials` for exactly when
+    /// this is `None` (already decided, dead-zone effect, etc.) and the
+    /// formula's documented bias. Always serialized, including as `null` -
+    /// a fixed JSON key set matters more to machine consumers than omitting
+    /// it when absent.
+    pub estimated_additional_trials: Option<u64>,
+    /// Purely advisory data-quality flags (tiny sample, high failure rate,
+    /// draw-heavy Elo run) - unlike `reason`, these never change `verdict`.
+    /// Always present, empty when there's nothing to flag.
+    pub warnings: Vec<String>,
 }
 
 /// A metric's effect/CI/thresholds are proportions (winrate, sign-test),
@@ -68,13 +79,14 @@ impl Report {
     fn to_markdown_body(&self) -> String {
         let b = &self.failure_breakdown.baseline;
         let c = &self.failure_breakdown.candidate;
-        format!(
+        let mut body = format!(
             "Verdict: {verdict}\n\n\
              Metric: {metric}\n\
              Effect: {effect}\n\
              {confidence_pct}% CI: {ci_low} to {ci_high}\n\
              Threshold for pass: {pass_above} / Threshold for fail: {fail_below}\n\n\
-             {reason}\n\n\
+             {reason}\n\
+             {estimate_line}\n\
              Samples: baseline={baseline_count}, candidate={candidate_count}, paired={paired_count}\n\n\
              Status counts:\n\
              - timeout: {timeouts} (baseline={b_timeout}, candidate={c_timeout})\n\
@@ -89,6 +101,11 @@ impl Report {
             pass_above = fmt_effect(self.metric, self.pass_above),
             fail_below = fmt_effect(self.metric, self.fail_below),
             reason = self.reason,
+            estimate_line = match self.estimated_additional_trials {
+                Some(n) =>
+                    format!("\nEstimated additional trials to reach a decisive verdict: ~{n}\n"),
+                None => String::new(),
+            },
             baseline_count = self.baseline_count,
             candidate_count = self.candidate_count,
             paired_count = self.paired_count,
@@ -101,7 +118,14 @@ impl Report {
             c_crash = c.crash,
             b_invalid = b.invalid,
             c_invalid = c.invalid,
-        )
+        );
+        if !self.warnings.is_empty() {
+            body.push_str("\nWarnings:\n");
+            for warning in &self.warnings {
+                body.push_str(&format!("- {warning}\n"));
+            }
+        }
+        body
     }
 }
 
@@ -156,6 +180,8 @@ mod tests {
             invalid: 0,
             failure_breakdown: FailureBreakdown::default(),
             reason: "ok".to_string(),
+            estimated_additional_trials: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -189,6 +215,52 @@ mod tests {
         report.effect = 12.3;
         let md = report.to_markdown();
         assert!(md.contains("+12.3 elo"));
+    }
+
+    #[test]
+    fn estimated_additional_trials_null_is_omitted_from_markdown_but_present_in_json() {
+        let report = sample_report();
+        assert!(!report.to_markdown().contains("Estimated additional trials"));
+        assert!(
+            report
+                .to_json_pretty()
+                .contains("\"estimated_additional_trials\": null")
+        );
+    }
+
+    #[test]
+    fn estimated_additional_trials_some_appears_in_markdown_and_json() {
+        let mut report = sample_report();
+        report.estimated_additional_trials = Some(750);
+        assert!(
+            report
+                .to_markdown()
+                .contains("Estimated additional trials to reach a decisive verdict: ~750")
+        );
+        assert!(
+            report
+                .to_json_pretty()
+                .contains("\"estimated_additional_trials\": 750")
+        );
+    }
+
+    #[test]
+    fn empty_warnings_produce_no_markdown_section_but_serialize_as_empty_array() {
+        let report = sample_report();
+        assert!(!report.to_markdown().contains("Warnings:"));
+        assert!(report.to_json_pretty().contains("\"warnings\": []"));
+    }
+
+    #[test]
+    fn non_empty_warnings_are_bulleted_in_markdown_and_present_in_json() {
+        let mut report = sample_report();
+        report.warnings = vec![
+            "small sample size".to_string(),
+            "high failure rate".to_string(),
+        ];
+        let md = report.to_markdown();
+        assert!(md.contains("Warnings:\n- small sample size\n- high failure rate\n"));
+        assert!(report.to_json_pretty().contains("\"small sample size\""));
     }
 
     #[test]

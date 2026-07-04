@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::{MetricKind, metrics};
+use crate::{BootstrapMethod, CiMethod, MetricKind, metrics};
 
 #[derive(Debug, Serialize)]
 pub struct CandidateSummary {
@@ -71,9 +71,19 @@ pub fn run(
 
     let mut candidates = Vec::with_capacity(named_records.len());
     for (name, records) in named_records {
-        // resamples/seed are bootstrap-only knobs; the elo metric ignores
-        // them, same as every other non-mean-diff metric already does.
-        let out = metrics::compute(records, MetricKind::Elo, confidence, 1, 0, paired_by_id)?;
+        // resamples/seed/bootstrap_method are mean-diff-only knobs; the elo
+        // metric ignores them. ci_method: elo never supports CiMethod::Exact
+        // (fractional p_hat), so this is always Wilson.
+        let out = metrics::compute(
+            records,
+            MetricKind::Elo,
+            confidence,
+            1,
+            0,
+            paired_by_id,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )?;
         candidates.push(CandidateSummary {
             name: name.clone(),
             elo: out.effect,

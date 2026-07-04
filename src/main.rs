@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use veridict::sprt::SprtConfig;
 use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
-use veridict::{MetricKind, Verdict, VeridictError, input, matrix};
+use veridict::{BootstrapMethod, CiMethod, MetricKind, Verdict, VeridictError, input, matrix};
 
 #[derive(Parser)]
 #[command(
@@ -74,6 +74,18 @@ struct CompareArgs {
     /// fixed seed, so the same input reproduces bit-identical output in CI.
     #[arg(long)]
     seed: Option<u64>,
+
+    /// Confidence interval method for --metric winrate/sign-test. `exact`
+    /// (Clopper-Pearson) is only valid for those two metrics - combining it
+    /// with --metric elo/mean-diff is a config error, not a silent fallback.
+    #[arg(long, value_enum, default_value = "wilson")]
+    ci_method: CiMethodArg,
+
+    /// Bootstrap variant for --metric mean-diff. `bca` corrects for bias and
+    /// skewness; `percentile` stays the default so existing CI numbers don't
+    /// silently shift.
+    #[arg(long, value_enum, default_value = "percentile")]
+    bootstrap_method: BootstrapMethodArg,
 
     /// Treat two records sharing an id as one testcase played twice (e.g.
     /// roles swapped to cancel the testcase's own bias) and combine them
@@ -188,6 +200,36 @@ enum FormatArg {
     Csv,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum CiMethodArg {
+    Wilson,
+    Exact,
+}
+
+impl From<CiMethodArg> for CiMethod {
+    fn from(m: CiMethodArg) -> Self {
+        match m {
+            CiMethodArg::Wilson => CiMethod::Wilson,
+            CiMethodArg::Exact => CiMethod::Exact,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BootstrapMethodArg {
+    Percentile,
+    Bca,
+}
+
+impl From<BootstrapMethodArg> for BootstrapMethod {
+    fn from(m: BootstrapMethodArg) -> Self {
+        match m {
+            BootstrapMethodArg::Percentile => BootstrapMethod::Percentile,
+            BootstrapMethodArg::Bca => BootstrapMethod::Bca,
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli.command) {
@@ -217,6 +259,8 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
     let records = read_records(&args.input, format)?;
     let seed = args.seed.unwrap_or(DEFAULT_SEED);
     let metrics: Vec<MetricKind> = args.metrics.into_iter().map(Into::into).collect();
+    let ci_method: CiMethod = args.ci_method.into();
+    let bootstrap_method: BootstrapMethod = args.bootstrap_method.into();
 
     let (verdict, json, markdown) = if let [only] = metrics[..] {
         let report = veridict::compare_one(
@@ -227,6 +271,8 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
+            ci_method,
+            bootstrap_method,
         )?;
         (
             report.verdict,
@@ -242,6 +288,8 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
+            ci_method,
+            bootstrap_method,
         )?;
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };

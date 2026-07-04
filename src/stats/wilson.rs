@@ -10,8 +10,9 @@ use crate::error::VeridictError;
 /// rational approximation (<https://web.archive.org/web/20151030215612/http://home.online.no/~pjacklam/notes/invnorm/>).
 /// Relative accuracy is about 1.15e-9 over (0, 1); no Halley refinement step
 /// is applied since that accuracy is well within what a confidence interval
-/// needs.
-fn inverse_normal_cdf(p: f64) -> f64 {
+/// needs. `pub(crate)` since `stats::bootstrap`'s BCa method also needs it
+/// (for its bias-correction step).
+pub(crate) fn inverse_normal_cdf(p: f64) -> f64 {
     const A: [f64; 6] = [
         -3.969683028665376e+01,
         2.209460984245205e+02,
