@@ -2,6 +2,12 @@
 name = "veridict"
 version = "0.1.0"
 edition = "2024"
+description = "Statistical regression gate for comparing candidate vs baseline results (win-rate, Elo, SPRT, bootstrap CI)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kent-tokyo/veridict"
+readme = "README.md"
+keywords = ["statistics", "testing", "cli", "regression", "elo"]
+categories = ["command-line-utilities", "development-tools::testing"]
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

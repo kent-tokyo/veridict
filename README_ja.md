@@ -2,6 +2,9 @@
 
 [English](README.md) | 日本語
 
+[![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 候補(candidate)がベースライン(baseline)より本当に優れているかを判定する、小さくドメイン非依存な評価ゲート。トライアル結果のファイルから判定します。
 
 `veridict` はベンチマークランナーでも実験トラッカーでもありません。結果を受け取り、判定を返す統計的な意思決定レイヤーです:
@@ -11,6 +14,24 @@
 * `inconclusive`(判定不能)
 
 データがノイジー・少数・不明瞭な場合は、過大に主張するのではなく `inconclusive` を返します。誤ったpassは、判定不能な結果よりも悪いものです。
+
+## ユースケース
+
+「スプレッドシートを目で見て何となく判断していた」ような、あらゆる"candidate vs baseline"比較に使えます:
+
+* **ゲーム/探索エンジンのリグレッション検知** - 勝敗/引き分けの対局結果 →
+  `--metric winrate`、`--metric elo`、または逐次検定したいなら `veridict sprt`。
+* **OCRや抽出パイプラインの精度比較** - 文書ごとの精度スコア →
+  `--metric mean-diff` または `--metric sign-test`。
+* **LLMプロンプト/モデルの比較** - ペアワイズのジャッジ結果や数値品質スコア →
+  `--metric winrate` または `--metric mean-diff`。
+* **ランキング/最適化アルゴリズムのチューニング** - 実行ごとの数値目的関数
+  (NDCG、loss、スループットなど) → `--metric mean-diff`。
+* **CIでのリリースリグレッションゲート** - 候補ビルドを直近の正常なベースラインと比較し、
+  `--fail-below`/`--pass-above` と `veridict` の終了コードでパイプラインに組み込む
+  (下記の[使い方](#使い方)のリグレッションゲート例を参照)。
+* **3つ以上の案を比較** - 同じ共有ベースラインに対する複数のプロンプト/設定 →
+  `veridict matrix`。
 
 ## インストール / ビルド
 
@@ -137,4 +158,12 @@ case-004,,,,ok,timeout
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+cargo audit
 ```
+
+CI(`.github/workflows/ci.yml`)は、push・pull request毎にこの4つすべてを実行します。
+
+## ライセンス
+
+[Apache License, Version 2.0](LICENSE-APACHE) または [MIT license](LICENSE-MIT)
+のいずれかを選択できます。

@@ -2,6 +2,9 @@
 
 English | [日本語](README_ja.md)
 
+[![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A small, domain-agnostic evaluation gate: decide whether a candidate is
 actually better than a baseline, from a file of trial results.
 
@@ -14,6 +17,25 @@ statistical decision layer that consumes results and returns a verdict:
 
 When the data is noisy, small, or unclear, it says `inconclusive` rather
 than overclaiming. A false pass is worse than an inconclusive result.
+
+## Use cases
+
+Any "candidate vs baseline" comparison where you'd otherwise eyeball a
+spreadsheet and guess:
+
+* **Game/search engine regression** - win/loss/draw match results ->
+  `--metric winrate`, `--metric elo`, or `veridict sprt` for sequential testing.
+* **OCR or extraction-pipeline accuracy** - per-document accuracy scores ->
+  `--metric mean-diff` or `--metric sign-test`.
+* **LLM prompt or model comparison** - pairwise judge verdicts or numeric
+  quality scores -> `--metric winrate` or `--metric mean-diff`.
+* **Ranking/optimization algorithm tuning** - a numeric objective per run
+  (NDCG, loss, throughput) -> `--metric mean-diff`.
+* **Release regression gate in CI** - candidate build vs last known-good
+  baseline, wired into a pipeline with `--fail-below`/`--pass-above` and a
+  `veridict` exit code (see [Regression gate](#usage) below).
+* **Ranking more than two variants** - several prompts/configs against the
+  same shared baseline -> `veridict matrix`.
 
 ## Install / build
 
@@ -196,4 +218,12 @@ or below `--fail-below`. Anything else, including zero usable trials, is
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
+cargo audit
 ```
+
+CI (`.github/workflows/ci.yml`) runs all four on every push and pull request.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
