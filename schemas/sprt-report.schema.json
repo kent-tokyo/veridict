@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/sprt-report.schema.json",
+  "title": "veridict sprt report",
+  "description": "JSON output of `veridict sprt`, for both --sprt-variant wald (default) and trinomial.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "llr",
+    "lower_bound",
+    "upper_bound",
+    "elo0",
+    "elo1",
+    "alpha",
+    "beta",
+    "candidate_wins",
+    "baseline_wins",
+    "draws",
+    "timeouts",
+    "crashes",
+    "invalid",
+    "failure_breakdown",
+    "reason",
+    "drawelo"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "inconclusive"]
+    },
+    "llr": { "type": "number", "description": "Accumulated log-likelihood ratio." },
+    "lower_bound": { "type": "number" },
+    "upper_bound": { "type": "number" },
+    "elo0": {
+      "type": "number",
+      "description": "H0 hypothesis gap. Logistic Elo for wald, BayesElo for trinomial - see docs/metrics.md for why these are different scales."
+    },
+    "elo1": { "type": "number" },
+    "alpha": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "Guaranteed false-positive rate (accepting H1 when H0 is true) - not a tunable report threshold."
+    },
+    "beta": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "Guaranteed false-negative rate (accepting H0 when H1 is true)."
+    },
+    "candidate_wins": { "type": "integer", "minimum": 0 },
+    "baseline_wins": { "type": "integer", "minimum": 0 },
+    "draws": { "type": "integer", "minimum": 0 },
+    "timeouts": { "type": "integer", "minimum": 0 },
+    "crashes": { "type": "integer", "minimum": 0 },
+    "invalid": { "type": "integer", "minimum": 0 },
+    "failure_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/failure_counts" },
+        "candidate": { "$ref": "#/$defs/failure_counts" }
+      }
+    },
+    "reason": { "type": "string" },
+    "drawelo": {
+      "type": ["number", "null"],
+      "description": "Estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial (reported for transparency, since it's estimated from the same data being judged); null for wald, which doesn't model a draw rate at all."
+    }
+  },
+  "$defs": {
+    "failure_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout", "crash", "invalid"],
+      "properties": {
+        "timeout": { "type": "integer", "minimum": 0 },
+        "crash": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

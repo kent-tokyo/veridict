@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/input-record.schema.json",
+  "title": "veridict input record",
+  "description": "One JSONL line (or CSV row) of input to `veridict compare`/`sprt`/`matrix`'s legacy per-file mode. Every field is optional at the schema level - which combination is actually usable depends on which metric is being computed (see README's Input format section) - but at least one of result/baseline+candidate/baseline_status/candidate_status must be present or the record is rejected as a schema mismatch.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": ["string", "null"],
+      "description": "Used by --paired-by-id to net two records sharing an id into one observation."
+    },
+    "baseline": {
+      "type": ["number", "null"],
+      "description": "Numeric score, for mean-diff/sign-test."
+    },
+    "candidate": {
+      "type": ["number", "null"],
+      "description": "Numeric score, for mean-diff/sign-test."
+    },
+    "result": {
+      "type": ["string", "null"],
+      "enum": ["candidate_win", "baseline_win", "draw", null],
+      "description": "For winrate/elo/sprt."
+    },
+    "baseline_status": {
+      "type": ["string", "null"],
+      "enum": ["ok", "timeout", "crash", "invalid", null]
+    },
+    "candidate_status": {
+      "type": ["string", "null"],
+      "enum": ["ok", "timeout", "crash", "invalid", null]
+    }
+  }
+}

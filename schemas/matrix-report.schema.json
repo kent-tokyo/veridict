@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/matrix-report.schema.json",
+  "title": "veridict matrix report",
+  "description": "JSON output of `veridict matrix`. Report-only (no overall verdict) - a matrix isn't a single pass/fail. Covers both star-graph (legacy files only) and general-graph (--matches present) modes; see docs/metrics.md for when each applies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "confidence", "candidates", "matrix"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+    "candidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/candidate_summary" }
+    },
+    "matrix": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/matrix_entry" },
+      "description": "Upper triangle only (baseline first if present, then candidates in input order)."
+    }
+  },
+  "$defs": {
+    "candidate_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "elo", "ci_low", "ci_high", "baseline_count",
+        "candidate_count", "paired_count", "timeouts", "crashes", "invalid", "component"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "elo": { "type": "number" },
+        "ci_low": {
+          "type": ["number", "null"],
+          "description": "Some (real Wilson CI) in star-graph mode. null in general-graph mode - a joint CI for a jointly-fit rating is not approximated here."
+        },
+        "ci_high": { "type": ["number", "null"] },
+        "baseline_count": { "type": "integer", "minimum": 0 },
+        "candidate_count": { "type": "integer", "minimum": 0 },
+        "paired_count": { "type": "integer", "minimum": 0 },
+        "timeouts": { "type": "integer", "minimum": 0 },
+        "crashes": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 },
+        "component": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Mutually-comparable group id. Always 0 in star-graph mode. Two candidates in different components have no finite Bradley-Terry comparison."
+        }
+      }
+    },
+    "matrix_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row", "col", "elo_diff", "ci_low", "ci_high", "direct", "status"],
+      "properties": {
+        "row": { "type": "string" },
+        "col": { "type": "string" },
+        "elo_diff": {
+          "type": ["number", "null"],
+          "description": "Row's Elo advantage over col (reverse direction is -elo_diff). null only for disconnected cells - no finite estimate exists, not merely an uncertain one."
+        },
+        "ci_low": { "type": ["number", "null"] },
+        "ci_high": { "type": ["number", "null"] },
+        "direct": {
+          "type": "boolean",
+          "description": "true iff status == \"direct\". Kept alongside status for backward compatibility."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["direct", "inferred", "disconnected"]
+        }
+      }
+    }
+  }
+}

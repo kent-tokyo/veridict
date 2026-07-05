@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/multi-report.schema.json",
+  "title": "veridict multi-metric compare report",
+  "description": "JSON output of `veridict compare` when multiple --metric flags are given together. A single-metric run instead produces compare-report.schema.json directly - its JSON shape never changes based on how many metrics were requested elsewhere.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "verdict", "reports"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "inconclusive"],
+      "description": "Aggregated across all reports: any fail sinks the whole run, else any inconclusive holds it back, else pass."
+    },
+    "reports": {
+      "type": "array",
+      "items": { "$ref": "compare-report.schema.json" },
+      "description": "One report per requested --metric, each independently computed from the same input scan."
+    }
+  }
+}

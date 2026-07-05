@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/compare-report.schema.json",
+  "title": "veridict compare report",
+  "description": "JSON output of `veridict compare` for a single --metric run. A multi-metric run instead produces multi-report.schema.json (a Vec of this shape plus an overall verdict) - see report.rs's Report/MultiReport split.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "metric",
+    "baseline_count",
+    "candidate_count",
+    "paired_count",
+    "effect",
+    "confidence",
+    "ci_low",
+    "ci_high",
+    "pass_above",
+    "fail_below",
+    "timeouts",
+    "crashes",
+    "invalid",
+    "failure_breakdown",
+    "reason",
+    "estimated_additional_trials",
+    "warnings",
+    "data_quality"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes (new fields/variants); bumps only when a field is removed or renamed."
+    },
+    "verdict": { "$ref": "#/$defs/verdict" },
+    "metric": {
+      "type": "string",
+      "enum": ["winrate", "mean-diff", "sign-test", "elo"]
+    },
+    "baseline_count": { "type": "integer", "minimum": 0 },
+    "candidate_count": { "type": "integer", "minimum": 0 },
+    "paired_count": { "type": "integer", "minimum": 0 },
+    "effect": {
+      "type": "number",
+      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff."
+    },
+    "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+    "ci_low": { "type": "number" },
+    "ci_high": { "type": "number" },
+    "pass_above": { "type": "number" },
+    "fail_below": { "type": "number" },
+    "timeouts": { "type": "integer", "minimum": 0 },
+    "crashes": { "type": "integer", "minimum": 0 },
+    "invalid": { "type": "integer", "minimum": 0 },
+    "failure_breakdown": { "$ref": "#/$defs/failure_breakdown" },
+    "reason": { "type": "string" },
+    "estimated_additional_trials": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff."
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-readable data-quality flags; never affects verdict. Structured counterpart is data_quality."
+    },
+    "data_quality": { "$ref": "#/$defs/data_quality" }
+  },
+  "$defs": {
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "fail", "inconclusive"]
+    },
+    "failure_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout", "crash", "invalid"],
+      "properties": {
+        "timeout": { "type": "integer", "minimum": 0 },
+        "crash": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "failure_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/failure_counts" },
+        "candidate": { "$ref": "#/$defs/failure_counts" }
+      }
+    },
+    "data_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor"],
+      "properties": {
+        "tiny_sample": { "type": "boolean", "description": "paired_count < 30" },
+        "high_failure_rate": { "type": "boolean", "description": "over 20% of trials failed to execute" },
+        "draw_heavy": { "type": "boolean", "description": "elo only; always false for other metrics. Over 50% draws." },
+        "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" }
+      }
+    }
+  }
+}

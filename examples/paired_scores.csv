@@ -1,0 +1,6 @@
+id,baseline,candidate,result,baseline_status,candidate_status
+case-001,0.81,0.84,,,
+case-002,0.75,0.79,,,
+case-003,0.90,0.88,,,
+case-004,0.62,0.70,,,
+case-005,0.55,0.58,,,

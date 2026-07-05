@@ -95,6 +95,13 @@ points stronger (fail), or it needs more data (inconclusive):
 veridict sprt results.jsonl --elo0 0 --elo1 10 --alpha 0.05 --beta 0.05
 ```
 
+On draw-heavy data (e.g. chess-engine testing), the trinomial variant converges faster by
+estimating the draw rate instead of discarding draws entirely:
+
+```bash
+veridict sprt examples/chess_engine_draw_heavy.jsonl --sprt-variant trinomial --belo0 0 --belo1 30
+```
+
 Compare more than two candidates at once, each measured against the same
 shared baseline, and tabulate pairwise Elo differences:
 
@@ -125,8 +132,11 @@ auto-detected from a `.csv` file extension). Both share the same fields.
 See `examples/`:
 
 * `examples/winloss.jsonl` - win/loss/draw records, for `--metric winrate` / `--metric sign-test`.
-* `examples/paired_scores.jsonl` - paired baseline/candidate scores, for `--metric mean-diff` / `--metric sign-test`.
+* `examples/paired_scores.jsonl` (and `examples/paired_scores.csv`, same data in the CSV format
+  below) - paired baseline/candidate scores, for `--metric mean-diff` / `--metric sign-test`.
 * `examples/status_failures.jsonl` - all supported record shapes together, illustrating the format (not meant to be run against a single metric as-is: a record must carry a field the chosen metric understands, or a `baseline_status`/`candidate_status` field, or it is rejected as a schema mismatch).
+* `examples/chess_engine_draw_heavy.jsonl` - win/loss/draw records with a high draw rate, for
+  `veridict sprt --sprt-variant trinomial` (see [SPRT](#sprt)).
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}
@@ -145,23 +155,33 @@ case-002,,,candidate_win,,
 case-004,,,,ok,timeout
 ```
 
+```bash
+veridict compare examples/paired_scores.csv --format csv --metric mean-diff
+```
+
 ## Metrics
 
 * **`winrate`** - confidence interval on decisive (non-draw) `result`
-  records. `--ci-method wilson` (default) or `--ci-method exact`
+  records. `--ci-method wilson` (default), `--ci-method exact`
   (Clopper-Pearson - exact coverage at any sample size, but always at least
-  as wide as Wilson's).
+  as wide as Wilson's), or `--ci-method jeffreys` (Bayesian credible interval
+  using the non-informative Jeffreys prior - sits between Wilson and
+  Clopper-Pearson in width for most `p`, but can beat both at the boundary,
+  i.e. near all-wins/all-losses). `exact`/`jeffreys` both require a true
+  integer-count binomial, same restriction, same reason.
 * **`sign-test`** - same CI, on the proportion of paired numeric records
   where the candidate beat the baseline (ties excluded). Nonparametric
   alternative to `mean-diff`: only the direction of each pair matters, not
   its magnitude. Also takes `--ci-method`.
 * **`mean-diff`** - bootstrap confidence interval on `candidate - baseline`
-  for paired numeric records. `--bootstrap-method percentile` (default) or
-  `--bootstrap-method bca` (bias-corrected and accelerated - corrects for a
-  skewed diff distribution; `percentile` stays the default so existing CI
-  numbers don't shift under you). `--resamples` controls the bootstrap
-  sample count; `--seed` controls its RNG seed (fixed by default, so output
-  is bit-identical across CI runs of the same input).
+  for paired numeric records. `--bootstrap-method percentile` (default),
+  `--bootstrap-method basic` (reflects the percentile interval around the
+  point estimate - simpler than BCa, but with no bias-correction of its
+  own), or `--bootstrap-method bca` (bias-corrected and accelerated -
+  corrects for a skewed diff distribution; `percentile` stays the default so
+  existing CI numbers don't shift under you). `--resamples` controls the
+  bootstrap sample count; `--seed` controls its RNG seed (fixed by default,
+  so output is bit-identical across CI runs of the same input).
 * **`elo`** - Elo rating difference from win/loss/draw `result` records
   (draws count as half a win, unlike `winrate`/`sign-test` which exclude
   them). Reported in Elo points, via the standard logistic model. Doesn't
@@ -185,7 +205,14 @@ metric.
 
 ## Report extras
 
-Every `compare` report also carries two advisory fields that never affect
+Every report (`compare`, `sprt`, `matrix` alike) carries a `schema_version`
+integer (currently `1`). It stays `1` across purely additive changes (new
+fields, new enum variants); it only bumps when a field is removed or
+renamed, so a machine consumer can key its parsing off this instead of
+guessing from field presence. See [`schemas/`](schemas/) for a JSON Schema
+per report/record type.
+
+Every `compare` report also carries advisory fields that never affect
 `verdict`:
 
 * **`estimated_additional_trials`** - a rough estimate (`O(1/sqrt(n))` CI
@@ -198,23 +225,49 @@ Every `compare` report also carries two advisory fields that never affect
   Treat the number as "roughly this many, plausibly more," not a
   guarantee - it has a documented, quantified bias (e.g. an ~18%
   under-estimate at n=100 for one verified case).
-* **`warnings`** - data-quality flags, empty when there's nothing to flag:
-  a tiny sample (under 30 paired trials), an excessive failure rate (over
-  20% timeout/crash/invalid), or, for `elo`, a draw-heavy run (over 50%
-  draws leaves few decisive outcomes to rate from).
+* **`warnings`** - human-readable data-quality flags, empty when there's
+  nothing to flag: a tiny sample (under 30 paired trials), an excessive
+  failure rate (over 20% timeout/crash/invalid), or, for `elo`, a draw-heavy
+  run (over 50% draws leaves few decisive outcomes to rate from).
+* **`data_quality`** - the same flags as `warnings`, as booleans
+  (`tiny_sample`, `high_failure_rate`, `draw_heavy`, `effect_within_noise_floor`)
+  rather than strings, for a machine consumer that wants to branch on a flag
+  instead of parsing prose. Added alongside `warnings`, not a replacement -
+  both are always present.
+
+See [`docs/metrics.md`](docs/metrics.md) for the full detail on every method
+above, including assumptions and known failure modes.
 
 ## SPRT
 
 `veridict sprt` is a separate mode from `compare`: instead of an effect
 size and a confidence interval checked against a threshold, it accumulates
-a log-likelihood ratio (Wald's classic two-outcome SPRT) over decisive
-(non-draw) `result` records and stops as soon as the evidence crosses one
-of two boundaries derived from `--alpha`/`--beta`. `pass` means "confident
-the candidate is at least `--elo1` points stronger"; `fail` means
-"confident it's at most `--elo0` points stronger"; `inconclusive` means
-"keep collecting data". `--alpha`/`--beta` are its actual guaranteed false
+a log-likelihood ratio and stops as soon as the evidence crosses one of two
+boundaries derived from `--alpha`/`--beta`. `pass` means "confident the
+candidate is at least `--elo1` points stronger"; `fail` means "confident
+it's at most `--elo0` points stronger"; `inconclusive` means "keep
+collecting data". `--alpha`/`--beta` are its actual guaranteed false
 positive/negative rates, not tunable knobs on a report - there's no
-`--min-effect`/`--confidence` for this subcommand.
+`--min-effect`/`--confidence` for this subcommand. Two variants
+(`--sprt-variant`):
+
+* **`wald`** (default) - the classic two-outcome SPRT over decisive
+  (non-draw) `result` records only; draws carry no information about which
+  Elo hypothesis is true under this model and are excluded from the LLR
+  entirely. Hypotheses are `--elo0`/`--elo1`, in standard logistic Elo.
+* **`trinomial`** - a draw-aware generalized LLR test (the BayesElo
+  parameterization historically used by chess-engine testing tools like
+  Fishtest). Estimates the draw rate as a nuisance parameter from the
+  pooled win/draw/loss counts, which lets it converge faster than `wald` on
+  draw-heavy data. **Units are BayesElo, not logistic Elo** - the two only
+  coincide when the estimated draw rate is exactly zero - so hypotheses are
+  given via separate `--belo0`/`--belo1` flags rather than reinterpreting
+  `--elo0`/`--elo1`. The estimated draw rate (`drawelo`) is reported in the
+  output for transparency, since it's estimated from the same data being
+  judged.
+
+See [`docs/metrics.md`](docs/metrics.md) for the full mechanics of both
+variants, including the BayesElo/logistic-Elo unit conversion.
 
 ## Comparison matrix
 
@@ -299,7 +352,10 @@ or below `--fail-below`. Anything else, including zero usable trials, is
 
 ## Statistical basis
 
-veridict's numbers are standard, published statistics, not a bespoke scoring system:
+veridict's numbers are standard, published statistics, not a bespoke scoring system. See
+[`docs/metrics.md`](docs/metrics.md) for the full per-metric detail (assumptions, failure modes)
+and [`docs/research-map.md`](docs/research-map.md) for methods considered but not shipped, and
+what's deliberately out of scope.
 
 * **`winrate`/`sign-test` CI** - Wilson score interval (Wilson 1927); `--ci-method exact` gives
   the Clopper-Pearson exact binomial interval (Clopper & Pearson 1934) instead.

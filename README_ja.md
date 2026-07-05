@@ -87,6 +87,13 @@ veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
 veridict sprt results.jsonl --elo0 0 --elo1 10 --alpha 0.05 --beta 0.05
 ```
 
+引き分けの多いデータ(チェスエンジンのテストなど)では、trinomialバリアントが引き分けを捨てる
+代わりに引き分け率を推定することで、より速く収束します:
+
+```bash
+veridict sprt examples/chess_engine_draw_heavy.jsonl --sprt-variant trinomial --belo0 0 --belo1 30
+```
+
 同じ共有ベースラインに対して測定した3つ以上の候補を一度に比較し、ペアワイズのElo差を一覧表にします:
 
 ```bash
@@ -113,8 +120,11 @@ veridict matrix --matches examples/matches_head_to_head.jsonl
 1行1レコード: デフォルトはJSONL、またはCSV(`--format csv`、または `.csv` 拡張子から自動判定)。両者は同じフィールドを共有します。`examples/` を参照してください:
 
 * `examples/winloss.jsonl` - 勝敗/引き分けのレコード。`--metric winrate` / `--metric sign-test` 用。
-* `examples/paired_scores.jsonl` - baseline/candidateのペア数値スコア。`--metric mean-diff` / `--metric sign-test` 用。
+* `examples/paired_scores.jsonl`(同じデータのCSV版が `examples/paired_scores.csv`、下記参照) -
+  baseline/candidateのペア数値スコア。`--metric mean-diff` / `--metric sign-test` 用。
 * `examples/status_failures.jsonl` - サポートされる全レコード形式をまとめてフォーマットを例示したもの(そのまま単一メトリクスに対して実行することは想定していません: レコードは選択したメトリクスが理解できるフィールド、または `baseline_status`/`candidate_status` フィールドのいずれかを持つ必要があり、なければスキーマ不一致として拒否されます)。
+* `examples/chess_engine_draw_heavy.jsonl` - 引き分け率の高い勝敗/引き分けレコード。
+  `veridict sprt --sprt-variant trinomial` 用([SPRT](#sprt)参照)。
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}
@@ -133,11 +143,15 @@ case-002,,,candidate_win,,
 case-004,,,,ok,timeout
 ```
 
+```bash
+veridict compare examples/paired_scores.csv --format csv --metric mean-diff
+```
+
 ## メトリクス
 
-* **`winrate`** - 決着がついた(引き分けを除く)`result` レコードに対する信頼区間。`--ci-method wilson`(デフォルト)または `--ci-method exact`(Clopper-Pearson、正確二項信頼区間 - どんなサンプルサイズでも被覆確率が正確ですが、常にWilsonと同じかそれ以上に幅が広くなります)。
+* **`winrate`** - 決着がついた(引き分けを除く)`result` レコードに対する信頼区間。`--ci-method wilson`(デフォルト)、`--ci-method exact`(Clopper-Pearson、正確二項信頼区間 - どんなサンプルサイズでも被覆確率が正確ですが、常にWilsonと同じかそれ以上に幅が広くなります)、または `--ci-method jeffreys`(非情報的Jeffreys事前分布を使ったベイズ信用区間 - 多くの `p` ではWilsonとClopper-Pearsonの中間の幅になりますが、境界付近(全勝/全敗近く)ではその両方より狭くなることがあります)。`exact`/`jeffreys` はどちらも真の整数カウントの二項分布を前提とする、同じ理由による同じ制約です。
 * **`sign-test`** - baseline/candidateのペア数値レコードのうち、candidateがbaselineを上回った割合(タイは除外)に対する同じ信頼区間。`mean-diff` のノンパラメトリックな代替: 差の大きさではなく方向のみに着目します。こちらも `--ci-method` を指定できます。
-* **`mean-diff`** - baseline/candidateのペア数値レコードに対する `candidate - baseline` のブートストラップ信頼区間。`--bootstrap-method percentile`(デフォルト)または `--bootstrap-method bca`(バイアス補正・加速ブートストラップ - 歪んだ差分分布を補正します。既存のCI値が黙って変わらないよう、デフォルトは引き続き `percentile` です)。`--resamples` でブートストラップのリサンプル数、`--seed` でRNGシードを制御できます(デフォルトは固定シードなので、同じ入力ならCI上でも出力がビット単位で一致します)。
+* **`mean-diff`** - baseline/candidateのペア数値レコードに対する `candidate - baseline` のブートストラップ信頼区間。`--bootstrap-method percentile`(デフォルト)、`--bootstrap-method basic`(percentile区間を点推定の周りで反転させる方式 - BCaより単純ですが、それ自体にバイアス補正はありません)、または `--bootstrap-method bca`(バイアス補正・加速ブートストラップ - 歪んだ差分分布を補正します。既存のCI値が黙って変わらないよう、デフォルトは引き続き `percentile` です)。`--resamples` でブートストラップのリサンプル数、`--seed` でRNGシードを制御できます(デフォルトは固定シードなので、同じ入力ならCI上でも出力がビット単位で一致します)。
 * **`elo`** - 勝敗/引き分けの `result` レコードから算出するEloレーティング差(`winrate`/`sign-test` と異なり、引き分けは半勝として数えます)。標準的なロジスティックモデルでEloポイントとして報告します。`--ci-method exact` は非対応です: 勝率が小数(引き分けは半勝)になるため、Clopper-Pearsonの被覆保証が前提とする整数カウントの二項分布に当てはまりません。
 
 `winrate` と `sign-test` は `effect`/`ci_low`/`ci_high` を0を中心とした値(五分五分からの偏差)として報告します。`elo` も構造上0を中心とします(五分の成績は0 Elo)。この3つはいずれも `--min-effect` とそのまま組み合わせられます。`mean-diff` は入力そのものの単位で報告します。
@@ -148,14 +162,28 @@ case-004,,,,ok,timeout
 
 ## レポートの追加情報
 
-`compare` のレポートには、`verdict` に影響しない2つの付加的なフィールドが常に含まれます:
+すべてのレポート(`compare`、`sprt`、`matrix` いずれも)には `schema_version` という整数フィールドが
+含まれます(現在は `1`)。純粋な追加変更(新しいフィールド、新しいenumバリアント)の間はこの値は
+変わらず、フィールドの削除・改名があったときにのみ増分されます - そのため、機械側の消費者はフィールド
+の有無から推測するのではなく、このバージョン番号でパース方法を切り替えられます。レポート/レコード
+ごとのJSON Schemaは [`schemas/`](schemas/) を参照してください。
+
+`compare` のレポートには、`verdict` に影響しない付加的なフィールドも常に含まれます:
 
 * **`estimated_additional_trials`** - `inconclusive` な結果を決着させるのに必要な追加トライアル数のおおまかな見積もり(信頼区間が `O(1/√n)` で縮小するという前提、効果量自体は変わらないと仮定)。提案できることが何もない場合は `null` になります - 既に判定済み、トライアル数が0件、あるいは効果量がpass/failしきい値の"内側"(デッドゾーン)にある場合です: 効果量がすでにデッドゾーン内にある点推定を中心に信頼区間を縮めても、データをどれだけ追加してもどちらの境界も越えられません。この数値は「保証」ではなく「だいたいこのくらい、あるいはもっと必要」という目安として扱ってください - 既知の、定量化されたバイアスがあります(検証済みの一例では n=100 で約18%の過小評価)。
-* **`warnings`** - データ品質に関する警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、または `elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)。
+* **`warnings`** - 人間可読なデータ品質の警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、または `elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)。
+* **`data_quality`** - `warnings` と同じ内容を、文字列ではなく真偽値(`tiny_sample`、`high_failure_rate`、`draw_heavy`、`effect_within_noise_floor`)として持つフィールドです。文章を解析するのではなくフラグで分岐したい機械側の消費者向けです。`warnings` を置き換えるものではなく併存します - どちらも常に存在します。
+
+各手法の前提・失敗モードの詳細は [`docs/metrics_ja.md`](docs/metrics_ja.md) を参照してください。
 
 ## SPRT
 
-`veridict sprt` は `compare` とは別のモードです。効果量としきい値と照合する信頼区間の代わりに、決着がついた(引き分けを除く)`result` レコードに対して対数尤度比(Wald古典的な二値SPRT)を累積し、`--alpha`/`--beta` から導かれる2つの境界のいずれかを超えた時点で停止します。`pass` は「候補が少なくとも `--elo1` ポイント強いと確信できる」、`fail` は「高々 `--elo0` ポイントの強さだと確信できる」、`inconclusive` は「データ収集を継続する」ことを意味します。`--alpha`/`--beta` はレポート上の調整可能なつまみではなく、実際に保証される偽陽性率/偽陰性率そのものです。このサブコマンドに `--min-effect`/`--confidence` はありません。
+`veridict sprt` は `compare` とは別のモードです。効果量としきい値と照合する信頼区間の代わりに、対数尤度比を累積し、`--alpha`/`--beta` から導かれる2つの境界のいずれかを超えた時点で停止します。`pass` は「候補が少なくとも `--elo1` ポイント強いと確信できる」、`fail` は「高々 `--elo0` ポイントの強さだと確信できる」、`inconclusive` は「データ収集を継続する」ことを意味します。`--alpha`/`--beta` はレポート上の調整可能なつまみではなく、実際に保証される偽陽性率/偽陰性率そのものです。このサブコマンドに `--min-effect`/`--confidence` はありません。2つのバリアントがあります(`--sprt-variant`):
+
+* **`wald`**(デフォルト) - 決着がついた(引き分けを除く)`result` レコードのみに対する古典的な二値SPRT。このモデルの下では引き分けはどちらのElo仮説が正しいかについて情報を持たないため、LLRから完全に除外されます。仮説は `--elo0`/`--elo1` で、標準的なロジスティックEloです。
+* **`trinomial`** - 引き分けを考慮した一般化LLR検定(チェスエンジンのテストツール、例えばFishtestで歴史的に使われてきたBayesEloパラメータ化)。引き分け率をプールされた勝ち/引き分け/負けのカウントからニュイサンスパラメータとして推定することで、引き分けの多いデータで `wald` より速く収束します。**単位はロジスティックEloではなくBayesEloです** - この2つは推定された引き分け率がちょうどゼロのときのみ一致するため、`--elo0`/`--elo1` を再解釈するのではなく、別途 `--belo0`/`--belo1` フラグで仮説を与えます。推定された引き分け率(`drawelo`)は、判定に使われているのと同じデータから推定されたものであるため、透明性のため出力に含まれます。
+
+両バリアントの詳細な仕組み(BayesEloとロジスティックEloの単位変換を含む)は [`docs/metrics_ja.md`](docs/metrics_ja.md) を参照してください。
 
 ## 比較マトリクス(comparison matrix)
 
@@ -190,6 +218,9 @@ case-004,,,,ok,timeout
 ## 統計的根拠
 
 veridict が出す数値は独自の謎スコアではなく、標準的な(査読済みの)統計手法に基づいています。
+各メトリクスの前提・失敗モードまで含めた完全版は [`docs/metrics_ja.md`](docs/metrics_ja.md) を、
+検討したが未実装の手法・意図的にスコープ外としているものは
+[`docs/research-map_ja.md`](docs/research-map_ja.md) を参照してください。
 
 * **`winrate`/`sign-test` の信頼区間** - Wilson score interval(Wilson 1927)。`--ci-method exact`
   を指定すると、代わりにClopper-Pearsonの正確な二項信頼区間(Clopper & Pearson 1934)になります。
