@@ -75,6 +75,17 @@ with the project's "false pass is worse than inconclusive" bias - and the same t
 accepted for `sign-test`. Doesn't support `--ci-method exact`/`jeffreys`: both require a true
 integer-count binomial, and Elo's win rate is fractional (a draw is half a win).
 
+**A separate source of noise, and how to cancel it:** the approximation above is about *modeling*
+variance correctly once the trials are fixed. It says nothing about *testcase-selection* variance
+- independently sampling which starting position or which side plays which role adds noise that
+has nothing to do with the candidate's actual strength. Engine-style paired testing (same starting
+position played twice, roles/sides swapped) is the standard way to cancel that bias, and `elo`
+already supports it for free via [`--paired-by-id`](../README.md#paired-testcases): assign the
+same `id` to both games of a position-pair (independent of which side won which color) so the pair
+nets to one observation - by total points, `win=1`/`draw=0.5`/`loss=0` - instead of two independent
+ones. This is a different lever from `--ci-method`/`--bootstrap-method`: it reduces the variance
+that goes *into* the estimate, rather than changing how the interval is computed from it.
+
 ## `sprt`
 
 **Established statistic**, two variants (`--sprt-variant`):
