@@ -20,13 +20,17 @@
 「スプレッドシートを目で見て何となく判断していた」ような、あらゆる"candidate vs baseline"比較に使えます:
 
 * **ゲーム/探索エンジンのリグレッション検知** - 勝敗/引き分けの対局結果 →
-  `--metric winrate`、`--metric elo`、または逐次検定したいなら `veridict sprt`。
+  `--metric winrate`、`--metric elo`、または逐次検定したいなら `veridict sprt`
+  (`examples/chess_engine_winloss.jsonl`)。
 * **OCRや抽出パイプラインの精度比較** - 文書ごとの精度スコア →
-  `--metric mean-diff` または `--metric sign-test`。
+  `--metric mean-diff` または `--metric sign-test`
+  (`examples/ocr_accuracy_paired.jsonl`、`examples/extraction_quality_paired.jsonl`)。
 * **LLMプロンプト/モデルの比較** - ペアワイズのジャッジ結果や数値品質スコア →
-  `--metric winrate` または `--metric mean-diff`。
+  `--metric winrate` または `--metric mean-diff`
+  (`examples/llm_prompt_ab.jsonl`)。
 * **ランキング/最適化アルゴリズムのチューニング** - 実行ごとの数値目的関数
-  (NDCG、loss、スループットなど) → `--metric mean-diff`。
+  (NDCG、loss、スループットなど) → `--metric mean-diff`
+  (目的関数自体が勝敗/引き分け形式なら `examples/ranking_elo.jsonl`)。
 * **CIでのリリースリグレッションゲート** - 候補ビルドを直近の正常なベースラインと比較し、
   `--fail-below`/`--pass-above` と `veridict` の終了コードでパイプラインに組み込む
   (下記の[使い方](#使い方)のリグレッションゲート例を参照)。
@@ -89,6 +93,12 @@ veridict sprt results.jsonl --elo0 0 --elo1 10 --alpha 0.05 --beta 0.05
 veridict matrix prompt_a.jsonl prompt_b.jsonl prompt_c.jsonl
 ```
 
+または、共有ベースラインなしで、直接対戦データから名前付き対戦相手をランク付けします:
+
+```bash
+veridict matrix --matches examples/matches_head_to_head.jsonl
+```
+
 ### 終了コード
 
 | コード | 意味 |
@@ -149,9 +159,18 @@ case-004,,,,ok,timeout
 
 ## 比較マトリクス(comparison matrix)
 
-`veridict matrix` は候補ごとに1ファイルを受け取ります。いずれも*同じ共有ベースライン*に対して測定されたもので、`--metric elo`/`--metric winrate` と同じ `result` フィールドの勝敗/引き分けレコードを使います。そしてペアワイズのElo差を一覧表にします。レポート専用で(判定なし)、成功時は常に終了コード0です: マトリクス全体に対する単一のpass/failは存在しません。
+`veridict matrix` は3つ以上の候補を比較し、ペアワイズのElo差を一覧表にします。レポート専用で(判定なし)、成功時は常に終了コード0です: マトリクス全体に対する単一のpass/failは存在しません。データの与え方は2通りあり、1回の実行で自由に組み合わせられます:
 
-各候補は常に共有ベースラインとのみ対戦し、候補同士は直接対戦しないため、背後のモデルはスターグラフ(star graph)になります。つまり各候補のレーティングはそのままその候補自身のElo-vs-baselineに一致します(スターグラフ上のBradley-TerryのMLEには共同で解くべき共有項が存在せず、反復ソルバーは不要です)。`baseline` に対するセルは直接データですが、候補同士のセルはモデルによる外挿(`elo_i - elo_j`、Markdown表では `*` を付与)であり、その信頼区間は2つの独立したサンプル間の正規近似による誤差伝播から求めています。そのため予想どおり、直接データのセルより幅が広くなります。
+* **レガシー方式**: 候補ごとに1ファイル、いずれも*同じ共有ベースライン*に対して測定されたもので、`--metric elo`/`--metric winrate` と同じ `result` フィールドの勝敗/引き分けレコードを使います。
+* **`--matches`**(繰り返し指定可): 名前付き対戦相手同士の直接対戦レコード - `{"id": ..., "a": "...", "b": "...", "result": "a_win"|"b_win"|"draw"}` - により、候補同士が共有ベースラインを介さず直接対戦したデータを扱えます。`a`/`b` に文字列 `"baseline"` を指定すると、レガシーファイルが暗黙に持つbaselineノードと接続できます。
+
+得られたグラフがトポロジー的にまだスター形(どの対戦も出どころに関わらずbaselineを含む)であれば、`matrix` は閉形式を使います: 各候補のレーティングはそのままその候補自身のElo-vs-baselineです(スターグラフ上のBradley-TerryのMLEには共同で解くべき共有項が存在しません)。候補同士の実対戦データが存在する場合は、一般Bradley-Terryモデル(グラフ全体に対する反復ソルバー)を使ってフィットします。いずれの場合も、各セルには次のいずれかが付与されます:
+
+* **`direct`** - その行と列の間に実際の直接対戦データが存在する。
+* **`inferred`**(Markdown表では `*`)- 両者ともレーティングは付いており比較可能だが、直接対戦したことはない - モデルによる外挿 `elo_i - elo_j`。
+* **`disconnected`**(Markdown表では `n/a`)- 両者を結ぶ経路が存在しない(例: 共通の対戦相手を持たない2つの独立した対戦クラスタ)。この場合、両者の間には不確実なレーティング差があるのではなく、有限のレーティング差そのものが存在しません - `elo_diff` は推測値ではなく `null` です。
+
+スターグラフ/レガシー方式のセルは従来どおり実際のWilson区間を保持します。一般グラフモードのマトリクスセル(`direct`/`inferred`)も、実際のブートストラップ信頼区間を得られるようになりました: 各リサンプルではすべての対戦カードの勝敗/引き分けの実測比率からタリーを引き直し、グラフ全体を再フィットします。`ci_low`/`ci_high` は、そのペアが同じコンポーネントに留まったリサンプルにおける `elo_i - elo_j` から得られます。`matrix` の `--resamples`(デフォルト2,000)、`--seed`、`--bootstrap-method percentile`(デフォルト)/`basic`/`bca`(`compare` の同名フラグと同じ3手法・同じ意味)でこれを制御できます(いずれもスターグラフモードでは無視され、閉形式のWilson区間のままです)。`elo_diff` が付いているのに `ci_low`/`ci_high` が `null` のままのセルもあり得ます - これは実測データ上は繋がっているものの、リサンプリングに対してその接続が脆弱すぎる(リサンプルの90%未満でしか同じコンポーネントに留まらない)ため、誤って狭い区間を報告するよりは「信頼区間なし」と明示することを選んだ結果です。`CandidateSummary` 自体の `ci_low`/`ci_high` は、一般グラフモードでは引き続き常に `null` です: 個々のレーティングはそのコンポーネント内の任意の基準対戦相手との相対値でしかなく、`elo_i - elo_j` の信頼区間とは異なり、それ自体に信頼区間を付けると誤解を招くためです。
 
 ## ペアテストケース(paired testcases)
 
@@ -167,6 +186,53 @@ case-004,,,,ok,timeout
 このゲートは点推定ではなく信頼区間としきい値を比較します: `pass` は信頼区間の悲観的な(下側の)境界が `--pass-above` を上回ることを要求し、`fail` は信頼区間の楽観的な(上側の)境界が `--fail-below` 以下であることを要求します。それ以外(使用可能なトライアルが0件の場合を含む)はすべて `inconclusive` です。
 
 `--min-effect X` は対称なしきい値(`--pass-above X --fail-below -X`)の省略形で、デフォルトは `0` です。
+
+## 統計的根拠
+
+veridict が出す数値は独自の謎スコアではなく、標準的な(査読済みの)統計手法に基づいています。
+
+* **`winrate`/`sign-test` の信頼区間** - Wilson score interval(Wilson 1927)。`--ci-method exact`
+  を指定すると、代わりにClopper-Pearsonの正確な二項信頼区間(Clopper & Pearson 1934)になります。
+* **`mean-diff` の信頼区間** - percentile / BCa(バイアス補正・加速)ブートストラップ。いずれも
+  Efron & Tibshirani『An Introduction to the Bootstrap』(1993年、14章)に基づきます。
+* **`elo`** - ロジスティックElo モデル。Eloの原型のレーティングシステム(Elo 1978)を、広く使われて
+  いる形に変形したものです。
+* **`sprt`** - Waldの逐次確率比検定(Wald 1945)。
+* **`matrix` の一般グラフモード** - Bradley-Terryのペア比較モデル(Bradley & Terry 1952)を、
+  Zermelo(1929)/Hunter(2004)のMM(Minorization-Maximization)不動点法でフィットします。有限な解が
+  存在するための条件はFord(1957)によります。
+
+一方で、次の値は学術論文由来の厳密な統計的結果ではありません - 本プロジェクト独自の設計判断・経験則
+であり、それを定理であるかのように装ってはいません:
+
+* **`pass`/`fail`/`inconclusive`** - 信頼区間を閾値と比較すること自体は標準的な決定則ですが、どの
+  閾値を使うか、および「false passはinconclusiveより悪い」という保守的な方針(判定ロジック参照)は、
+  本プロジェクト独自の設計判断です。
+* **`estimated_additional_trials`** - `winrate`/`sign-test`/`elo` では、レポートが実際に使っている
+  CI計算式に対する二分探索であり、想定モデル(点推定を固定)のもとでは厳密です。例外は`mean-diff`で、
+  ブートストラップCIにはそのような閉形式が存在しないため、`O(1/sqrt(n))` のスケーリングによる近似に
+  フォールバックします。これには既知のバイアスがあります(レポートの追加情報を参照)。
+* **`warnings`** - サンプル数30件・失敗率20%・引き分け率50%といった閾値は、特定の論文由来ではなく
+  慣習的な経験則です。
+
+### 参考文献
+
+- Wilson, E. B. (1927). "Probable Inference, the Law of Succession, and Statistical Inference."
+  *Journal of the American Statistical Association*, 22(158), 209-212.
+- Clopper, C. J.; Pearson, E. S. (1934). "The use of confidence or fiducial limits illustrated in
+  the case of the binomial." *Biometrika*, 26(4), 404-413.
+- Efron, B.; Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall/CRC.
+- Wald, A. (1945). "Sequential Tests of Statistical Hypotheses." *Annals of Mathematical
+  Statistics*, 16(2), 117-186.
+- Elo, A. (1978). *The Rating of Chessplayers, Past and Present*. Arco Publishing.
+- Bradley, R. A.; Terry, M. E. (1952). "Rank Analysis of Incomplete Block Designs: I. The Method
+  of Paired Comparisons." *Biometrika*, 39(3/4), 324-345.
+- Zermelo, E. (1929). "Die Berechnung der Turnier-Ergebnisse als ein Maximumproblem der
+  Wahrscheinlichkeitsrechnung." *Mathematische Zeitschrift*, 29, 436-460.
+- Hunter, D. R. (2004). "MM algorithms for generalized Bradley-Terry models." *Annals of
+  Statistics*, 32(1), 384-406.
+- Ford, L. R. Jr. (1957). "Solution of a Ranking Problem from Binary Comparisons." *The American
+  Mathematical Monthly*, 64(8), 28-33.
 
 ## 開発
 

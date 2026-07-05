@@ -24,13 +24,17 @@ Any "candidate vs baseline" comparison where you'd otherwise eyeball a
 spreadsheet and guess:
 
 * **Game/search engine regression** - win/loss/draw match results ->
-  `--metric winrate`, `--metric elo`, or `veridict sprt` for sequential testing.
+  `--metric winrate`, `--metric elo`, or `veridict sprt` for sequential
+  testing (`examples/chess_engine_winloss.jsonl`).
 * **OCR or extraction-pipeline accuracy** - per-document accuracy scores ->
-  `--metric mean-diff` or `--metric sign-test`.
+  `--metric mean-diff` or `--metric sign-test` (`examples/ocr_accuracy_paired.jsonl`,
+  `examples/extraction_quality_paired.jsonl`).
 * **LLM prompt or model comparison** - pairwise judge verdicts or numeric
-  quality scores -> `--metric winrate` or `--metric mean-diff`.
+  quality scores -> `--metric winrate` or `--metric mean-diff`
+  (`examples/llm_prompt_ab.jsonl`).
 * **Ranking/optimization algorithm tuning** - a numeric objective per run
-  (NDCG, loss, throughput) -> `--metric mean-diff`.
+  (NDCG, loss, throughput) -> `--metric mean-diff` (`examples/ranking_elo.jsonl`
+  if the objective is itself win/loss/draw-shaped).
 * **Release regression gate in CI** - candidate build vs last known-good
   baseline, wired into a pipeline with `--fail-below`/`--pass-above` and a
   `veridict` exit code (see [Regression gate](#usage) below).
@@ -96,6 +100,13 @@ shared baseline, and tabulate pairwise Elo differences:
 
 ```bash
 veridict matrix prompt_a.jsonl prompt_b.jsonl prompt_c.jsonl
+```
+
+Or rank named competitors directly from head-to-head data, no shared
+baseline required:
+
+```bash
+veridict matrix --matches examples/matches_head_to_head.jsonl
 ```
 
 ### Exit codes
@@ -207,20 +218,55 @@ positive/negative rates, not tunable knobs on a report - there's no
 
 ## Comparison matrix
 
-`veridict matrix` takes one file per candidate - each measured against the
-*same shared baseline*, using the same `result`-field win/loss/draw records
-as `--metric elo`/`--metric winrate` - and tabulates pairwise Elo
-differences. It's report-only (no verdict, always exits 0 on success):
-there's no single pass/fail for a whole matrix.
+`veridict matrix` compares more than two candidates at once and tabulates
+pairwise Elo differences. It's report-only (no verdict, always exits 0 on
+success): there's no single pass/fail for a whole matrix. Two ways to feed
+it data, freely combinable in one run:
 
-Every candidate only ever plays the shared baseline (never each other), so
-the underlying model is a star graph: each candidate's rating is exactly
-its own Elo-vs-baseline (the Bradley-Terry MLE on a star graph has no
-shared terms to solve jointly - no iterative solver needed). Cells against
-`baseline` are direct data; candidate-vs-candidate cells are
-model-extrapolated (`elo_i - elo_j`, marked `*` in the Markdown table)
-with a CI from normal-approximation error propagation across the two
-independent samples - wider than either direct cell's CI, as expected.
+* **Legacy**: one file per candidate, each measured against the *same
+  shared baseline*, using the same `result`-field win/loss/draw records as
+  `--metric elo`/`--metric winrate`.
+* **`--matches`** (repeatable): head-to-head records between named
+  competitors - `{"id": ..., "a": "...", "b": "...", "result":
+  "a_win"|"b_win"|"draw"}` - so candidates can play each other directly,
+  not just the shared baseline. Use the literal name `"baseline"` in `a`/`b`
+  to connect this data to the baseline node implied by the legacy files.
+
+If the resulting graph is still topologically a star (every game touches
+baseline, whichever source it came from), `matrix` uses a closed form: each
+candidate's rating is exactly its own Elo-vs-baseline (the Bradley-Terry
+MLE on a star graph has no shared terms to solve jointly). Once real
+candidate-vs-candidate games are present, it fits a general Bradley-Terry
+model instead (an iterative solver over the whole graph). Either way, each
+matrix cell is marked:
+
+* **`direct`** - a real head-to-head edge exists between that row and column.
+* **`inferred`** (`*` in the Markdown table) - both are rated and
+  comparable, but never played each other; a model-extrapolated
+  `elo_i - elo_j`.
+* **`disconnected`** (`n/a` in the Markdown table) - no path connects them
+  (e.g. two separate head-to-head clusters that never share a competitor).
+  There is no finite rating difference between them, not merely an
+  uncertain one - `elo_diff` is `null`, not a guess.
+
+Star-graph/legacy cells keep their real Wilson interval, as before. General-
+graph matrix cells (`direct`/`inferred`) get a real bootstrap CI too: each
+resample redraws every edge's tally from its own observed win/loss/draw
+proportions and refits the whole graph, and `ci_low`/`ci_high` come from
+`elo_i - elo_j` across resamples that kept the pair in the same component.
+`--resamples` (default 2,000), `--seed`, and `--bootstrap-method percentile`
+(default) or `--bootstrap-method basic`/`bca` - same three methods and same
+meaning as `compare`'s flag of the same name - control this (all ignored in
+star-graph mode, which keeps its closed-form Wilson interval regardless). A
+cell can
+still show `ci_low`/`ci_high: null` even though `elo_diff` isn't - that
+means the pair is connected in the observed data, but the connection is too
+fragile under resampling (fewer than 90% of resamples kept them in the same
+component) for a reliable interval, deliberately reported as "no CI" rather
+than a falsely narrow one. `CandidateSummary`'s own `ci_low`/`ci_high` stay
+`null` in general-graph mode regardless: an individual rating is only
+meaningful relative to its component's arbitrary reference competitor, so a
+CI on it would be misleading in a way `elo_i - elo_j`'s CI isn't.
 
 ## Paired testcases
 
@@ -250,6 +296,53 @@ or below `--fail-below`. Anything else, including zero usable trials, is
 
 `--min-effect X` is shorthand for symmetric thresholds
 (`--pass-above X --fail-below -X`) and defaults to `0`.
+
+## Statistical basis
+
+veridict's numbers are standard, published statistics, not a bespoke scoring system:
+
+* **`winrate`/`sign-test` CI** - Wilson score interval (Wilson 1927); `--ci-method exact` gives
+  the Clopper-Pearson exact binomial interval (Clopper & Pearson 1934) instead.
+* **`mean-diff` CI** - percentile or BCa (bias-corrected and accelerated) bootstrap, both from
+  Efron & Tibshirani, *An Introduction to the Bootstrap* (1993, ch. 14).
+* **`elo`** - the logistic Elo model, the widely-used variant of Elo's original rating system
+  (Elo 1978).
+* **`sprt`** - Wald's sequential probability ratio test (Wald 1945).
+* **`matrix`'s general-graph mode** - the Bradley-Terry paired-comparison model (Bradley & Terry
+  1952), fit via the Zermelo (1929)/Hunter (2004) Minorization-Maximization fixed-point iteration;
+  the existence condition for a finite solution comes from Ford (1957).
+
+The following are *not* citation-backed statistical results - they're this project's own design
+choices or heuristics, and are labeled that way deliberately rather than dressed up as theorems:
+
+* **`pass`/`fail`/`inconclusive`** - comparing a CI against a threshold is a standard decision
+  rule, but which threshold to use and the "false pass is worse than inconclusive" bias (see
+  Verdict logic) are this project's own conservative design choice.
+* **`estimated_additional_trials`** - for `winrate`/`sign-test`/`elo` this binary-searches the
+  real CI formula the report already uses, which is exact for the stated model (point estimate
+  held fixed). `mean-diff` is the exception: there's no such closed form for a bootstrap CI, so it
+  falls back to an `O(1/sqrt(n))` scaling heuristic with a documented bias (see Report extras).
+* **`warnings`** - the 30-trial, 20%-failure-rate, and 50%-draw-rate thresholds are conventional
+  rules of thumb, not derived from a specific paper.
+
+### References
+
+- Wilson, E. B. (1927). "Probable Inference, the Law of Succession, and Statistical Inference."
+  *Journal of the American Statistical Association*, 22(158), 209-212.
+- Clopper, C. J.; Pearson, E. S. (1934). "The use of confidence or fiducial limits illustrated in
+  the case of the binomial." *Biometrika*, 26(4), 404-413.
+- Efron, B.; Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall/CRC.
+- Wald, A. (1945). "Sequential Tests of Statistical Hypotheses." *Annals of Mathematical
+  Statistics*, 16(2), 117-186.
+- Elo, A. (1978). *The Rating of Chessplayers, Past and Present*. Arco Publishing.
+- Bradley, R. A.; Terry, M. E. (1952). "Rank Analysis of Incomplete Block Designs: I. The Method
+  of Paired Comparisons." *Biometrika*, 39(3/4), 324-345.
+- Zermelo, E. (1929). "Die Berechnung der Turnier-Ergebnisse als ein Maximumproblem der
+  Wahrscheinlichkeitsrechnung." *Mathematische Zeitschrift*, 29, 436-460.
+- Hunter, D. R. (2004). "MM algorithms for generalized Bradley-Terry models." *Annals of
+  Statistics*, 32(1), 384-406.
+- Ford, L. R. Jr. (1957). "Solution of a Ranking Problem from Binary Comparisons." *The American
+  Mathematical Monthly*, 64(8), 28-33.
 
 ## Development
 
