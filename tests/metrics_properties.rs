@@ -36,10 +36,10 @@ proptest! {
         let records: Vec<(usize, Record)> = records.into_iter().enumerate().map(|(i, r)| (i + 1, r)).collect();
         let metrics = [MetricKind::WinRate, MetricKind::MeanDiff, MetricKind::SignTest, MetricKind::Elo];
 
-        let combined = compute_many(&records, &metrics, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
+        let combined = compute_many(records.iter().cloned().map(Ok), &metrics, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
 
         for (i, &metric) in metrics.iter().enumerate() {
-            let independent = compute(&records, metric, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
+            let independent = compute(records.iter().cloned().map(Ok), metric, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
             prop_assert_eq!(combined[i].paired_count, independent.paired_count);
             prop_assert_eq!(combined[i].baseline_count, independent.baseline_count);
             prop_assert_eq!(combined[i].candidate_count, independent.candidate_count);

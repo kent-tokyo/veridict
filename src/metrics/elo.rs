@@ -13,12 +13,12 @@ use crate::metrics::common::OutcomeCollector;
 use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
 use crate::stats::{elo, wilson};
 
-pub(crate) struct EloAggregator<'a> {
-    collector: OutcomeCollector<'a>,
+pub(crate) struct EloAggregator {
+    collector: OutcomeCollector,
     confidence: f64,
 }
 
-impl<'a> EloAggregator<'a> {
+impl EloAggregator {
     pub(crate) fn new(confidence: f64, paired_by_id: bool) -> Self {
         Self {
             collector: OutcomeCollector::new(paired_by_id),
@@ -27,11 +27,11 @@ impl<'a> EloAggregator<'a> {
     }
 }
 
-impl<'a> MetricAggregator<'a> for EloAggregator<'a> {
+impl MetricAggregator for EloAggregator {
     fn ingest(
         &mut self,
         line: usize,
-        record: &'a Record,
+        record: &Record,
         has_status: bool,
     ) -> Result<(), VeridictError> {
         let mut used = has_status;
@@ -43,6 +43,7 @@ impl<'a> MetricAggregator<'a> for EloAggregator<'a> {
                     return Err(VeridictError::UnrecognizedOutcome {
                         line,
                         value: result.to_string(),
+                        expected: "baseline_win|candidate_win|draw",
                     });
                 }
             }

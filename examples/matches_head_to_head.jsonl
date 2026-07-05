@@ -1,0 +1,9 @@
+{"id":"m1","a":"prompt_a","b":"prompt_b","result":"a_win"}
+{"id":"m2","a":"prompt_a","b":"prompt_b","result":"a_win"}
+{"id":"m3","a":"prompt_a","b":"prompt_b","result":"b_win"}
+{"id":"m4","a":"prompt_b","b":"prompt_c","result":"a_win"}
+{"id":"m5","a":"prompt_b","b":"prompt_c","result":"a_win"}
+{"id":"m6","a":"prompt_b","b":"prompt_c","result":"b_win"}
+{"id":"m7","a":"prompt_c","b":"prompt_a","result":"a_win"}
+{"id":"m8","a":"prompt_c","b":"prompt_a","result":"b_win"}
+{"id":"m9","a":"prompt_c","b":"prompt_a","result":"b_win"}

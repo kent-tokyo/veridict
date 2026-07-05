@@ -1,13 +1,13 @@
 //! Thin CLI wrapper around the `veridict` library. Owns all stdout/stderr
 //! output and exit codes; the library itself never prints.
 
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use veridict::sprt::SprtConfig;
+use veridict::sprt::{SprtConfig, SprtVariant};
 use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
 use veridict::{BootstrapMethod, CiMethod, MetricKind, Verdict, VeridictError, input, matrix};
@@ -59,11 +59,11 @@ struct CompareArgs {
     min_effect: Option<f64>,
 
     /// Explicit pass threshold. Requires --fail-below.
-    #[arg(long, requires = "fail_below")]
+    #[arg(long, requires = "fail_below", allow_hyphen_values = true)]
     pass_above: Option<f64>,
 
     /// Explicit fail threshold. Requires --pass-above.
-    #[arg(long, requires = "pass_above")]
+    #[arg(long, requires = "pass_above", allow_hyphen_values = true)]
     fail_below: Option<f64>,
 
     /// Bootstrap resample count, used only by --metric mean-diff.
@@ -76,14 +76,16 @@ struct CompareArgs {
     seed: Option<u64>,
 
     /// Confidence interval method for --metric winrate/sign-test. `exact`
-    /// (Clopper-Pearson) is only valid for those two metrics - combining it
-    /// with --metric elo/mean-diff is a config error, not a silent fallback.
+    /// (Clopper-Pearson) and `jeffreys` are only valid for those two metrics;
+    /// combining either with --metric elo/mean-diff is a config error, not a
+    /// silent fallback.
     #[arg(long, value_enum, default_value = "wilson")]
     ci_method: CiMethodArg,
 
     /// Bootstrap variant for --metric mean-diff. `bca` corrects for bias and
-    /// skewness; `percentile` stays the default so existing CI numbers don't
-    /// silently shift.
+    /// skewness; `basic` reflects the percentile interval around the point
+    /// estimate (simpler, no bias-correction of its own); `percentile` stays
+    /// the default so existing CI numbers don't silently shift.
     #[arg(long, value_enum, default_value = "percentile")]
     bootstrap_method: BootstrapMethodArg,
 
@@ -114,13 +116,34 @@ struct SprtArgs {
     #[arg(long, value_enum)]
     format: Option<FormatArg>,
 
-    /// H0: the candidate is at most this many Elo points stronger.
-    #[arg(long, allow_hyphen_values = true)]
-    elo0: f64,
+    /// SPRT variant. `wald` (default): classic two-outcome test, draws
+    /// excluded, via --elo0/--elo1 (logistic Elo). `trinomial`: draw rate
+    /// estimated as a nuisance parameter, converges faster on draw-heavy
+    /// data, via --belo0/--belo1 (BayesElo - a different scale from
+    /// logistic Elo whenever the estimated draw rate is nonzero, see
+    /// stats::trinomial_sprt's doc).
+    #[arg(long, value_enum, default_value = "wald")]
+    sprt_variant: SprtVariantArg,
 
-    /// H1: the candidate is at least this many Elo points stronger.
+    /// H0 for --sprt-variant wald: the candidate is at most this many
+    /// logistic-Elo points stronger.
     #[arg(long, allow_hyphen_values = true)]
-    elo1: f64,
+    elo0: Option<f64>,
+
+    /// H1 for --sprt-variant wald: the candidate is at least this many
+    /// logistic-Elo points stronger.
+    #[arg(long, allow_hyphen_values = true)]
+    elo1: Option<f64>,
+
+    /// H0 for --sprt-variant trinomial: the candidate is at most this many
+    /// BayesElo points stronger.
+    #[arg(long, allow_hyphen_values = true)]
+    belo0: Option<f64>,
+
+    /// H1 for --sprt-variant trinomial: the candidate is at least this many
+    /// BayesElo points stronger.
+    #[arg(long, allow_hyphen_values = true)]
+    belo1: Option<f64>,
 
     /// False-positive rate: probability of accepting H1 when H0 is true.
     #[arg(long, default_value_t = 0.05)]
@@ -147,12 +170,21 @@ struct SprtArgs {
 
 #[derive(clap::Args)]
 struct MatrixArgs {
-    /// One file per candidate, each measured against the same shared baseline. Candidate names
-    /// come from each file's stem (e.g. "prompt_a.jsonl" -> "prompt_a").
-    #[arg(required = true, num_args = 1..)]
+    /// Legacy: one file per candidate, each measured against the same shared baseline (id/
+    /// baseline/candidate/result schema). Candidate names come from each file's stem (e.g.
+    /// "prompt_a.jsonl" -> "prompt_a"). At least one of `files`/`--matches` is required.
+    #[arg(num_args = 1.., required_unless_present = "matches")]
     files: Vec<PathBuf>,
 
-    /// Input format, applied to every file. Defaults to sniffing each file's extension.
+    /// Head-to-head match data between named competitors (id/a/b/result schema, result is
+    /// a_win|b_win|draw). Competitor names come from each record's a/b fields, not the file
+    /// name. Repeatable. Use the literal name "baseline" in a/b to connect this data to the
+    /// baseline node implied by `files`.
+    #[arg(long = "matches", num_args = 1.., required_unless_present = "files")]
+    matches: Vec<PathBuf>,
+
+    /// Input format, applied to every file (both legacy files and --matches). Defaults to
+    /// sniffing each file's extension.
     #[arg(long, value_enum)]
     format: Option<FormatArg>,
 
@@ -165,6 +197,23 @@ struct MatrixArgs {
     /// each file.
     #[arg(long)]
     paired_by_id: bool,
+
+    /// Bootstrap resample count for general-graph confidence intervals. Has
+    /// no effect when every edge touches "baseline" (star mode uses the
+    /// closed-form Wilson interval instead).
+    #[arg(long, default_value_t = 2_000)]
+    resamples: usize,
+
+    /// Bootstrap RNG seed for general-graph confidence intervals. Defaults
+    /// to a fixed seed, so the same input reproduces bit-identical output.
+    #[arg(long)]
+    seed: Option<u64>,
+
+    /// Bootstrap variant for general-graph confidence intervals. Same
+    /// meaning as `compare`'s `--bootstrap-method`; has no effect in star
+    /// mode (closed-form Wilson interval, no bootstrap involved).
+    #[arg(long, value_enum, default_value = "percentile")]
+    bootstrap_method: BootstrapMethodArg,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -204,6 +253,7 @@ enum FormatArg {
 enum CiMethodArg {
     Wilson,
     Exact,
+    Jeffreys,
 }
 
 impl From<CiMethodArg> for CiMethod {
@@ -211,6 +261,7 @@ impl From<CiMethodArg> for CiMethod {
         match m {
             CiMethodArg::Wilson => CiMethod::Wilson,
             CiMethodArg::Exact => CiMethod::Exact,
+            CiMethodArg::Jeffreys => CiMethod::Jeffreys,
         }
     }
 }
@@ -219,6 +270,7 @@ impl From<CiMethodArg> for CiMethod {
 enum BootstrapMethodArg {
     Percentile,
     Bca,
+    Basic,
 }
 
 impl From<BootstrapMethodArg> for BootstrapMethod {
@@ -226,8 +278,15 @@ impl From<BootstrapMethodArg> for BootstrapMethod {
         match m {
             BootstrapMethodArg::Percentile => BootstrapMethod::Percentile,
             BootstrapMethodArg::Bca => BootstrapMethod::Bca,
+            BootstrapMethodArg::Basic => BootstrapMethod::Basic,
         }
     }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SprtVariantArg {
+    Wald,
+    Trinomial,
 }
 
 fn main() -> ExitCode {
@@ -264,7 +323,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
 
     let (verdict, json, markdown) = if let [only] = metrics[..] {
         let report = veridict::compare_one(
-            &records,
+            records,
             only,
             args.confidence,
             &thresholds,
@@ -281,7 +340,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
         )
     } else {
         let multi = veridict::compare_many(
-            &records,
+            records,
             &metrics,
             args.confidence,
             &thresholds,
@@ -300,11 +359,12 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
 }
 
 fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
-    let config = SprtConfig::new(args.elo0, args.elo1, args.alpha, args.beta)?;
+    let (elo0, elo1, variant) = resolve_sprt_hypotheses(&args)?;
+    let config = SprtConfig::new(elo0, elo1, args.alpha, args.beta)?;
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;
 
-    let report = veridict::sprt::run(&records, &config, args.paired_by_id)?;
+    let report = veridict::sprt::run(records, &config, variant, args.paired_by_id)?;
     let json = report.to_json_pretty();
     let markdown = report.to_markdown();
 
@@ -313,10 +373,54 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     Ok(exit_code_for(report.verdict))
 }
 
+/// Picks the (elo0, elo1) pair matching `--sprt-variant`, and rejects the
+/// *other* variant's flags being set too - per AGENTS.md's "never silently
+/// ignore invalid data", a wald run given `--belo0` (or vice versa) is a
+/// user mistake worth a clear error, not a silently-dropped flag.
+fn resolve_sprt_hypotheses(args: &SprtArgs) -> Result<(f64, f64, SprtVariant), VeridictError> {
+    let wald_flags_given = args.elo0.is_some() || args.elo1.is_some();
+    let trinomial_flags_given = args.belo0.is_some() || args.belo1.is_some();
+    match args.sprt_variant {
+        SprtVariantArg::Wald => {
+            if trinomial_flags_given {
+                return Err(VeridictError::InvalidThreshold(
+                    "--belo0/--belo1 are only used with --sprt-variant trinomial; pass --elo0/--elo1 for the default wald variant".to_string(),
+                ));
+            }
+            match (args.elo0, args.elo1) {
+                (Some(e0), Some(e1)) => Ok((e0, e1, SprtVariant::Wald)),
+                _ => Err(VeridictError::InvalidThreshold(
+                    "--elo0 and --elo1 are required for --sprt-variant wald (the default)"
+                        .to_string(),
+                )),
+            }
+        }
+        SprtVariantArg::Trinomial => {
+            if wald_flags_given {
+                return Err(VeridictError::InvalidThreshold(
+                    "--elo0/--elo1 are only used with --sprt-variant wald; pass --belo0/--belo1 for --sprt-variant trinomial".to_string(),
+                ));
+            }
+            match (args.belo0, args.belo1) {
+                (Some(b0), Some(b1)) => Ok((b0, b1, SprtVariant::Trinomial)),
+                _ => Err(VeridictError::InvalidThreshold(
+                    "--belo0 and --belo1 are required for --sprt-variant trinomial".to_string(),
+                )),
+            }
+        }
+    }
+}
+
 fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
-    let mut named_records = Vec::with_capacity(args.files.len());
+    let format = args.format;
     let mut seen_names = std::collections::HashSet::new();
-    for path in &args.files {
+    // Lazy: each `(name, records-iterator)` pair is only produced (and each
+    // file only opened) as `matrix::run` pulls it, one candidate at a time -
+    // see `matrix::run`'s own doc comment for why this bounds peak memory by
+    // the largest single file rather than the sum of all of them. The
+    // duplicate-name check still runs per-file, in the same interleaved
+    // order as before, not hoisted into a separate upfront pass.
+    let named_records = args.files.iter().map(move |path| {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -327,11 +431,24 @@ fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
                 "duplicate candidate name '{name}' from input file stems; rename one of the files"
             )));
         }
-        let format = resolve_format(path, args.format);
-        named_records.push((name, read_records(path, format)?));
-    }
+        let fmt = resolve_format(path, format);
+        let records = read_records(path, fmt)?;
+        Ok((name, records))
+    });
+    let match_records = args
+        .matches
+        .iter()
+        .map(move |path| read_match_records(path, resolve_format(path, format)));
 
-    let matrix = matrix::run(&named_records, args.confidence, args.paired_by_id)?;
+    let matrix = matrix::run(
+        named_records,
+        match_records,
+        args.confidence,
+        args.paired_by_id,
+        args.resamples,
+        args.seed.unwrap_or(DEFAULT_SEED),
+        args.bootstrap_method.into(),
+    )?;
     let json = matrix.to_json_pretty();
     let markdown = matrix.to_markdown();
 
@@ -376,27 +493,39 @@ fn resolve_format(path: &Path, explicit: Option<FormatArg>) -> FormatArg {
     })
 }
 
-fn read_records(
-    path: &PathBuf,
-    format: FormatArg,
-) -> Result<Vec<(usize, input::Record)>, VeridictError> {
+type RecordIter = Box<dyn Iterator<Item = Result<(usize, input::Record), VeridictError>>>;
+
+/// Streams records lazily from the file/stdin - callers that only need
+/// `winrate`/`elo`/`sign-test`/`sprt` (never `mean-diff`) get bounded memory
+/// regardless of input size, since nothing here materializes a `Vec` up
+/// front. `input::parse_jsonl`/`parse_csv` are already lazy iterators; this
+/// just boxes whichever one applies so both format branches share one
+/// return type.
+fn read_records(path: &PathBuf, format: FormatArg) -> Result<RecordIter, VeridictError> {
     let reader = open_input(path)?;
-    match format {
-        FormatArg::Jsonl => input::parse_jsonl(reader).collect(),
-        FormatArg::Csv => input::parse_csv(reader).collect(),
-    }
+    Ok(match format {
+        FormatArg::Jsonl => Box::new(input::parse_jsonl(reader)),
+        FormatArg::Csv => Box::new(input::parse_csv(reader)),
+    })
+}
+
+type MatchRecordIter = Box<dyn Iterator<Item = Result<(usize, input::MatchRecord), VeridictError>>>;
+
+/// Same lazy-streaming shape as `read_records`, for `matrix --matches`.
+fn read_match_records(path: &PathBuf, format: FormatArg) -> Result<MatchRecordIter, VeridictError> {
+    let reader = open_input(path)?;
+    Ok(match format {
+        FormatArg::Jsonl => Box::new(input::parse_jsonl(reader)),
+        FormatArg::Csv => Box::new(input::parse_csv(reader)),
+    })
 }
 
 fn open_input(path: &PathBuf) -> Result<Box<dyn BufRead>, VeridictError> {
     if path.as_os_str() == "-" {
-        let mut buf = Vec::new();
-        io::stdin()
-            .read_to_end(&mut buf)
-            .map_err(|source| VeridictError::Io {
-                path: "<stdin>".to_string(),
-                source,
-            })?;
-        Ok(Box::new(io::Cursor::new(buf)))
+        // Streamed directly, not slurped into a Vec first: input::parse_jsonl/
+        // parse_csv are lazy, so buffering all of stdin up front here would be
+        // the one place that silently defeats streaming for piped input.
+        Ok(Box::new(io::BufReader::new(io::stdin())))
     } else {
         let file = std::fs::File::open(path).map_err(|source| VeridictError::Io {
             path: path.display().to_string(),

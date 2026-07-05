@@ -27,3 +27,7 @@ proptest = "1"
 [[bench]]
 name = "metrics"
 harness = false
+
+[[bench]]
+name = "matrix_bt"
+harness = false

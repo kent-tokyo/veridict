@@ -129,6 +129,31 @@ fn pass_above_requires_fail_below() {
 }
 
 #[test]
+fn fail_below_accepts_a_negative_value() {
+    // Regression test: --fail-below/--pass-above lacked allow_hyphen_values,
+    // so a negative --fail-below (the documented "Regression gate" README
+    // example, and the only sensible value for a below-zero fail threshold)
+    // was misparsed by clap as an unknown flag rather than a numeric value.
+    let stdin = (0..20)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--fail-below",
+            "-0.01",
+            "--pass-above",
+            "0.02",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(predicate::in_iter([0, 1, 2]));
+}
+
+#[test]
 fn sign_test_clear_pass_exits_zero() {
     let stdin = (0..20)
         .map(|i| format!("{{\"baseline\":{i}.0,\"candidate\":{}.5}}\n", i))
@@ -318,6 +343,47 @@ fn sprt_rejects_elo0_not_less_than_elo1() {
 }
 
 #[test]
+fn sprt_trinomial_variant_reports_drawelo() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"draw\"}\n{\"result\":\"draw\"}\n{\"result\":\"baseline_win\"}\n";
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "trinomial",
+            "--belo0",
+            "0",
+            "--belo1",
+            "10",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"drawelo\":"));
+}
+
+#[test]
+fn sprt_trinomial_requires_belo_flags() {
+    veridict()
+        .args(["sprt", "-", "--sprt-variant", "trinomial"])
+        .write_stdin("{\"result\":\"draw\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--belo0 and --belo1 are required"));
+}
+
+#[test]
+fn sprt_wald_rejects_belo_flags() {
+    veridict()
+        .args(["sprt", "-", "--belo0", "0", "--belo1", "10"])
+        .write_stdin("{\"result\":\"draw\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "--belo0/--belo1 are only used with --sprt-variant trinomial",
+        ));
+}
+
+#[test]
 fn sprt_report_md_flag_writes_markdown_file() {
     let path = std::env::temp_dir().join("veridict_cli_test_sprt_report.md");
     let stdin = (0..200)
@@ -388,6 +454,68 @@ fn matrix_rejects_duplicate_candidate_names() {
         .code(3)
         .stderr(predicate::str::contains("duplicate candidate name"));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn matrix_general_graph_reports_real_bootstrap_cis() {
+    // A robust 3-node cycle (a beats b, b beats c, c beats a, each 15-5):
+    // large enough per-edge margins that resampling essentially never flips
+    // an edge's bidirectionality, so every cell should clear the connected-
+    // fraction threshold and get a real CI - proving `--matches`'s
+    // general-graph path no longer reports `ci_low`/`ci_high: null`
+    // unconditionally.
+    let dir = std::env::temp_dir();
+    let matches_path = dir.join("veridict_cli_test_matrix_bootstrap_ci.jsonl");
+    let mut content = String::new();
+    for (id_prefix, a, b) in [
+        ("ab", "prompt_a", "prompt_b"),
+        ("bc", "prompt_b", "prompt_c"),
+        ("ca", "prompt_c", "prompt_a"),
+    ] {
+        for i in 0..15 {
+            content.push_str(&format!(
+                "{{\"id\":\"{id_prefix}{i}\",\"a\":\"{a}\",\"b\":\"{b}\",\"result\":\"a_win\"}}\n"
+            ));
+        }
+        for i in 0..5 {
+            content.push_str(&format!(
+                "{{\"id\":\"{id_prefix}_r{i}\",\"a\":\"{a}\",\"b\":\"{b}\",\"result\":\"b_win\"}}\n"
+            ));
+        }
+    }
+    std::fs::write(&matches_path, content).unwrap();
+
+    let output = veridict()
+        .args([
+            "matrix",
+            "--matches",
+            matches_path.to_str().unwrap(),
+            "--resamples",
+            "300",
+            "--seed",
+            "1",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    std::fs::remove_file(&matches_path).ok();
+
+    // `CandidateSummary.ci_low`/`ci_high` stay `None` by design in
+    // general-graph mode (an individual rating is only meaningful relative
+    // to an arbitrary per-component pin) - it's specifically the `matrix`
+    // array's per-pair `elo_diff` CIs that this feature populates.
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let matrix = json["matrix"].as_array().unwrap();
+    assert_eq!(matrix.len(), 3, "expected all 3 pairwise cells");
+    for cell in matrix {
+        assert_eq!(cell["status"], "direct");
+        assert!(
+            cell["ci_low"].is_number() && cell["ci_high"].is_number(),
+            "expected a real bootstrap CI for {cell}"
+        );
+    }
 }
 
 #[test]
@@ -516,6 +644,66 @@ fn ci_method_exact_rejects_mean_diff() {
 }
 
 #[test]
+fn ci_method_jeffreys_differs_from_wilson() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    let wilson = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--ci-method",
+            "wilson",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let jeffreys = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--ci-method",
+            "jeffreys",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    assert_ne!(wilson.stdout, jeffreys.stdout);
+}
+
+#[test]
+fn ci_method_jeffreys_rejects_elo() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "elo", "--ci-method", "jeffreys"])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--ci-method jeffreys"));
+}
+
+#[test]
+fn schema_version_appears_in_compare_sprt_and_matrix_reports() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "winrate"])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"schema_version\": 1"));
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"schema_version\": 1"));
+    veridict()
+        .args(["matrix", "examples/winloss.jsonl"])
+        .assert()
+        .stdout(predicate::str::contains("\"schema_version\": 1"));
+}
+
+#[test]
 fn bootstrap_method_bca_differs_from_percentile_on_skewed_data() {
     let diffs = [
         0.05, 0.08, 0.12, 0.02, 0.15, 0.01, 0.30, 0.04, 0.06, 0.50, 0.03, 0.09, 0.11, 0.07, 0.02,
@@ -551,6 +739,44 @@ fn bootstrap_method_bca_differs_from_percentile_on_skewed_data() {
         .output()
         .unwrap();
     assert_ne!(percentile.stdout, bca.stdout);
+}
+
+#[test]
+fn bootstrap_method_basic_differs_from_percentile_on_skewed_data() {
+    let diffs = [
+        0.05, 0.08, 0.12, 0.02, 0.15, 0.01, 0.30, 0.04, 0.06, 0.50, 0.03, 0.09, 0.11, 0.07, 0.02,
+        0.60, 0.04, 0.08, 0.10, 0.05,
+    ];
+    let stdin: String = diffs
+        .iter()
+        .enumerate()
+        .map(|(i, d)| format!("{{\"baseline\":{i}.0,\"candidate\":{}}}\n", i as f64 + d))
+        .collect();
+    let percentile = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--bootstrap-method",
+            "percentile",
+        ])
+        .write_stdin(stdin.clone())
+        .output()
+        .unwrap();
+    let basic = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--bootstrap-method",
+            "basic",
+        ])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    assert_ne!(percentile.stdout, basic.stdout);
 }
 
 #[test]

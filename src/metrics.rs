@@ -66,18 +66,18 @@ pub struct MetricOutput {
 /// this preserves strict per-metric validation even when several metrics
 /// share one pass: a record usable by metric A but not metric B still
 /// errors when B is requested, exactly as if B had run alone.
-pub(crate) trait MetricAggregator<'a> {
+pub(crate) trait MetricAggregator {
     fn ingest(
         &mut self,
         line: usize,
-        record: &'a Record,
+        record: &Record,
         has_status: bool,
     ) -> Result<(), VeridictError>;
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError>;
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_aggregator<'a>(
+fn build_aggregator(
     metric: MetricKind,
     confidence: f64,
     resamples: usize,
@@ -85,7 +85,7 @@ fn build_aggregator<'a>(
     paired_by_id: bool,
     ci_method: CiMethod,
     bootstrap_method: BootstrapMethod,
-) -> Box<dyn MetricAggregator<'a> + 'a> {
+) -> Box<dyn MetricAggregator> {
     match metric {
         MetricKind::WinRate => Box::new(winrate::WinRateAggregator::new(
             confidence,
@@ -110,14 +110,23 @@ fn build_aggregator<'a>(
 
 /// Runs several metrics against the same records in a single pass: every
 /// record is fed to every requested metric's aggregator, instead of
-/// re-scanning `records` once per metric. `paired_by_id`: see each
+/// re-scanning `records` once per metric. `records` is consumed as a
+/// streaming iterator, not a slice - `main.rs::read_records` hands this a
+/// lazy iterator straight from the input file/stdin, so callers that only
+/// need `winrate`/`elo`/`sign-test` (never `mean-diff`) see genuinely
+/// bounded memory regardless of input size (`--paired-by-id` buffers
+/// unresolved ids, which scales with distinct in-flight ids, not total
+/// record count - see each aggregator's module doc). `mean-diff`'s
+/// bootstrap always needs the full sample materialized internally
+/// (`DiffCollector`'s `Vec<f64>`); that floor is inherent to random-access
+/// resampling and out of scope to remove. `paired_by_id`: see each
 /// aggregator's module doc - two records sharing the same `id` are combined
 /// into one net observation instead of two independent ones. `ci_method`:
-/// `CiMethod::Exact` is rejected upfront (before any record is processed)
-/// for any requested metric other than WinRate/SignTest.
+/// anything but `CiMethod::Wilson` is rejected upfront (before any record is
+/// processed) for any requested metric other than WinRate/SignTest.
 #[allow(clippy::too_many_arguments)]
-pub fn compute_many(
-    records: &[(usize, Record)],
+pub fn compute_many<I>(
+    records: I,
     metrics: &[MetricKind],
     confidence: f64,
     resamples: usize,
@@ -125,17 +134,22 @@ pub fn compute_many(
     paired_by_id: bool,
     ci_method: CiMethod,
     bootstrap_method: BootstrapMethod,
-) -> Result<Vec<MetricOutput>, VeridictError> {
-    if records.is_empty() {
+) -> Result<Vec<MetricOutput>, VeridictError>
+where
+    I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
+{
+    let mut records = records.into_iter().peekable();
+    if records.peek().is_none() {
         return Err(VeridictError::EmptyInput);
     }
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    if ci_method == CiMethod::Exact {
+    if ci_method != CiMethod::Wilson {
         for &metric in metrics {
             if !matches!(metric, MetricKind::WinRate | MetricKind::SignTest) {
                 return Err(VeridictError::IncompatibleCiMethod {
+                    method: ci_method_label(ci_method),
                     metric: metric_label(metric),
                 });
             }
@@ -143,7 +157,7 @@ pub fn compute_many(
     }
 
     let mut failures = FailureBreakdown::default();
-    let mut aggregators: Vec<Box<dyn MetricAggregator<'_> + '_>> = metrics
+    let mut aggregators: Vec<Box<dyn MetricAggregator>> = metrics
         .iter()
         .map(|&m| {
             build_aggregator(
@@ -158,18 +172,19 @@ pub fn compute_many(
         })
         .collect();
 
-    for (line, record) in records {
+    for item in records {
+        let (line, record) = item?;
         let mut has_status = false;
         if let Some(status) = record.baseline_status.as_deref() {
             has_status = true;
-            tally_status(status, *line, "baseline_status", &mut failures.baseline)?;
+            tally_status(status, line, "baseline_status", &mut failures.baseline)?;
         }
         if let Some(status) = record.candidate_status.as_deref() {
             has_status = true;
-            tally_status(status, *line, "candidate_status", &mut failures.candidate)?;
+            tally_status(status, line, "candidate_status", &mut failures.candidate)?;
         }
         for agg in &mut aggregators {
-            agg.ingest(*line, record, has_status)?;
+            agg.ingest(line, &record, has_status)?;
         }
     }
 
@@ -181,8 +196,8 @@ pub fn compute_many(
 
 /// Single-metric convenience wrapper around [`compute_many`].
 #[allow(clippy::too_many_arguments)]
-pub fn compute(
-    records: &[(usize, Record)],
+pub fn compute<I>(
+    records: I,
     metric: MetricKind,
     confidence: f64,
     resamples: usize,
@@ -190,7 +205,10 @@ pub fn compute(
     paired_by_id: bool,
     ci_method: CiMethod,
     bootstrap_method: BootstrapMethod,
-) -> Result<MetricOutput, VeridictError> {
+) -> Result<MetricOutput, VeridictError>
+where
+    I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
+{
     compute_many(
         records,
         std::slice::from_ref(&metric),
@@ -212,6 +230,18 @@ pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
         MetricKind::MeanDiff => "metric mean-diff",
         MetricKind::SignTest => "metric sign-test",
         MetricKind::Elo => "metric elo",
+    }
+}
+
+/// A label for `IncompatibleCiMethod`'s error message; matches the CLI's
+/// `--ci-method` spelling. Only ever reached for a non-`Wilson` method (the
+/// upfront guard above never fires for `Wilson`), but kept total rather than
+/// `unreachable!()` for that arm, per AGENTS.md's "boring, explicit" rule.
+pub(crate) fn ci_method_label(ci_method: CiMethod) -> &'static str {
+    match ci_method {
+        CiMethod::Wilson => "wilson",
+        CiMethod::Exact => "exact",
+        CiMethod::Jeffreys => "jeffreys",
     }
 }
 
@@ -249,6 +279,12 @@ mod tests {
 
     const SEED: u64 = crate::stats::bootstrap::DEFAULT_SEED;
 
+    fn ok_iter(
+        records: &[(usize, Record)],
+    ) -> impl Iterator<Item = Result<(usize, Record), VeridictError>> + '_ {
+        records.iter().cloned().map(Ok)
+    }
+
     fn rec(
         id: &str,
         baseline: Option<f64>,
@@ -275,7 +311,7 @@ mod tests {
             (3, rec("c", None, None, Some("draw"), None, None)),
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -293,7 +329,7 @@ mod tests {
     fn winrate_all_draws_is_zero_n_warning() {
         let records = vec![(1, rec("a", None, None, Some("draw"), None, None))];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -314,7 +350,7 @@ mod tests {
             (2, rec("b", Some(2.0), Some(2.5), None, None, None)),
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -332,7 +368,7 @@ mod tests {
     fn mean_diff_rejects_nan() {
         let records = vec![(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -357,7 +393,7 @@ mod tests {
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -373,7 +409,7 @@ mod tests {
     fn status_only_records_count_but_are_not_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, Some("ok"), Some("timeout")))];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -392,7 +428,7 @@ mod tests {
     fn unusable_record_is_schema_mismatch() {
         let records = vec![(1, rec("a", None, None, None, None, None))];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -408,7 +444,7 @@ mod tests {
     fn unrecognized_status_is_an_error() {
         let records = vec![(1, rec("a", None, None, None, Some("bogus"), None))];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -427,7 +463,7 @@ mod tests {
     fn unrecognized_outcome_is_an_error() {
         let records = vec![(1, rec("a", None, None, Some("bogus"), None, None))];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -445,7 +481,7 @@ mod tests {
     #[test]
     fn empty_records_is_empty_input() {
         let result = compute(
-            &[],
+            ok_iter(&[]),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -465,7 +501,7 @@ mod tests {
             (3, rec("c", Some(3.0), Some(3.0), None, None, None)), // tie, excluded
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::SignTest,
             0.95,
             1000,
@@ -484,7 +520,7 @@ mod tests {
     fn sign_test_all_ties_is_zero_n_warning() {
         let records = vec![(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::SignTest,
             0.95,
             1000,
@@ -504,7 +540,7 @@ mod tests {
             (2, rec("b", None, None, Some("draw"), None, None)),
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::Elo,
             0.95,
             1000,
@@ -526,7 +562,7 @@ mod tests {
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::Elo,
             0.95,
             1000,
@@ -543,7 +579,7 @@ mod tests {
     fn elo_zero_trials_is_a_warning_not_an_error() {
         let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::Elo,
             0.95,
             1000,
@@ -569,7 +605,7 @@ mod tests {
             (4, rec("op2", None, None, Some("candidate_win"), None, None)),
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -592,7 +628,7 @@ mod tests {
             rec("solo", None, None, Some("candidate_win"), None, None),
         )];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -614,7 +650,7 @@ mod tests {
             (3, rec("op1", None, None, Some("candidate_win"), None, None)),
         ];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -639,7 +675,7 @@ mod tests {
             (2, rec("op1", Some(1.0), Some(0.8), None, None, None)), // diff -0.2
         ];
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -660,7 +696,7 @@ mod tests {
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -680,7 +716,7 @@ mod tests {
             (3, rec("op1", Some(1.0), Some(1.1), None, None, None)),
         ];
         let result = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::SignTest,
             0.95,
             1000,
@@ -706,7 +742,7 @@ mod tests {
         ];
         // total = 1.0 + 0.5 = 1.5 pts across the pair -> net candidate win.
         let out = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::Elo,
             0.95,
             1000,
@@ -727,7 +763,7 @@ mod tests {
         // Usable by MeanDiff (has baseline/candidate) but not by WinRate (no result, no status).
         let records = vec![(1, rec("a", Some(1.0), Some(1.1), None, None, None))];
         let result = compute_many(
-            &records,
+            ok_iter(&records),
             &[MetricKind::MeanDiff, MetricKind::WinRate],
             0.95,
             1000,
@@ -753,7 +789,7 @@ mod tests {
             (3, rec("c", Some(1.0), Some(1.0), Some("draw"), None, None)),
         ];
         let combined = compute_many(
-            &records,
+            ok_iter(&records),
             &[
                 MetricKind::WinRate,
                 MetricKind::MeanDiff,
@@ -768,7 +804,7 @@ mod tests {
         )
         .unwrap();
         let winrate = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             1000,
@@ -779,7 +815,7 @@ mod tests {
         )
         .unwrap();
         let mean_diff = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             1000,
@@ -790,7 +826,7 @@ mod tests {
         )
         .unwrap();
         let sign_test = compute(
-            &records,
+            ok_iter(&records),
             MetricKind::SignTest,
             0.95,
             1000,

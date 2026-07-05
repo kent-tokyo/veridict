@@ -8,32 +8,32 @@
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::common::DiffCollector;
+use crate::metrics::common::SignCounts;
 use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
-use crate::stats::{exact, wilson};
+use crate::stats::{exact, jeffreys, wilson};
 use crate::{CiMethod, MetricKind};
 
-pub(crate) struct SignTestAggregator<'a> {
-    collector: DiffCollector<'a>,
+pub(crate) struct SignTestAggregator {
+    collector: SignCounts,
     confidence: f64,
     ci_method: CiMethod,
 }
 
-impl<'a> SignTestAggregator<'a> {
+impl SignTestAggregator {
     pub(crate) fn new(confidence: f64, paired_by_id: bool, ci_method: CiMethod) -> Self {
         Self {
-            collector: DiffCollector::new(paired_by_id),
+            collector: SignCounts::new(paired_by_id),
             confidence,
             ci_method,
         }
     }
 }
 
-impl<'a> MetricAggregator<'a> for SignTestAggregator<'a> {
+impl MetricAggregator for SignTestAggregator {
     fn ingest(
         &mut self,
         line: usize,
-        record: &'a Record,
+        record: &Record,
         has_status: bool,
     ) -> Result<(), VeridictError> {
         let mut used = has_status;
@@ -67,13 +67,11 @@ impl<'a> MetricAggregator<'a> for SignTestAggregator<'a> {
     }
 
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError> {
-        let diffs = self.collector.finish()?;
+        let (positive, negative) = self.collector.finish()?;
         let timeouts = failures.baseline.timeout + failures.candidate.timeout;
         let crashes = failures.baseline.crash + failures.candidate.crash;
         let invalid = failures.baseline.invalid + failures.candidate.invalid;
 
-        let positive = diffs.iter().filter(|d| **d > 0.0).count() as u64;
-        let negative = diffs.iter().filter(|d| **d < 0.0).count() as u64;
         let n = positive + negative;
         if n == 0 {
             return Ok(MetricOutput {
@@ -93,6 +91,7 @@ impl<'a> MetricAggregator<'a> for SignTestAggregator<'a> {
         let (lo, hi) = match self.ci_method {
             CiMethod::Wilson => wilson::wilson_ci(positive, n, self.confidence)?,
             CiMethod::Exact => exact::clopper_pearson_ci(positive, n, self.confidence)?,
+            CiMethod::Jeffreys => jeffreys::jeffreys_ci(positive, n, self.confidence)?,
         };
         let p_hat = positive as f64 / n as f64;
         Ok(MetricOutput {

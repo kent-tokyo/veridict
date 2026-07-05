@@ -1,0 +1,3 @@
+{"id":"h1","a":"matrix_legacy_a","b":"matrix_legacy_b","result":"a_win"}
+{"id":"h2","a":"isolated_x","b":"isolated_y","result":"a_win"}
+{"id":"h3","a":"isolated_x","b":"isolated_y","result":"b_win"}

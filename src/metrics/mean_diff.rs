@@ -8,15 +8,15 @@ use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_la
 use crate::stats::bootstrap;
 use crate::{BootstrapMethod, MetricKind};
 
-pub(crate) struct MeanDiffAggregator<'a> {
-    collector: DiffCollector<'a>,
+pub(crate) struct MeanDiffAggregator {
+    collector: DiffCollector,
     confidence: f64,
     resamples: usize,
     seed: u64,
     bootstrap_method: BootstrapMethod,
 }
 
-impl<'a> MeanDiffAggregator<'a> {
+impl MeanDiffAggregator {
     pub(crate) fn new(
         confidence: f64,
         resamples: usize,
@@ -34,11 +34,11 @@ impl<'a> MeanDiffAggregator<'a> {
     }
 }
 
-impl<'a> MetricAggregator<'a> for MeanDiffAggregator<'a> {
+impl MetricAggregator for MeanDiffAggregator {
     fn ingest(
         &mut self,
         line: usize,
-        record: &'a Record,
+        record: &Record,
         has_status: bool,
     ) -> Result<(), VeridictError> {
         let mut used = has_status;
@@ -101,6 +101,12 @@ impl<'a> MetricAggregator<'a> for MeanDiffAggregator<'a> {
                 self.seed,
             ),
             BootstrapMethod::Bca => bootstrap::bootstrap_mean_diff_ci_bca(
+                &diffs,
+                self.confidence,
+                self.resamples,
+                self.seed,
+            ),
+            BootstrapMethod::Basic => bootstrap::bootstrap_mean_diff_ci_basic(
                 &diffs,
                 self.confidence,
                 self.resamples,

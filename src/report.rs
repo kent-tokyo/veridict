@@ -10,8 +10,18 @@ use serde::Serialize;
 use crate::metrics::FailureBreakdown;
 use crate::{MetricKind, Verdict};
 
+/// Current JSON report schema version, for `Report`/`MultiReport`/
+/// `SprtReport`/`ComparisonMatrix` alike. Every change so far (including
+/// this sprint's) has been additive (new fields, new enum variants) - this
+/// stays `1` until a future change actually removes or renames a field,
+/// which is the point of having it: a place for that change to signal
+/// itself, per AGENTS.md's "breaking schema changes must be intentional and
+/// documented."
+pub const REPORT_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Debug, Serialize)]
 pub struct Report {
+    pub schema_version: u32,
     pub verdict: Verdict,
     pub metric: MetricKind,
     pub baseline_count: u64,
@@ -37,8 +47,38 @@ pub struct Report {
     pub estimated_additional_trials: Option<u64>,
     /// Purely advisory data-quality flags (tiny sample, high failure rate,
     /// draw-heavy Elo run) - unlike `reason`, these never change `verdict`.
-    /// Always present, empty when there's nothing to flag.
+    /// Always present, empty when there's nothing to flag. Human-readable
+    /// strings derived from the same computation as `data_quality`'s flags
+    /// (see `collect_data_quality`) - kept for backward compatibility.
     pub warnings: Vec<String>,
+    /// Structured counterpart to `warnings`, additive alongside it (not a
+    /// replacement - `REPORT_SCHEMA_VERSION`'s policy is to stay at `1`
+    /// until a field is removed/renamed, and this is a pure addition).
+    pub data_quality: DataQuality,
+}
+
+/// Machine-checkable data-quality flags, computed together with `warnings`'
+/// strings from the same underlying rates/counts (one computation, two
+/// representations - not two independently-maintained condition sets that
+/// could drift out of sync with each other).
+#[derive(Debug, Serialize, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DataQuality {
+    pub tiny_sample: bool,
+    pub high_failure_rate: bool,
+    /// `Elo` only - `winrate`/`sign-test` discard their tie/draw count
+    /// before it reaches `MetricOutput`, so extending this would need a new
+    /// tracked field (deferred, not silently dropped). Always `false` for
+    /// every other metric.
+    pub draw_heavy: bool,
+    /// The effect's own magnitude is smaller than the CI's half-width - the
+    /// measured effect could plausibly be noise around zero. A different
+    /// condition from `tiny_sample` (which is about `paired_count` alone):
+    /// deliberately guarded by `!tiny_sample` so a wide CI from a tiny
+    /// sample doesn't also trip this, which would make it a redundant
+    /// restatement of "the sample is small" rather than its own signal
+    /// (a large-enough sample whose effect is *still* swamped by its own
+    /// uncertainty).
+    pub effect_within_noise_floor: bool,
 }
 
 /// A metric's effect/CI/thresholds are proportions (winrate, sign-test),
@@ -134,6 +174,7 @@ impl Report {
 /// keeps printing a plain `Report` so its JSON shape never changes.
 #[derive(Debug, Serialize)]
 pub struct MultiReport {
+    pub schema_version: u32,
     pub verdict: Verdict,
     pub reports: Vec<Report>,
 }
@@ -164,6 +205,7 @@ mod tests {
 
     fn sample_report() -> Report {
         Report {
+            schema_version: REPORT_SCHEMA_VERSION,
             verdict: Verdict::Pass,
             metric: MetricKind::WinRate,
             baseline_count: 20,
@@ -182,6 +224,7 @@ mod tests {
             reason: "ok".to_string(),
             estimated_additional_trials: None,
             warnings: Vec::new(),
+            data_quality: DataQuality::default(),
         }
     }
 
@@ -190,6 +233,19 @@ mod tests {
         let json = sample_report().to_json_pretty();
         assert!(json.contains("\"verdict\": \"pass\""));
         assert!(json.contains("\"metric\": \"winrate\""));
+    }
+
+    #[test]
+    fn report_and_multi_report_both_carry_schema_version() {
+        let report_json = sample_report().to_json_pretty();
+        assert!(report_json.contains("\"schema_version\": 1"));
+
+        let multi = MultiReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            verdict: Verdict::Pass,
+            reports: vec![sample_report()],
+        };
+        assert!(multi.to_json_pretty().contains("\"schema_version\": 1"));
     }
 
     #[test]
@@ -266,6 +322,7 @@ mod tests {
     #[test]
     fn multi_report_wraps_each_metric_section() {
         let multi = MultiReport {
+            schema_version: REPORT_SCHEMA_VERSION,
             verdict: Verdict::Fail,
             reports: vec![sample_report()],
         };

@@ -10,16 +10,16 @@ use crate::error::VeridictError;
 use crate::input::Record;
 use crate::metrics::common::OutcomeCollector;
 use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
-use crate::stats::{exact, wilson};
+use crate::stats::{exact, jeffreys, wilson};
 use crate::{CiMethod, MetricKind};
 
-pub(crate) struct WinRateAggregator<'a> {
-    collector: OutcomeCollector<'a>,
+pub(crate) struct WinRateAggregator {
+    collector: OutcomeCollector,
     confidence: f64,
     ci_method: CiMethod,
 }
 
-impl<'a> WinRateAggregator<'a> {
+impl WinRateAggregator {
     pub(crate) fn new(confidence: f64, paired_by_id: bool, ci_method: CiMethod) -> Self {
         Self {
             collector: OutcomeCollector::new(paired_by_id),
@@ -29,11 +29,11 @@ impl<'a> WinRateAggregator<'a> {
     }
 }
 
-impl<'a> MetricAggregator<'a> for WinRateAggregator<'a> {
+impl MetricAggregator for WinRateAggregator {
     fn ingest(
         &mut self,
         line: usize,
-        record: &'a Record,
+        record: &Record,
         has_status: bool,
     ) -> Result<(), VeridictError> {
         let mut used = has_status;
@@ -45,6 +45,7 @@ impl<'a> MetricAggregator<'a> for WinRateAggregator<'a> {
                     return Err(VeridictError::UnrecognizedOutcome {
                         line,
                         value: result.to_string(),
+                        expected: "baseline_win|candidate_win|draw",
                     });
                 }
             }
@@ -85,6 +86,7 @@ impl<'a> MetricAggregator<'a> for WinRateAggregator<'a> {
         let (lo, hi) = match self.ci_method {
             CiMethod::Wilson => wilson::wilson_ci(candidate_wins, n, self.confidence)?,
             CiMethod::Exact => exact::clopper_pearson_ci(candidate_wins, n, self.confidence)?,
+            CiMethod::Jeffreys => jeffreys::jeffreys_ci(candidate_wins, n, self.confidence)?,
         };
         let p_hat = candidate_wins as f64 / n as f64;
         Ok(MetricOutput {

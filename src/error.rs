@@ -41,11 +41,15 @@ pub enum VeridictError {
     InvalidThreshold(String),
 
     #[error(
-        "--ci-method exact is only supported for metric winrate or sign-test (got {metric}); \
+        "--ci-method {method} is only supported for metric winrate or sign-test (got {metric}); \
          elo's p_hat/n is fractional (draws count as 0.5) and mean-diff isn't a binomial \
-         proportion, so an exact binomial CI does not apply to either"
+         proportion, so neither an exact nor a Jeffreys binomial credible interval applies to \
+         either"
     )]
-    IncompatibleCiMethod { metric: &'static str },
+    IncompatibleCiMethod {
+        method: &'static str,
+        metric: &'static str,
+    },
 
     #[error(
         "line {line}: invalid numeric value in field '{field}': {value} (NaN/Infinity not allowed)"
@@ -65,15 +69,33 @@ pub enum VeridictError {
         value: String,
     },
 
-    #[error(
-        "line {line}: unrecognized result '{value}' (expected baseline_win|candidate_win|draw)"
-    )]
-    UnrecognizedOutcome { line: usize, value: String },
+    #[error("line {line}: unrecognized result '{value}' (expected {expected})")]
+    UnrecognizedOutcome {
+        line: usize,
+        value: String,
+        expected: &'static str,
+    },
 
     #[error("io error reading '{path}': {source}")]
     Io {
         path: String,
         #[source]
         source: std::io::Error,
+    },
+
+    #[error(
+        "Bradley-Terry MM solver did not converge after {iterations} iterations \
+         (largest relative rating change {last_relative_change:.3e} still above the \
+         {threshold:.0e} threshold; competitor index {worst_competitor} changed most). \
+         This input already passed the strong-connectivity check, so it is not \
+         literally disconnected - it usually means a technically-connected but heavily \
+         lopsided graph (e.g. one subgroup beat another all-but-once). Inspect win/loss \
+         tallies for near-total sweeps between subgroups before rerunning."
+    )]
+    BradleyTerryDidNotConverge {
+        iterations: usize,
+        last_relative_change: f64,
+        threshold: f64,
+        worst_competitor: usize,
     },
 }

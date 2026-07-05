@@ -66,6 +66,26 @@ impl Outcome {
     }
 }
 
+/// Result of a single named-competitor match (see `input::MatchRecord`,
+/// `matrix --matches`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchOutcome {
+    AWin,
+    BWin,
+    Draw,
+}
+
+impl MatchOutcome {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "a_win" => Some(Self::AWin),
+            "b_win" => Some(Self::BWin),
+            "draw" => Some(Self::Draw),
+            _ => None,
+        }
+    }
+}
+
 /// Which statistical method computed the effect size and confidence interval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum MetricKind {
@@ -80,32 +100,37 @@ pub enum MetricKind {
 }
 
 /// Which confidence-interval method `winrate`/`sign-test` use. `Exact`
-/// (Clopper-Pearson) doesn't apply to `elo` (fractional successes) or
-/// `mean-diff` (not a binomial proportion at all) - requesting it for either
-/// is a config error (`VeridictError::IncompatibleCiMethod`), not a silent
-/// fallback to `Wilson`.
+/// (Clopper-Pearson) and `Jeffreys` don't apply to `elo` (fractional
+/// successes) or `mean-diff` (not a binomial proportion at all) - both are
+/// derived from a true Beta-Binomial model, so requesting either for those
+/// metrics is a config error (`VeridictError::IncompatibleCiMethod`), not a
+/// silent fallback to `Wilson`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CiMethod {
     Wilson,
     Exact,
+    Jeffreys,
 }
 
 /// Which bootstrap variant `mean-diff` uses. `Percentile` is the default
 /// (unchanged from before this existed, so existing output doesn't shift);
 /// `Bca` corrects for bias and skewness at the cost of a little extra
-/// computation (a jackknife pass, still O(n)).
+/// computation (a jackknife pass, still O(n)); `Basic` reflects the
+/// percentile interval around the point estimate - simpler than `Bca`, but
+/// with no bias-correction of its own (see `stats::bootstrap`'s doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMethod {
     Percentile,
     Bca,
+    Basic,
 }
 
 /// Runs one metric end to end: classify records, compute its effect and
 /// confidence interval, and apply the pass/fail thresholds. `paired_by_id`
 /// enables paired-testcase variance reduction (see `metrics::compute`).
 #[allow(clippy::too_many_arguments)]
-pub fn compare_one(
-    records: &[(usize, input::Record)],
+pub fn compare_one<I>(
+    records: I,
     metric: MetricKind,
     confidence: f64,
     thresholds: &verdict::Thresholds,
@@ -114,7 +139,10 @@ pub fn compare_one(
     paired_by_id: bool,
     ci_method: CiMethod,
     bootstrap_method: BootstrapMethod,
-) -> Result<Report, VeridictError> {
+) -> Result<Report, VeridictError>
+where
+    I: IntoIterator<Item = Result<(usize, input::Record), VeridictError>>,
+{
     let out = metrics::compute(
         records,
         metric,
@@ -125,7 +153,7 @@ pub fn compare_one(
         ci_method,
         bootstrap_method,
     )?;
-    Ok(build_report(metric, confidence, thresholds, out))
+    Ok(build_report(metric, confidence, thresholds, out, ci_method))
 }
 
 /// Runs several metrics against the same records and thresholds in a single
@@ -135,8 +163,8 @@ pub fn compare_one(
 /// worse than an inconclusive result" rule: one metric failing sinks the
 /// whole run.
 #[allow(clippy::too_many_arguments)]
-pub fn compare_many(
-    records: &[(usize, input::Record)],
+pub fn compare_many<I>(
+    records: I,
     metrics: &[MetricKind],
     confidence: f64,
     thresholds: &verdict::Thresholds,
@@ -145,7 +173,10 @@ pub fn compare_many(
     paired_by_id: bool,
     ci_method: CiMethod,
     bootstrap_method: BootstrapMethod,
-) -> Result<MultiReport, VeridictError> {
+) -> Result<MultiReport, VeridictError>
+where
+    I: IntoIterator<Item = Result<(usize, input::Record), VeridictError>>,
+{
     let outs = metrics::compute_many(
         records,
         metrics,
@@ -159,10 +190,14 @@ pub fn compare_many(
     let reports: Vec<Report> = metrics
         .iter()
         .zip(outs)
-        .map(|(&metric, out)| build_report(metric, confidence, thresholds, out))
+        .map(|(&metric, out)| build_report(metric, confidence, thresholds, out, ci_method))
         .collect();
     let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
-    Ok(MultiReport { verdict, reports })
+    Ok(MultiReport {
+        schema_version: report::REPORT_SCHEMA_VERSION,
+        verdict,
+        reports,
+    })
 }
 
 fn build_report(
@@ -170,6 +205,7 @@ fn build_report(
     confidence: f64,
     thresholds: &verdict::Thresholds,
     out: metrics::MetricOutput,
+    ci_method: CiMethod,
 ) -> Report {
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
@@ -179,16 +215,20 @@ fn build_report(
         None => verdict::decide(out.ci_low, out.ci_high, thresholds),
     };
     let estimated_additional_trials = verdict::estimate_additional_trials(
+        metric,
+        ci_method,
         verdict,
         out.effect,
         out.ci_low,
         out.ci_high,
         out.paired_count,
         thresholds,
+        confidence,
     );
-    let warnings = collect_warnings(metric, &out);
+    let (data_quality, warnings) = collect_data_quality(metric, &out);
 
     Report {
+        schema_version: report::REPORT_SCHEMA_VERSION,
         verdict,
         metric,
         baseline_count: out.baseline_count,
@@ -207,16 +247,24 @@ fn build_report(
         reason,
         estimated_additional_trials,
         warnings,
+        data_quality,
     }
 }
 
-/// Advisory, verdict-independent data-quality flags. Kept separate from
-/// `MetricOutput.warning` (which forces `Inconclusive` on zero usable
+/// Advisory, verdict-independent data-quality flags and their human-readable
+/// counterpart, computed together from the same rates/counts so the two
+/// representations can't drift out of sync with each other. Kept separate
+/// from `MetricOutput.warning` (which forces `Inconclusive` on zero usable
 /// trials, a real verdict-changing decision) - these never affect `verdict`.
-fn collect_warnings(metric: MetricKind, out: &metrics::MetricOutput) -> Vec<String> {
+fn collect_data_quality(
+    metric: MetricKind,
+    out: &metrics::MetricOutput,
+) -> (report::DataQuality, Vec<String>) {
+    let mut quality = report::DataQuality::default();
     let mut warnings = Vec::new();
 
-    if out.paired_count < 30 {
+    quality.tiny_sample = out.paired_count < 30;
+    if quality.tiny_sample {
         warnings.push(format!(
             "small sample: {} paired trial(s), below the conventional 30-trial threshold for confidence-interval methods to be reliable",
             out.paired_count
@@ -226,7 +274,8 @@ fn collect_warnings(metric: MetricKind, out: &metrics::MetricOutput) -> Vec<Stri
     let total_trials = out.paired_count + out.timeouts + out.crashes + out.invalid;
     if total_trials > 0 {
         let failure_rate = (out.timeouts + out.crashes + out.invalid) as f64 / total_trials as f64;
-        if failure_rate > 0.2 {
+        quality.high_failure_rate = failure_rate > 0.2;
+        if quality.high_failure_rate {
             warnings.push(format!(
                 "{:.0}% of trials failed to execute (timeout/crash/invalid) rather than producing a usable result",
                 failure_rate * 100.0
@@ -242,7 +291,8 @@ fn collect_warnings(metric: MetricKind, out: &metrics::MetricOutput) -> Vec<Stri
             .paired_count
             .saturating_sub(out.baseline_count + out.candidate_count);
         let draw_rate = draws as f64 / out.paired_count as f64;
-        if draw_rate > 0.5 {
+        quality.draw_heavy = draw_rate > 0.5;
+        if quality.draw_heavy {
             warnings.push(format!(
                 "{:.0}% of trials were draws, leaving few decisive outcomes to estimate Elo from",
                 draw_rate * 100.0
@@ -250,7 +300,18 @@ fn collect_warnings(metric: MetricKind, out: &metrics::MetricOutput) -> Vec<Stri
         }
     }
 
-    warnings
+    // Deliberately guarded by !tiny_sample - see DataQuality's doc comment
+    // for why a wide CI from a tiny sample shouldn't also trip this.
+    quality.effect_within_noise_floor =
+        !quality.tiny_sample && out.effect.abs() < (out.ci_high - out.ci_low) / 2.0;
+    if quality.effect_within_noise_floor {
+        warnings.push(
+            "the measured effect is smaller than the CI's own half-width: it could plausibly be noise around zero, even though the sample isn't tiny"
+                .to_string(),
+        );
+    }
+
+    (quality, warnings)
 }
 
 #[cfg(test)]
@@ -259,6 +320,12 @@ mod tests {
     use crate::input::Record;
     use crate::stats::bootstrap::DEFAULT_SEED;
     use crate::verdict::Thresholds;
+
+    fn ok_iter(
+        records: &[(usize, Record)],
+    ) -> impl Iterator<Item = Result<(usize, Record), VeridictError>> + '_ {
+        records.iter().cloned().map(Ok)
+    }
 
     fn rec(
         id: &str,
@@ -309,7 +376,7 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -333,7 +400,7 @@ mod tests {
         ];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::MeanDiff,
             0.95,
             &thresholds,
@@ -352,7 +419,7 @@ mod tests {
         let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -372,7 +439,7 @@ mod tests {
         let records: Vec<(usize, Record)> = Vec::new();
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let result = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -404,7 +471,7 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.1).unwrap();
         let report = compare_many(
-            &records,
+            ok_iter(&records),
             &[MetricKind::WinRate, MetricKind::MeanDiff],
             0.95,
             &thresholds,
@@ -441,7 +508,7 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.1).unwrap();
         let report = compare_many(
-            &records,
+            ok_iter(&records),
             &[MetricKind::WinRate, MetricKind::MeanDiff],
             0.95,
             &thresholds,
@@ -478,7 +545,7 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -490,6 +557,10 @@ mod tests {
         )
         .unwrap();
         assert!(report.warnings.iter().any(|w| w.contains("small sample")));
+        assert!(report.data_quality.tiny_sample);
+        // A wide CI from a tiny sample shouldn't ALSO trip the noise-floor
+        // flag - see DataQuality's doc comment.
+        assert!(!report.data_quality.effect_within_noise_floor);
     }
 
     #[test]
@@ -517,7 +588,7 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -575,7 +646,7 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::Elo,
             0.95,
             &thresholds,
@@ -608,7 +679,7 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            &records,
+            ok_iter(&records),
             MetricKind::WinRate,
             0.95,
             &thresholds,
@@ -620,5 +691,62 @@ mod tests {
         )
         .unwrap();
         assert!(report.warnings.is_empty());
+        assert_eq!(report.data_quality, report::DataQuality::default());
+    }
+
+    #[test]
+    fn noise_floor_flag_fires_on_a_large_but_swamped_effect() {
+        // n=40 (not tiny), but a near-50/50 split leaves the effect (0.025)
+        // far smaller than the CI's own half-width (~0.148) - independently
+        // verified against a direct Wilson recompute.
+        let mut records: Vec<_> = (0..21)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("c{i}"),
+                        None,
+                        None,
+                        Some("candidate_win"),
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        records.extend((0..19).map(|i| {
+            (
+                22 + i,
+                rec(
+                    &format!("b{i}"),
+                    None,
+                    None,
+                    Some("baseline_win"),
+                    None,
+                    None,
+                ),
+            )
+        }));
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            ok_iter(&records),
+            MetricKind::WinRate,
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+            CiMethod::Wilson,
+            BootstrapMethod::Percentile,
+        )
+        .unwrap();
+        assert!(!report.data_quality.tiny_sample);
+        assert!(report.data_quality.effect_within_noise_floor);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("smaller than the CI's own half-width"))
+        );
     }
 }

@@ -1,0 +1,61 @@
+{
+  "candidates": [
+    {
+      "baseline_count": 1,
+      "candidate_count": 3,
+      "ci_high": 442.5733715271827,
+      "ci_low": -148.1919432915074,
+      "component": 0,
+      "crashes": 0,
+      "elo": 147.19071411783776,
+      "invalid": 0,
+      "name": "matrix_legacy_a",
+      "paired_count": 5,
+      "timeouts": 0
+    },
+    {
+      "baseline_count": 3,
+      "candidate_count": 1,
+      "ci_high": 148.1919432915074,
+      "ci_low": -442.57337152718287,
+      "component": 0,
+      "crashes": 0,
+      "elo": -147.1907141178378,
+      "invalid": 0,
+      "name": "matrix_legacy_b",
+      "paired_count": 5,
+      "timeouts": 0
+    }
+  ],
+  "confidence": 0.95,
+  "matrix": [
+    {
+      "ci_high": 148.1919432915074,
+      "ci_low": -442.5733715271827,
+      "col": "matrix_legacy_a",
+      "direct": true,
+      "elo_diff": -147.19071411783776,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "ci_high": 442.57337152718287,
+      "ci_low": -148.1919432915074,
+      "col": "matrix_legacy_b",
+      "direct": true,
+      "elo_diff": 147.1907141178378,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "ci_high": 712.115588433777,
+      "ci_low": -123.35273196242588,
+      "col": "matrix_legacy_b",
+      "direct": false,
+      "elo_diff": 294.38142823567557,
+      "row": "matrix_legacy_a",
+      "status": "inferred"
+    }
+  ],
+  "schema_version": 1
+}

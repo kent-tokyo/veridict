@@ -10,6 +10,14 @@
 //! outweigh the saved re-scans once one metric's per-record work is heavy
 //! enough. Both scenarios are benchmarked so this tradeoff stays visible
 //! instead of asserting a universal win that doesn't hold.
+//!
+//! `compute`/`compute_many` now take a streaming iterator (see
+//! `metrics::compute_many`'s doc), so every call site here wraps the
+//! in-memory `records` with `.iter().cloned().map(Ok)` - an accepted
+//! methodology shift, not a regression to chase: a `Record::clone()` per
+//! record now sits inside the timed region, but real streamed input
+//! allocates a fresh `Record` per line anyway (via `serde_json`/`csv`
+//! deserialization), so this isn't measuring something unrealistic.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use veridict::input::Record;
@@ -63,7 +71,7 @@ fn bench_single_pass_all_metrics(c: &mut Criterion) {
         |b| {
             b.iter(|| {
                 compute_many(
-                    &records,
+                    records.iter().cloned().map(Ok),
                     &ALL_METRICS,
                     0.95,
                     2000,
@@ -86,7 +94,7 @@ fn bench_independent_calls_all_metrics(c: &mut Criterion) {
             b.iter(|| {
                 for &metric in &ALL_METRICS {
                     compute(
-                        &records,
+                        records.iter().cloned().map(Ok),
                         metric,
                         0.95,
                         2000,
@@ -107,7 +115,7 @@ fn bench_single_pass_cheap_metrics(c: &mut Criterion) {
     c.bench_function("compute_many (single pass, 3 O(n) metrics)", |b| {
         b.iter(|| {
             compute_many(
-                &records,
+                records.iter().cloned().map(Ok),
                 &CHEAP_METRICS,
                 0.95,
                 2000,
@@ -129,7 +137,7 @@ fn bench_independent_calls_cheap_metrics(c: &mut Criterion) {
             b.iter(|| {
                 for &metric in &CHEAP_METRICS {
                     compute(
-                        &records,
+                        records.iter().cloned().map(Ok),
                         metric,
                         0.95,
                         2000,

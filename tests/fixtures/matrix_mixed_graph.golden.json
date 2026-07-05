@@ -1,0 +1,150 @@
+{
+  "candidates": [
+    {
+      "baseline_count": 1,
+      "candidate_count": 4,
+      "ci_high": null,
+      "ci_low": null,
+      "component": 1,
+      "crashes": 0,
+      "elo": 168.51345241374688,
+      "invalid": 0,
+      "name": "matrix_legacy_a",
+      "paired_count": 6,
+      "timeouts": 0
+    },
+    {
+      "baseline_count": 4,
+      "candidate_count": 1,
+      "ci_high": null,
+      "ci_low": null,
+      "component": 1,
+      "crashes": 0,
+      "elo": -168.51345259495548,
+      "invalid": 0,
+      "name": "matrix_legacy_b",
+      "paired_count": 6,
+      "timeouts": 0
+    },
+    {
+      "baseline_count": 1,
+      "candidate_count": 1,
+      "ci_high": null,
+      "ci_low": null,
+      "component": 0,
+      "crashes": 0,
+      "elo": 0.0,
+      "invalid": 0,
+      "name": "isolated_x",
+      "paired_count": 2,
+      "timeouts": 0
+    },
+    {
+      "baseline_count": 1,
+      "candidate_count": 1,
+      "ci_high": null,
+      "ci_low": null,
+      "component": 0,
+      "crashes": 0,
+      "elo": 0.0,
+      "invalid": 0,
+      "name": "isolated_y",
+      "paired_count": 2,
+      "timeouts": 0
+    }
+  ],
+  "confidence": 0.95,
+  "matrix": [
+    {
+      "ci_high": 70.43650362227251,
+      "ci_low": -405.3446117231253,
+      "col": "matrix_legacy_a",
+      "direct": true,
+      "elo_diff": -168.51345241374688,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "ci_high": 414.7584290128501,
+      "ci_low": -93.78411446249892,
+      "col": "matrix_legacy_b",
+      "direct": true,
+      "elo_diff": 168.51345259495548,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_x",
+      "direct": false,
+      "elo_diff": null,
+      "row": "baseline",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_y",
+      "direct": false,
+      "elo_diff": null,
+      "row": "baseline",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "matrix_legacy_b",
+      "direct": true,
+      "elo_diff": 337.02690500870233,
+      "row": "matrix_legacy_a",
+      "status": "direct"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_x",
+      "direct": false,
+      "elo_diff": null,
+      "row": "matrix_legacy_a",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_y",
+      "direct": false,
+      "elo_diff": null,
+      "row": "matrix_legacy_a",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_x",
+      "direct": false,
+      "elo_diff": null,
+      "row": "matrix_legacy_b",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_y",
+      "direct": false,
+      "elo_diff": null,
+      "row": "matrix_legacy_b",
+      "status": "disconnected"
+    },
+    {
+      "ci_high": null,
+      "ci_low": null,
+      "col": "isolated_y",
+      "direct": true,
+      "elo_diff": 0.0,
+      "row": "isolated_x",
+      "status": "direct"
+    }
+  ],
+  "schema_version": 1
+}
