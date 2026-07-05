@@ -10,7 +10,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use veridict::sprt::{SprtConfig, SprtVariant};
 use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
-use veridict::{BootstrapMethod, CiMethod, MetricKind, Verdict, VeridictError, input, matrix};
+use veridict::{
+    BootstrapMethod, CiMethod, MetricConfig, MetricKind, Verdict, VeridictError, input, matrix,
+};
 
 #[derive(Parser)]
 #[command(
@@ -317,9 +319,13 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;
     let seed = args.seed.unwrap_or(DEFAULT_SEED);
-    let metrics: Vec<MetricKind> = args.metrics.into_iter().map(Into::into).collect();
     let ci_method: CiMethod = args.ci_method.into();
     let bootstrap_method: BootstrapMethod = args.bootstrap_method.into();
+    let metrics: Vec<MetricConfig> = args
+        .metrics
+        .into_iter()
+        .map(|m| MetricConfig::new(m.into(), ci_method, bootstrap_method))
+        .collect::<Result<_, _>>()?;
 
     let (verdict, json, markdown) = if let [only] = metrics[..] {
         let report = veridict::compare_one(
@@ -330,8 +336,6 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
-            ci_method,
-            bootstrap_method,
         )?;
         (
             report.verdict,
@@ -347,8 +351,6 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
-            ci_method,
-            bootstrap_method,
         )?;
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };

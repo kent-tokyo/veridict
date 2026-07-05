@@ -10,7 +10,7 @@
 use proptest::prelude::*;
 use veridict::input::Record;
 use veridict::metrics::{compute, compute_many};
-use veridict::{BootstrapMethod, CiMethod, MetricKind};
+use veridict::{BootstrapMethod, CiMethod, MetricConfig};
 
 const SEED: u64 = 0x5EED;
 
@@ -34,12 +34,17 @@ proptest! {
     #[test]
     fn compute_many_matches_independent_compute_calls(records in prop::collection::vec(arb_record(), 1..40)) {
         let records: Vec<(usize, Record)> = records.into_iter().enumerate().map(|(i, r)| (i + 1, r)).collect();
-        let metrics = [MetricKind::WinRate, MetricKind::MeanDiff, MetricKind::SignTest, MetricKind::Elo];
+        let metrics = [
+            MetricConfig::WinRate { ci_method: CiMethod::Wilson },
+            MetricConfig::MeanDiff { bootstrap_method: BootstrapMethod::Percentile },
+            MetricConfig::SignTest { ci_method: CiMethod::Wilson },
+            MetricConfig::Elo,
+        ];
 
-        let combined = compute_many(records.iter().cloned().map(Ok), &metrics, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
+        let combined = compute_many(records.iter().cloned(), &metrics, 0.95, 1000, SEED, false).unwrap();
 
         for (i, &metric) in metrics.iter().enumerate() {
-            let independent = compute(records.iter().cloned().map(Ok), metric, 0.95, 1000, SEED, false, CiMethod::Wilson, BootstrapMethod::Percentile).unwrap();
+            let independent = compute(records.iter().cloned(), metric, 0.95, 1000, SEED, false).unwrap();
             prop_assert_eq!(combined[i].paired_count, independent.paired_count);
             prop_assert_eq!(combined[i].baseline_count, independent.baseline_count);
             prop_assert_eq!(combined[i].candidate_count, independent.candidate_count);

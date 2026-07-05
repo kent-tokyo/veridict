@@ -125,35 +125,128 @@ pub enum BootstrapMethod {
     Basic,
 }
 
+/// Which knob(s) a metric actually uses, replacing the `(MetricKind,
+/// CiMethod, BootstrapMethod)` trio `compare_one`/`compare_many` used to take
+/// as three independent parameters. `elo` reads neither `ci_method` nor
+/// `bootstrap_method`, and `mean-diff` doesn't read `ci_method` - passing one
+/// anyway used to be silently ignored or a runtime `IncompatibleCiMethod`
+/// error. Carrying only the field(s) a metric actually reads makes an
+/// invalid pairing a compile error instead of a runtime one.
+/// `MetricKind`-keyed code (`Report.metric`, `build_report`,
+/// `estimate_additional_trials`) is unchanged - call [`MetricConfig::kind`]
+/// to recover it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricConfig {
+    WinRate { ci_method: CiMethod },
+    SignTest { ci_method: CiMethod },
+    MeanDiff { bootstrap_method: BootstrapMethod },
+    Elo,
+}
+
+impl MetricConfig {
+    /// The plain metric identity, for report labeling/serialization - every
+    /// variant maps to exactly one `MetricKind`, so this never fails.
+    pub fn kind(&self) -> MetricKind {
+        match self {
+            Self::WinRate { .. } => MetricKind::WinRate,
+            Self::SignTest { .. } => MetricKind::SignTest,
+            Self::MeanDiff { .. } => MetricKind::MeanDiff,
+            Self::Elo => MetricKind::Elo,
+        }
+    }
+
+    /// Builds a validated config from flat, CLI-flag-shaped inputs - the
+    /// same compatibility check `compute_many` used to run on every call
+    /// (`ci_method` other than `Wilson` is only valid for `WinRate`/
+    /// `SignTest`), now run once at construction instead of once per call.
+    /// A caller that already knows which knob its metric needs can
+    /// construct a variant directly (e.g. `MetricConfig::Elo`) and skip
+    /// this - it's valid by construction, no runtime check needed.
+    pub fn new(
+        kind: MetricKind,
+        ci_method: CiMethod,
+        bootstrap_method: BootstrapMethod,
+    ) -> Result<Self, VeridictError> {
+        match kind {
+            MetricKind::WinRate => Ok(Self::WinRate { ci_method }),
+            MetricKind::SignTest => Ok(Self::SignTest { ci_method }),
+            MetricKind::MeanDiff | MetricKind::Elo if ci_method != CiMethod::Wilson => {
+                Err(VeridictError::IncompatibleCiMethod {
+                    method: metrics::ci_method_label(ci_method),
+                    metric: metrics::metric_label(kind),
+                })
+            }
+            MetricKind::MeanDiff => Ok(Self::MeanDiff { bootstrap_method }),
+            MetricKind::Elo => Ok(Self::Elo),
+        }
+    }
+
+    /// The `CiMethod` to feed `build_report`/`estimate_additional_trials` -
+    /// only ever actually read there for `WinRate`/`SignTest`
+    /// (`estimate_additional_trials` hardcodes its own Wilson-based branch
+    /// for `Elo` before this value would be read, and returns early for
+    /// `MeanDiff` before it too - see `verdict::estimate_additional_trials`).
+    /// `Wilson` here for `MeanDiff`/`Elo` is a safe placeholder, not a real
+    /// choice being made on their behalf.
+    fn ci_method(&self) -> CiMethod {
+        match self {
+            Self::WinRate { ci_method } | Self::SignTest { ci_method } => *ci_method,
+            Self::MeanDiff { .. } | Self::Elo => CiMethod::Wilson,
+        }
+    }
+}
+
+/// Lets `compare_one`/`compare_many` (and `metrics::compute`/
+/// `metrics::compute_many`) accept either a streaming `Result`-yielding
+/// iterator (the CLI's real use case - parsing JSONL/CSV can fail mid-
+/// stream) or a plain iterator over already-valid `(usize, Record)` pairs (a
+/// caller that already has a validated slice/`Vec` in memory, with no
+/// `Result` to thread through) through the *same* function, instead of
+/// forcing every in-memory caller to write `.map(Ok)` just to satisfy the
+/// type. A blanket `impl<T> From<T> for Result<T, E>` isn't available here
+/// (implementing a foreign trait, `From`, for a foreign type, `Result` -
+/// even parameterized by a local type - violates Rust's orphan rule), hence
+/// this small local trait instead.
+pub trait IntoRecordResult {
+    fn into_record_result(self) -> Result<(usize, input::Record), VeridictError>;
+}
+
+impl IntoRecordResult for Result<(usize, input::Record), VeridictError> {
+    fn into_record_result(self) -> Self {
+        self
+    }
+}
+
+impl IntoRecordResult for (usize, input::Record) {
+    fn into_record_result(self) -> Result<(usize, input::Record), VeridictError> {
+        Ok(self)
+    }
+}
+
 /// Runs one metric end to end: classify records, compute its effect and
 /// confidence interval, and apply the pass/fail thresholds. `paired_by_id`
 /// enables paired-testcase variance reduction (see `metrics::compute`).
-#[allow(clippy::too_many_arguments)]
 pub fn compare_one<I>(
     records: I,
-    metric: MetricKind,
+    metric: MetricConfig,
     confidence: f64,
     thresholds: &verdict::Thresholds,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
-    ci_method: CiMethod,
-    bootstrap_method: BootstrapMethod,
 ) -> Result<Report, VeridictError>
 where
-    I: IntoIterator<Item = Result<(usize, input::Record), VeridictError>>,
+    I: IntoIterator,
+    I::Item: IntoRecordResult,
 {
-    let out = metrics::compute(
-        records,
-        metric,
+    let out = metrics::compute(records, metric, confidence, resamples, seed, paired_by_id)?;
+    Ok(build_report(
+        metric.kind(),
         confidence,
-        resamples,
-        seed,
-        paired_by_id,
-        ci_method,
-        bootstrap_method,
-    )?;
-    Ok(build_report(metric, confidence, thresholds, out, ci_method))
+        thresholds,
+        out,
+        metric.ci_method(),
+    ))
 }
 
 /// Runs several metrics against the same records and thresholds in a single
@@ -162,35 +255,32 @@ where
 /// any metric is inconclusive, else `Pass`. Matches the "a false pass is
 /// worse than an inconclusive result" rule: one metric failing sinks the
 /// whole run.
-#[allow(clippy::too_many_arguments)]
 pub fn compare_many<I>(
     records: I,
-    metrics: &[MetricKind],
+    metrics: &[MetricConfig],
     confidence: f64,
     thresholds: &verdict::Thresholds,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
-    ci_method: CiMethod,
-    bootstrap_method: BootstrapMethod,
 ) -> Result<MultiReport, VeridictError>
 where
-    I: IntoIterator<Item = Result<(usize, input::Record), VeridictError>>,
+    I: IntoIterator,
+    I::Item: IntoRecordResult,
 {
-    let outs = metrics::compute_many(
-        records,
-        metrics,
-        confidence,
-        resamples,
-        seed,
-        paired_by_id,
-        ci_method,
-        bootstrap_method,
-    )?;
+    let outs = metrics::compute_many(records, metrics, confidence, resamples, seed, paired_by_id)?;
     let reports: Vec<Report> = metrics
         .iter()
         .zip(outs)
-        .map(|(&metric, out)| build_report(metric, confidence, thresholds, out, ci_method))
+        .map(|(&config, out)| {
+            build_report(
+                config.kind(),
+                confidence,
+                thresholds,
+                out,
+                config.ci_method(),
+            )
+        })
         .collect();
     let verdict = verdict::aggregate(reports.iter().map(|r| r.verdict));
     Ok(MultiReport {
@@ -321,12 +411,6 @@ mod tests {
     use crate::stats::bootstrap::DEFAULT_SEED;
     use crate::verdict::Thresholds;
 
-    fn ok_iter(
-        records: &[(usize, Record)],
-    ) -> impl Iterator<Item = Result<(usize, Record), VeridictError>> + '_ {
-        records.iter().cloned().map(Ok)
-    }
-
     fn rec(
         id: &str,
         baseline: Option<f64>,
@@ -376,15 +460,15 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -394,21 +478,21 @@ mod tests {
 
     #[test]
     fn end_to_end_mean_diff_inconclusive_on_tiny_sample() {
-        let records = vec![
+        let records = [
             (1, rec("a", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("b", Some(2.0), Some(1.9), None, None, None)),
         ];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -416,18 +500,18 @@ mod tests {
 
     #[test]
     fn zero_usable_trials_is_inconclusive_not_error() {
-        let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
+        let records = [(1, rec("a", None, None, None, Some("timeout"), None))];
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -439,15 +523,15 @@ mod tests {
         let records: Vec<(usize, Record)> = Vec::new();
         let thresholds = Thresholds::symmetric(0.02).unwrap();
         let result = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
     }
@@ -471,15 +555,20 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.1).unwrap();
         let report = compare_many(
-            ok_iter(&records),
-            &[MetricKind::WinRate, MetricKind::MeanDiff],
+            records.iter().cloned(),
+            &[
+                MetricConfig::WinRate {
+                    ci_method: CiMethod::Wilson,
+                },
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+            ],
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -508,15 +597,20 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.1).unwrap();
         let report = compare_many(
-            ok_iter(&records),
-            &[MetricKind::WinRate, MetricKind::MeanDiff],
+            records.iter().cloned(),
+            &[
+                MetricConfig::WinRate {
+                    ci_method: CiMethod::Wilson,
+                },
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+            ],
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.reports[0].verdict, Verdict::Fail);
@@ -545,15 +639,15 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(report.warnings.iter().any(|w| w.contains("small sample")));
@@ -588,15 +682,15 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(report.paired_count, 30);
@@ -646,15 +740,13 @@ mod tests {
         }
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::Elo,
+            records.iter().cloned(),
+            MetricConfig::Elo,
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(report.warnings.iter().any(|w| w.contains("draws")));
@@ -679,15 +771,15 @@ mod tests {
             .collect();
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(report.warnings.is_empty());
@@ -729,15 +821,15 @@ mod tests {
         }));
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             &thresholds,
             2000,
             DEFAULT_SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(!report.data_quality.tiny_sample);

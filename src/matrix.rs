@@ -70,7 +70,7 @@ use crate::error::VeridictError;
 use crate::input::{MatchRecord, Record};
 use crate::stats::bradley_terry::{self, PairRecord};
 use crate::stats::{elo as elo_math, wilson};
-use crate::{BootstrapMethod, CiMethod, MatchOutcome, MetricKind, metrics};
+use crate::{BootstrapMethod, MatchOutcome, MetricConfig, metrics};
 
 const BASELINE: &str = "baseline";
 
@@ -360,19 +360,10 @@ where
 
     for item in named_records {
         let (name, records) = item?;
-        // resamples/seed/bootstrap_method are mean-diff-only knobs; the elo
-        // metric ignores them. ci_method: elo never supports CiMethod::Exact
-        // (fractional p_hat), so this is always Wilson.
-        let out = metrics::compute(
-            records,
-            MetricKind::Elo,
-            confidence,
-            1,
-            0,
-            paired_by_id,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
-        )?;
+        // resamples/seed are mean-diff-only knobs; elo ignores them - unlike
+        // CiMethod/BootstrapMethod, MetricConfig::Elo makes that structural
+        // rather than passed-but-unused.
+        let out = metrics::compute(records, MetricConfig::Elo, confidence, 1, 0, paired_by_id)?;
         let draws = out
             .paired_count
             .saturating_sub(out.baseline_count)

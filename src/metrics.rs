@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::{BootstrapMethod, CiMethod, MetricKind, TrialStatus};
+use crate::{CiMethod, IntoRecordResult, MetricConfig, MetricKind, TrialStatus};
 
 /// Per-side failure tally, so a report can distinguish "the baseline kept
 /// crashing" from "the candidate kept timing out" instead of one opaque
@@ -76,31 +76,30 @@ pub(crate) trait MetricAggregator {
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError>;
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_aggregator(
-    metric: MetricKind,
+    config: MetricConfig,
     confidence: f64,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
-    ci_method: CiMethod,
-    bootstrap_method: BootstrapMethod,
 ) -> Box<dyn MetricAggregator> {
-    match metric {
-        MetricKind::WinRate => Box::new(winrate::WinRateAggregator::new(
+    match config {
+        MetricConfig::WinRate { ci_method } => Box::new(winrate::WinRateAggregator::new(
             confidence,
             paired_by_id,
             ci_method,
         )),
-        MetricKind::Elo => Box::new(elo::EloAggregator::new(confidence, paired_by_id)),
-        MetricKind::MeanDiff => Box::new(mean_diff::MeanDiffAggregator::new(
-            confidence,
-            resamples,
-            seed,
-            paired_by_id,
-            bootstrap_method,
-        )),
-        MetricKind::SignTest => Box::new(sign_test::SignTestAggregator::new(
+        MetricConfig::Elo => Box::new(elo::EloAggregator::new(confidence, paired_by_id)),
+        MetricConfig::MeanDiff { bootstrap_method } => {
+            Box::new(mean_diff::MeanDiffAggregator::new(
+                confidence,
+                resamples,
+                seed,
+                paired_by_id,
+                bootstrap_method,
+            ))
+        }
+        MetricConfig::SignTest { ci_method } => Box::new(sign_test::SignTestAggregator::new(
             confidence,
             paired_by_id,
             ci_method,
@@ -121,55 +120,37 @@ fn build_aggregator(
 /// (`DiffCollector`'s `Vec<f64>`); that floor is inherent to random-access
 /// resampling and out of scope to remove. `paired_by_id`: see each
 /// aggregator's module doc - two records sharing the same `id` are combined
-/// into one net observation instead of two independent ones. `ci_method`:
-/// anything but `CiMethod::Wilson` is rejected upfront (before any record is
-/// processed) for any requested metric other than WinRate/SignTest.
-#[allow(clippy::too_many_arguments)]
+/// into one net observation instead of two independent ones. Each
+/// `MetricConfig` is valid by construction (see `MetricConfig::new`), so
+/// there's no ci_method/bootstrap_method compatibility check here anymore -
+/// it moved to construction time, once, instead of running on every call.
 pub fn compute_many<I>(
     records: I,
-    metrics: &[MetricKind],
+    metrics: &[MetricConfig],
     confidence: f64,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
-    ci_method: CiMethod,
-    bootstrap_method: BootstrapMethod,
 ) -> Result<Vec<MetricOutput>, VeridictError>
 where
-    I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
+    I: IntoIterator,
+    I::Item: IntoRecordResult,
 {
-    let mut records = records.into_iter().peekable();
+    let mut records = records
+        .into_iter()
+        .map(IntoRecordResult::into_record_result)
+        .peekable();
     if records.peek().is_none() {
         return Err(VeridictError::EmptyInput);
     }
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    if ci_method != CiMethod::Wilson {
-        for &metric in metrics {
-            if !matches!(metric, MetricKind::WinRate | MetricKind::SignTest) {
-                return Err(VeridictError::IncompatibleCiMethod {
-                    method: ci_method_label(ci_method),
-                    metric: metric_label(metric),
-                });
-            }
-        }
-    }
 
     let mut failures = FailureBreakdown::default();
     let mut aggregators: Vec<Box<dyn MetricAggregator>> = metrics
         .iter()
-        .map(|&m| {
-            build_aggregator(
-                m,
-                confidence,
-                resamples,
-                seed,
-                paired_by_id,
-                ci_method,
-                bootstrap_method,
-            )
-        })
+        .map(|&config| build_aggregator(config, confidence, resamples, seed, paired_by_id))
         .collect();
 
     for item in records {
@@ -195,19 +176,17 @@ where
 }
 
 /// Single-metric convenience wrapper around [`compute_many`].
-#[allow(clippy::too_many_arguments)]
 pub fn compute<I>(
     records: I,
-    metric: MetricKind,
+    metric: MetricConfig,
     confidence: f64,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
-    ci_method: CiMethod,
-    bootstrap_method: BootstrapMethod,
 ) -> Result<MetricOutput, VeridictError>
 where
-    I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
+    I: IntoIterator,
+    I::Item: IntoRecordResult,
 {
     compute_many(
         records,
@@ -216,8 +195,6 @@ where
         resamples,
         seed,
         paired_by_id,
-        ci_method,
-        bootstrap_method,
     )
     .map(|mut outs| outs.remove(0))
 }
@@ -276,14 +253,9 @@ pub(crate) fn tally_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BootstrapMethod;
 
     const SEED: u64 = crate::stats::bootstrap::DEFAULT_SEED;
-
-    fn ok_iter(
-        records: &[(usize, Record)],
-    ) -> impl Iterator<Item = Result<(usize, Record), VeridictError>> + '_ {
-        records.iter().cloned().map(Ok)
-    }
 
     fn rec(
         id: &str,
@@ -305,20 +277,20 @@ mod tests {
 
     #[test]
     fn winrate_excludes_draws_from_n() {
-        let records = vec![
+        let records = [
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
             (3, rec("c", None, None, Some("draw"), None, None)),
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -327,16 +299,16 @@ mod tests {
 
     #[test]
     fn winrate_all_draws_is_zero_n_warning() {
-        let records = vec![(1, rec("a", None, None, Some("draw"), None, None))];
+        let records = [(1, rec("a", None, None, Some("draw"), None, None))];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(out.warning.is_some());
@@ -345,19 +317,19 @@ mod tests {
 
     #[test]
     fn mean_diff_paired_count_and_effect() {
-        let records = vec![
+        let records = [
             (1, rec("a", Some(1.0), Some(1.5), None, None, None)),
             (2, rec("b", Some(2.0), Some(2.5), None, None, None)),
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -366,16 +338,16 @@ mod tests {
 
     #[test]
     fn mean_diff_rejects_nan() {
-        let records = vec![(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
+        let records = [(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(
             result,
@@ -388,35 +360,35 @@ mod tests {
 
     #[test]
     fn mean_diff_rejects_duplicate_id() {
-        let records = vec![
+        let records = [
             (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::DuplicateId { .. })));
     }
 
     #[test]
     fn status_only_records_count_but_are_not_schema_mismatch() {
-        let records = vec![(1, rec("a", None, None, None, Some("ok"), Some("timeout")))];
+        let records = [(1, rec("a", None, None, None, Some("ok"), Some("timeout")))];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.timeouts, 1);
@@ -426,32 +398,32 @@ mod tests {
 
     #[test]
     fn unusable_record_is_schema_mismatch() {
-        let records = vec![(1, rec("a", None, None, None, None, None))];
+        let records = [(1, rec("a", None, None, None, None, None))];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
     }
 
     #[test]
     fn unrecognized_status_is_an_error() {
-        let records = vec![(1, rec("a", None, None, None, Some("bogus"), None))];
+        let records = [(1, rec("a", None, None, None, Some("bogus"), None))];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(
             result,
@@ -461,16 +433,16 @@ mod tests {
 
     #[test]
     fn unrecognized_outcome_is_an_error() {
-        let records = vec![(1, rec("a", None, None, Some("bogus"), None, None))];
+        let records = [(1, rec("a", None, None, Some("bogus"), None, None))];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(
             result,
@@ -481,34 +453,34 @@ mod tests {
     #[test]
     fn empty_records_is_empty_input() {
         let result = compute(
-            ok_iter(&[]),
-            MetricKind::WinRate,
+            std::iter::empty::<(usize, Record)>(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
     }
 
     #[test]
     fn sign_test_excludes_ties() {
-        let records = vec![
+        let records = [
             (1, rec("a", Some(1.0), Some(1.5), None, None, None)), // positive
             (2, rec("b", Some(2.0), Some(1.0), None, None, None)), // negative
             (3, rec("c", Some(3.0), Some(3.0), None, None, None)), // tie, excluded
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::SignTest,
+            records.iter().cloned(),
+            MetricConfig::SignTest {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -518,16 +490,16 @@ mod tests {
 
     #[test]
     fn sign_test_all_ties_is_zero_n_warning() {
-        let records = vec![(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
+        let records = [(1, rec("a", Some(1.0), Some(1.0), None, None, None))];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::SignTest,
+            records.iter().cloned(),
+            MetricConfig::SignTest {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(out.warning.is_some());
@@ -535,19 +507,17 @@ mod tests {
 
     #[test]
     fn elo_counts_draws_as_half_a_point() {
-        let records = vec![
+        let records = [
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
             (2, rec("b", None, None, Some("draw"), None, None)),
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::Elo,
+            records.iter().cloned(),
+            MetricConfig::Elo,
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         // score = (1 + 0.5) / 2 = 0.75 -> a positive Elo effect.
@@ -557,19 +527,17 @@ mod tests {
 
     #[test]
     fn elo_even_record_is_zero_effect() {
-        let records = vec![
+        let records = [
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
             (2, rec("b", None, None, Some("baseline_win"), None, None)),
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::Elo,
+            records.iter().cloned(),
+            MetricConfig::Elo,
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(out.effect.abs() < 1e-9);
@@ -577,16 +545,14 @@ mod tests {
 
     #[test]
     fn elo_zero_trials_is_a_warning_not_an_error() {
-        let records = vec![(1, rec("a", None, None, None, Some("timeout"), None))];
+        let records = [(1, rec("a", None, None, None, Some("timeout"), None))];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::Elo,
+            records.iter().cloned(),
+            MetricConfig::Elo,
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert!(out.warning.is_some());
@@ -596,7 +562,7 @@ mod tests {
 
     #[test]
     fn paired_winrate_nets_two_games_per_id_by_points() {
-        let records = vec![
+        let records = [
             // id "op1": candidate wins one, loses the other -> net draw (1.0 pt).
             (1, rec("op1", None, None, Some("candidate_win"), None, None)),
             (2, rec("op1", None, None, Some("baseline_win"), None, None)),
@@ -605,14 +571,14 @@ mod tests {
             (4, rec("op2", None, None, Some("candidate_win"), None, None)),
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         // 4 raw games -> 2 paired samples: 1 draw (excluded from n), 1 candidate win.
@@ -623,19 +589,19 @@ mod tests {
 
     #[test]
     fn paired_winrate_unpaired_singleton_still_counts() {
-        let records = vec![(
+        let records = [(
             1,
             rec("solo", None, None, Some("candidate_win"), None, None),
         )];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -644,20 +610,20 @@ mod tests {
 
     #[test]
     fn paired_winrate_rejects_triple_id() {
-        let records = vec![
+        let records = [
             (1, rec("op1", None, None, Some("candidate_win"), None, None)),
             (2, rec("op1", None, None, Some("candidate_win"), None, None)),
             (3, rec("op1", None, None, Some("candidate_win"), None, None)),
         ];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(
             result,
@@ -670,19 +636,19 @@ mod tests {
 
     #[test]
     fn paired_mean_diff_averages_the_pair() {
-        let records = vec![
+        let records = [
             (1, rec("op1", Some(1.0), Some(1.2), None, None, None)), // diff +0.2
             (2, rec("op1", Some(1.0), Some(0.8), None, None, None)), // diff -0.2
         ];
         let out = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -691,39 +657,39 @@ mod tests {
 
     #[test]
     fn paired_mean_diff_allows_duplicate_id_that_unpaired_mode_rejects() {
-        let records = vec![
+        let records = [
             (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("dup", Some(2.0), Some(2.1), None, None, None)),
         ];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(result.is_ok());
     }
 
     #[test]
     fn paired_sign_test_rejects_triple_id() {
-        let records = vec![
+        let records = [
             (1, rec("op1", Some(1.0), Some(1.1), None, None, None)),
             (2, rec("op1", Some(1.0), Some(1.1), None, None, None)),
             (3, rec("op1", Some(1.0), Some(1.1), None, None, None)),
         ];
         let result = compute(
-            ok_iter(&records),
-            MetricKind::SignTest,
+            records.iter().cloned(),
+            MetricConfig::SignTest {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(
             result,
@@ -736,20 +702,18 @@ mod tests {
 
     #[test]
     fn paired_elo_nets_by_points_too() {
-        let records = vec![
+        let records = [
             (1, rec("op1", None, None, Some("candidate_win"), None, None)),
             (2, rec("op1", None, None, Some("draw"), None, None)),
         ];
         // total = 1.0 + 0.5 = 1.5 pts across the pair -> net candidate win.
         let out = compute(
-            ok_iter(&records),
-            MetricKind::Elo,
+            records.iter().cloned(),
+            MetricConfig::Elo,
             0.95,
             1000,
             SEED,
             true,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -761,23 +725,28 @@ mod tests {
     #[test]
     fn compute_many_rejects_record_unusable_by_one_of_several_metrics() {
         // Usable by MeanDiff (has baseline/candidate) but not by WinRate (no result, no status).
-        let records = vec![(1, rec("a", Some(1.0), Some(1.1), None, None, None))];
+        let records = [(1, rec("a", Some(1.0), Some(1.1), None, None, None))];
         let result = compute_many(
-            ok_iter(&records),
-            &[MetricKind::MeanDiff, MetricKind::WinRate],
+            records.iter().cloned(),
+            &[
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+                MetricConfig::WinRate {
+                    ci_method: CiMethod::Wilson,
+                },
+            ],
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         );
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
     }
 
     #[test]
     fn compute_many_matches_independent_compute_calls() {
-        let records = vec![
+        let records = [
             (
                 1,
                 rec("a", Some(1.0), Some(1.5), Some("candidate_win"), None, None),
@@ -789,51 +758,55 @@ mod tests {
             (3, rec("c", Some(1.0), Some(1.0), Some("draw"), None, None)),
         ];
         let combined = compute_many(
-            ok_iter(&records),
+            records.iter().cloned(),
             &[
-                MetricKind::WinRate,
-                MetricKind::MeanDiff,
-                MetricKind::SignTest,
+                MetricConfig::WinRate {
+                    ci_method: CiMethod::Wilson,
+                },
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+                MetricConfig::SignTest {
+                    ci_method: CiMethod::Wilson,
+                },
             ],
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         let winrate = compute(
-            ok_iter(&records),
-            MetricKind::WinRate,
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         let mean_diff = compute(
-            ok_iter(&records),
-            MetricKind::MeanDiff,
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         let sign_test = compute(
-            ok_iter(&records),
-            MetricKind::SignTest,
+            records.iter().cloned(),
+            MetricConfig::SignTest {
+                ci_method: CiMethod::Wilson,
+            },
             0.95,
             1000,
             SEED,
             false,
-            CiMethod::Wilson,
-            BootstrapMethod::Percentile,
         )
         .unwrap();
         assert_eq!(combined[0].paired_count, winrate.paired_count);

@@ -14,9 +14,31 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 Everything below has landed on `master` but is not yet in a published crates.io release - `0.1.0`
 on crates.io predates all of it (confirmed against the published build on docs.rs). No version
-number has been decided yet; since every change here is additive (no removed/renamed public API),
-`0.2.0` would be the natural next version under semver, not a re-publish of `0.1.0` (crates.io
-does not allow republishing an existing version).
+number has been decided yet; `0.2.0` would be the natural next version under semver pre-1.0
+(crates.io does not allow republishing an existing version regardless).
+
+### Changed
+
+- **Breaking**: `compare_one`/`compare_many` (and the lower-level `metrics::compute`/
+  `compute_many`) dropped from 9/8 positional parameters to 7/6, in response to concrete feedback
+  from an actual downstream library consumer after integrating against the old signature.
+  - The `ci_method: CiMethod, bootstrap_method: BootstrapMethod` pair is replaced by a single
+    `metric: MetricConfig` parameter - `MetricConfig::WinRate { ci_method }` /
+    `SignTest { ci_method }` / `MeanDiff { bootstrap_method }` / `Elo`. Previously, `elo` accepted
+    (and silently ignored) both parameters, and `mean-diff` required `ci_method: CiMethod::Wilson`
+    to avoid a runtime `IncompatibleCiMethod` error despite never reading it - passing an
+    irrelevant parameter for a given metric is now a compile error, not a footgun. Use
+    `MetricConfig::new(kind, ci_method, bootstrap_method)` to construct one from flat,
+    CLI-flag-shaped inputs (this performs the same validation `compute_many` used to run
+    internally on every call, just once, at construction).
+  - `records: I where I: IntoIterator<Item = Result<(usize, Record), VeridictError>>` widens to
+    `I: IntoIterator where I::Item: IntoRecordResult` - a caller that already has valid,
+    already-parsed records in memory can now pass `records.iter().cloned()` directly, instead of
+    `.iter().cloned().map(Ok)` just to satisfy the old bound. The streaming-parse use case
+    (`Result`-yielding iterators) is unaffected.
+  - No JSON/Markdown report format changed - `Report.metric` still serializes as the same plain
+    string it always did (`MetricConfig::kind()` recovers the existing `MetricKind` for anything
+    report-shaped). This is a Rust-API-only change.
 
 ### Added
 
