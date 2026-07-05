@@ -12,10 +12,11 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
-Everything below has landed on `master` but is not yet in a published crates.io release - `0.1.0`
-on crates.io predates all of it (confirmed against the published build on docs.rs). No version
-number has been decided yet; `0.2.0` would be the natural next version under semver pre-1.0
-(crates.io does not allow republishing an existing version regardless).
+## [0.2.0] - 2026-07-05
+
+Everything below is new since `0.1.0` on crates.io. `0.2.0` rather than `0.1.1` because of the
+breaking `compare_one`/`compare_many` change - a minor bump is allowed for breaking changes under
+semver pre-1.0, and crates.io doesn't allow republishing an existing version regardless.
 
 ### Changed
 
