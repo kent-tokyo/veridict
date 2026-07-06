@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-06
+
+Purely additive - no breaking changes since `0.2.0`.
+
 ### Added
 
 - `data_quality.low_id_diversity` and a matching `warnings` string: fires when one `id` repeats 3
