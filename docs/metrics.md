@@ -190,6 +190,15 @@ warning never changes `pass`/`fail`/`inconclusive`):
 - **Effect within noise floor** - the measured effect is smaller than the CI's own half-width
   (could plausibly be noise around zero), guarded by *not* also tiny-sample (a wide CI from a tiny
   sample already gets its own warning; flagging both would double-count the same underlying cause).
+- **Low id diversity** - one `id` repeated 3 or more times among at least 10 id-tagged trials,
+  unpaired mode only. `compare_one`'s CI treats every trial as independent; a heavily repeated `id`
+  suggests the same underlying test case was logged multiple times rather than actually run that
+  many independent times, which would make the CI narrower than the data really supports. Silent
+  when every `id` appears exactly twice (the common, innocent case of forgetting
+  `--paired-by-id` on genuinely paired data - flagging that would be noise, not signal) and silent
+  entirely under `--paired-by-id` (repeated ids mean something different there - see
+  [paired testcases](../README.md#paired-testcases)). This only catches literal `id` collisions -
+  it says nothing about near-duplicate trials that don't share an `id`.
 
-None of these thresholds (30, 20%, 50%) come from a specific paper - they're the kind of rule of
-thumb a careful practitioner would apply by hand, made automatic.
+None of these thresholds (30, 20%, 50%, 3-of-10) come from a specific paper - they're the kind of
+rule of thumb a careful practitioner would apply by hand, made automatic.

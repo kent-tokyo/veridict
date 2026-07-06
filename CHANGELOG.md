@@ -12,6 +12,18 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `data_quality.low_id_diversity` and a matching `warnings` string: fires when one `id` repeats 3
+  or more times among at least 10 id-tagged trials in unpaired mode - a sign the "N independent
+  trials" assumption behind the CI doesn't hold (the same underlying test case was likely logged
+  multiple times, not run N genuinely separate times). Silent when every `id` appears exactly
+  twice (the common, innocent case of forgetting `--paired-by-id`) and silent entirely under
+  `--paired-by-id` (repeated ids mean something different there). Purely advisory, like every other
+  `data_quality` flag - never affects `verdict`. Prompted by concrete feedback from a downstream
+  consumer who'd hit this gap for real; closes it for `winrate`/`elo` specifically (`mean-diff`/
+  `sign-test` already hard-reject any duplicate id in unpaired mode, unchanged here).
+
 ## [0.2.0] - 2026-07-05
 
 Everything below is new since `0.1.0` on crates.io. `0.2.0` rather than `0.1.1` because of the

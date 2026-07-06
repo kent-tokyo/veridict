@@ -81,6 +81,8 @@ impl MetricAggregator for WinRateAggregator {
                 invalid,
                 failures: *failures,
                 warning: Some("no decisive (non-draw) trials to compute win rate".to_string()),
+                records_with_id: 0,
+                max_id_count: 0,
             });
         }
         let (lo, hi) = match self.ci_method {
@@ -101,6 +103,8 @@ impl MetricAggregator for WinRateAggregator {
             invalid,
             failures: *failures,
             warning: None,
+            records_with_id: 0,
+            max_id_count: 0,
         })
     }
 }

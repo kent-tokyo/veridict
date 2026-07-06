@@ -93,12 +93,13 @@
     "data_quality": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor"],
+      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity"],
       "properties": {
         "tiny_sample": { "type": "boolean", "description": "paired_count < 30" },
         "high_failure_rate": { "type": "boolean", "description": "over 20% of trials failed to execute" },
         "draw_heavy": { "type": "boolean", "description": "elo only; always false for other metrics. Over 50% draws." },
-        "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" }
+        "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" },
+        "low_id_diversity": { "type": "boolean", "description": "one id repeated >= 3 times among >= 10 id-tagged trials, unpaired mode only; always false when --paired-by-id is set or too few records carry an id" }
       }
     }
   }

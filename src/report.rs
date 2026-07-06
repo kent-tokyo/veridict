@@ -79,6 +79,14 @@ pub struct DataQuality {
     /// (a large-enough sample whose effect is *still* swamped by its own
     /// uncertainty).
     pub effect_within_noise_floor: bool,
+    /// One `id` dominates the (unpaired) trial stream - a sign the "N
+    /// independent trials" assumption behind the CI doesn't hold, since the
+    /// same underlying test case was likely logged multiple times rather
+    /// than run N genuinely separate times. Always `false` when
+    /// `--paired-by-id` is set (repeated ids mean something different
+    /// there) or when too few records carry an `id` for the signal to be
+    /// meaningful - see `collect_data_quality`.
+    pub low_id_diversity: bool,
 }
 
 /// A metric's effect/CI/thresholds are proportions (winrate, sign-test),

@@ -816,3 +816,55 @@ fn clean_large_sample_has_empty_warnings_array() {
         .assert()
         .stdout(predicate::str::contains("\"warnings\": []"));
 }
+
+#[test]
+fn low_id_diversity_warning_appears_when_one_id_dominates_unpaired() {
+    // id "dup" repeated 5 times plus 7 distinct ids - the "same test case
+    // logged multiple times" pattern the check exists to catch.
+    let mut stdin = "{\"id\":\"dup\",\"result\":\"candidate_win\"}\n".repeat(5);
+    for i in 0..7 {
+        stdin.push_str(&format!(
+            "{{\"id\":\"r{i}\",\"result\":\"candidate_win\"}}\n"
+        ));
+    }
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("low id diversity"))
+        .stdout(predicate::str::contains("\"low_id_diversity\": true"));
+}
+
+#[test]
+fn low_id_diversity_is_silent_when_every_id_appears_exactly_twice() {
+    // The common, innocent mistake: genuinely paired data run without
+    // --paired-by-id. Must stay silent - firing here would be noise.
+    let stdin = (0..6)
+        .flat_map(|i| {
+            [
+                format!("{{\"id\":\"pair{i}\",\"result\":\"candidate_win\"}}\n"),
+                format!("{{\"id\":\"pair{i}\",\"result\":\"candidate_win\"}}\n"),
+            ]
+        })
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"low_id_diversity\": false"))
+        .stdout(predicate::str::contains("low id diversity").not());
+}

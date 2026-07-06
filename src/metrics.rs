@@ -18,6 +18,7 @@ mod winrate;
 
 pub(crate) use common::OutcomeCollector;
 use serde::Serialize;
+use std::collections::HashMap;
 
 use crate::error::VeridictError;
 use crate::input::Record;
@@ -55,6 +56,16 @@ pub struct MetricOutput {
     /// Set when there were zero trials usable by the metric; the caller must
     /// treat this as Inconclusive rather than running it through thresholds.
     pub warning: Option<String>,
+    /// Id-repetition stats, tracked centrally in `compute_many` (not by any
+    /// one aggregator - it applies identically no matter which metric is
+    /// requested). Every aggregator sets these to `0` in its own `finish()`;
+    /// `compute_many` overwrites them with the real values on every output
+    /// before returning. `0` for both when `paired_by_id` is set - paired
+    /// mode already has its own meaning for repeated ids (`SchemaMismatch`
+    /// on >2-per-id), so this tracking is skipped there entirely.
+    pub records_with_id: u64,
+    /// The largest number of records sharing any single id.
+    pub max_id_count: u64,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called
@@ -124,6 +135,12 @@ fn build_aggregator(
 /// `MetricConfig` is valid by construction (see `MetricConfig::new`), so
 /// there's no ci_method/bootstrap_method compatibility check here anymore -
 /// it moved to construction time, once, instead of running on every call.
+/// `records_with_id`/`max_id_count` (see `MetricOutput`'s doc) are tracked
+/// here, centrally, rather than per-aggregator - it's the same fact
+/// regardless of which metrics are requested, and per-aggregator tracking is
+/// exactly how `OutcomeCollector` (no duplicate-id check) and
+/// `DiffCollector`/`SignCounts` (hard error on any duplicate) ended up with
+/// different behavior in the first place.
 pub fn compute_many<I>(
     records: I,
     metrics: &[MetricConfig],
@@ -153,6 +170,12 @@ where
         .map(|&config| build_aggregator(config, confidence, resamples, seed, paired_by_id))
         .collect();
 
+    // Paired mode already has its own meaning for a repeated id (nets to one
+    // observation, or a hard `SchemaMismatch` past 2) - this tracking is only
+    // about the unpaired gap, so it's skipped entirely when paired_by_id.
+    let mut id_counts: HashMap<String, u64> = HashMap::new();
+    let mut records_with_id: u64 = 0;
+
     for item in records {
         let (line, record) = item?;
         let mut has_status = false;
@@ -164,14 +187,25 @@ where
             has_status = true;
             tally_status(status, line, "candidate_status", &mut failures.candidate)?;
         }
+        if !paired_by_id && let Some(id) = record.id.as_deref() {
+            records_with_id += 1;
+            *id_counts.entry(id.to_string()).or_insert(0) += 1;
+        }
         for agg in &mut aggregators {
             agg.ingest(line, &record, has_status)?;
         }
     }
+    let max_id_count = id_counts.values().copied().max().unwrap_or(0);
 
     aggregators
         .into_iter()
-        .map(|agg| agg.finish(&failures))
+        .map(|agg| {
+            agg.finish(&failures).map(|mut out| {
+                out.records_with_id = records_with_id;
+                out.max_id_count = max_id_count;
+                out
+            })
+        })
         .collect()
 }
 

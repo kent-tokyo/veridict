@@ -90,6 +90,8 @@ impl MetricAggregator for MeanDiffAggregator {
                 invalid,
                 failures: *failures,
                 warning: Some("no paired numeric trials to compute mean difference".to_string()),
+                records_with_id: 0,
+                max_id_count: 0,
             });
         }
         let effect = bootstrap::mean(&diffs);
@@ -125,6 +127,8 @@ impl MetricAggregator for MeanDiffAggregator {
             invalid,
             failures: *failures,
             warning: None,
+            records_with_id: 0,
+            max_id_count: 0,
         })
     }
 }

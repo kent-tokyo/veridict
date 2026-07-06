@@ -86,6 +86,8 @@ impl MetricAggregator for SignTestAggregator {
                 invalid,
                 failures: *failures,
                 warning: Some("no non-tied paired trials to compute the sign test".to_string()),
+                records_with_id: 0,
+                max_id_count: 0,
             });
         }
         let (lo, hi) = match self.ci_method {
@@ -106,6 +108,8 @@ impl MetricAggregator for SignTestAggregator {
             invalid,
             failures: *failures,
             warning: None,
+            records_with_id: 0,
+            max_id_count: 0,
         })
     }
 }

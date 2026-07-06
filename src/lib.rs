@@ -401,6 +401,21 @@ fn collect_data_quality(
         );
     }
 
+    // records_with_id/max_id_count are 0 when --paired-by-id is set - paired
+    // mode already has its own meaning for a repeated id, so this is skipped
+    // there (see MetricOutput's doc). >= 3 (not >= 2) is load-bearing:
+    // someone who simply forgot --paired-by-id on genuinely paired data has
+    // every id at exactly 2, and that must stay silent - firing on it would
+    // be noise on a common, innocent mistake. >= 10 is a floor so the signal
+    // isn't computed from a handful of records.
+    quality.low_id_diversity = out.records_with_id >= 10 && out.max_id_count >= 3;
+    if quality.low_id_diversity {
+        warnings.push(format!(
+            "low id diversity: one id repeated {} times among {} id-tagged trial(s) - looks like the same test case was logged multiple times, not independent samples",
+            out.max_id_count, out.records_with_id
+        ));
+    }
+
     (quality, warnings)
 }
 
@@ -655,6 +670,145 @@ mod tests {
         // A wide CI from a tiny sample shouldn't ALSO trip the noise-floor
         // flag - see DataQuality's doc comment.
         assert!(!report.data_quality.effect_within_noise_floor);
+    }
+
+    // --- low_id_diversity: the case table that actually matters here ---
+
+    fn winrate_records_with_ids(ids: &[String]) -> Vec<(usize, Record)> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| {
+                (
+                    i + 1,
+                    rec(id, None, None, Some("candidate_win"), None, None),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn id_diversity_healthy_mostly_unique_ids_is_silent() {
+        let ids: Vec<String> = (0..12).map(|i| format!("r{i}")).collect();
+        let records = winrate_records_with_ids(&ids);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+        )
+        .unwrap();
+        assert!(!report.data_quality.low_id_diversity);
+    }
+
+    #[test]
+    fn id_diversity_every_id_exactly_twice_is_silent() {
+        // The common, innocent mistake: genuinely paired data run without
+        // --paired-by-id. Every id at exactly 2 must NOT fire - that would
+        // be noise on a case this ordinary, not a real diversity problem.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            ids.push(format!("pair{i}"));
+            ids.push(format!("pair{i}"));
+        }
+        let records = winrate_records_with_ids(&ids);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+        )
+        .unwrap();
+        assert!(!report.data_quality.low_id_diversity);
+    }
+
+    #[test]
+    fn id_diversity_one_dominant_id_fires() {
+        let mut ids = vec!["dup".to_string(); 5];
+        ids.extend((0..7).map(|i| format!("r{i}")));
+        let records = winrate_records_with_ids(&ids);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+        )
+        .unwrap();
+        assert!(report.data_quality.low_id_diversity);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("low id diversity"))
+        );
+    }
+
+    #[test]
+    fn id_diversity_skipped_entirely_under_paired_by_id() {
+        // Same shape as the exactly-twice case, but paired mode: repeated
+        // ids mean something different there (net to one observation), so
+        // this tracking must stay at its 0 sentinel, not fire.
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            ids.push(format!("pair{i}"));
+            ids.push(format!("pair{i}"));
+        }
+        let records = winrate_records_with_ids(&ids);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            true,
+        )
+        .unwrap();
+        assert!(!report.data_quality.low_id_diversity);
+    }
+
+    #[test]
+    fn id_diversity_below_the_floor_is_silent_even_if_skewed() {
+        // Same skew as the dominant-id case (one id x4), but only 6
+        // id-tagged records total - below the >= 10 floor, so the signal
+        // isn't meaningful enough to report yet.
+        let mut ids = vec!["dup".to_string(); 4];
+        ids.extend((0..2).map(|i| format!("r{i}")));
+        let records = winrate_records_with_ids(&ids);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::WinRate {
+                ci_method: CiMethod::Wilson,
+            },
+            0.95,
+            &thresholds,
+            2000,
+            DEFAULT_SEED,
+            false,
+        )
+        .unwrap();
+        assert!(!report.data_quality.low_id_diversity);
     }
 
     #[test]
