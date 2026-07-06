@@ -3,6 +3,7 @@
 [English](README.md) | 日本語
 
 [![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/veridict.svg)](https://crates.io/crates/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 候補(candidate)がベースライン(baseline)より本当に優れているかを判定する、小さくドメイン非依存な評価ゲート。トライアル結果のファイルから判定します。
@@ -38,6 +39,20 @@
   `veridict matrix`。
 
 ## インストール / ビルド
+
+CLIとしてcrates.ioからインストール:
+
+```bash
+cargo install veridict
+```
+
+ライブラリとして依存関係に追加:
+
+```bash
+cargo add veridict
+```
+
+またはソースからビルド:
 
 ```bash
 cargo build --release
@@ -171,8 +186,8 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 `compare` のレポートには、`verdict` に影響しない付加的なフィールドも常に含まれます:
 
 * **`estimated_additional_trials`** - `inconclusive` な結果を決着させるのに必要な追加トライアル数のおおまかな見積もり(信頼区間が `O(1/√n)` で縮小するという前提、効果量自体は変わらないと仮定)。提案できることが何もない場合は `null` になります - 既に判定済み、トライアル数が0件、あるいは効果量がpass/failしきい値の"内側"(デッドゾーン)にある場合です: 効果量がすでにデッドゾーン内にある点推定を中心に信頼区間を縮めても、データをどれだけ追加してもどちらの境界も越えられません。この数値は「保証」ではなく「だいたいこのくらい、あるいはもっと必要」という目安として扱ってください - 既知の、定量化されたバイアスがあります(検証済みの一例では n=100 で約18%の過小評価)。
-* **`warnings`** - 人間可読なデータ品質の警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、または `elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)。
-* **`data_quality`** - `warnings` と同じ内容を、文字列ではなく真偽値(`tiny_sample`、`high_failure_rate`、`draw_heavy`、`effect_within_noise_floor`)として持つフィールドです。文章を解析するのではなくフラグで分岐したい機械側の消費者向けです。`warnings` を置き換えるものではなく併存します - どちらも常に存在します。
+* **`warnings`** - 人間可読なデータ品質の警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、`elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)、測定された効果量がCI自身の半値幅より小さい(ゼロ周りのノイズである可能性がある)、またはunpairedモードで同一の`id`が10件以上のid付きトライアル中3回以上繰り返されている(すべての`id`がちょうど2回ずつ出現する場合 - つまり`--paired-by-id`を付け忘れただけのよくあるケース - は発火しません)場合です。
+* **`data_quality`** - `warnings` と同じ内容を、文字列ではなく真偽値(`tiny_sample`、`high_failure_rate`、`draw_heavy`、`effect_within_noise_floor`、`low_id_diversity`)として持つフィールドです。文章を解析するのではなくフラグで分岐したい機械側の消費者向けです。`warnings` を置き換えるものではなく併存します - どちらも常に存在します。
 
 各手法の前提・失敗モードの詳細は [`docs/metrics_ja.md`](docs/metrics_ja.md) を参照してください。
 

@@ -3,6 +3,7 @@
 English | [日本語](README_ja.md)
 
 [![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/veridict.svg)](https://crates.io/crates/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 A small, domain-agnostic evaluation gate: decide whether a candidate is
@@ -42,6 +43,20 @@ spreadsheet and guess:
   same shared baseline -> `veridict matrix`.
 
 ## Install / build
+
+As a CLI, from crates.io:
+
+```bash
+cargo install veridict
+```
+
+As a library dependency:
+
+```bash
+cargo add veridict
+```
+
+Or build from source:
 
 ```bash
 cargo build --release
@@ -227,13 +242,18 @@ Every `compare` report also carries advisory fields that never affect
   under-estimate at n=100 for one verified case).
 * **`warnings`** - human-readable data-quality flags, empty when there's
   nothing to flag: a tiny sample (under 30 paired trials), an excessive
-  failure rate (over 20% timeout/crash/invalid), or, for `elo`, a draw-heavy
-  run (over 50% draws leaves few decisive outcomes to rate from).
+  failure rate (over 20% timeout/crash/invalid), for `elo`, a draw-heavy run
+  (over 50% draws leaves few decisive outcomes to rate from), the measured
+  effect being smaller than the CI's own half-width (plausibly noise around
+  zero), or, in unpaired mode, one `id` being repeated 3+ times among 10+
+  id-tagged trials (a sign the same test case was logged multiple times
+  rather than run that many independent times - silent when every `id`
+  appears exactly twice, the common case of forgetting `--paired-by-id`).
 * **`data_quality`** - the same flags as `warnings`, as booleans
-  (`tiny_sample`, `high_failure_rate`, `draw_heavy`, `effect_within_noise_floor`)
-  rather than strings, for a machine consumer that wants to branch on a flag
-  instead of parsing prose. Added alongside `warnings`, not a replacement -
-  both are always present.
+  (`tiny_sample`, `high_failure_rate`, `draw_heavy`, `effect_within_noise_floor`,
+  `low_id_diversity`) rather than strings, for a machine consumer that wants
+  to branch on a flag instead of parsing prose. Added alongside `warnings`,
+  not a replacement - both are always present.
 
 See [`docs/metrics.md`](docs/metrics.md) for the full detail on every method
 above, including assumptions and known failure modes.
