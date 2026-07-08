@@ -153,6 +153,12 @@ Recommend which of those pairs would most benefit from more trials, ranked most-
 veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
 ```
 
+Estimate how many trials you'd need, before running a real `compare`:
+
+```bash
+veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
+```
+
 ### Exit codes
 
 | Code | Meaning |
@@ -444,6 +450,47 @@ one `matrix` cell, with:
 Dropped from an earlier, broader idea: a `--budget N`/`--goal identify-best` constrained
 allocator. No real algorithm for either exists in this codebase yet - see
 [`docs/research-map.md`](docs/research-map.md) for what's deliberately deferred.
+
+## Power
+
+`veridict power` estimates how many trials `compare --metric winrate/sign-test/elo` would need
+for a target probability (power) of reaching a passing verdict - *before* running any of them. No
+input file: a pure calculation from flags.
+
+```console
+$ veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
+{
+  "schema_version": 1,
+  "metric": "elo",
+  "ci_method": "wilson",
+  "min_effect": 20.0,
+  "assume_effect": 35.0,
+  "confidence": 0.95,
+  "target_power": 0.8,
+  "estimated_trials": 4281,
+  "achieved_power": 0.8043871725361499,
+  "method": "exact_binomial_search",
+  "notes": [
+    "Assumes the true effect is exactly assume_effect; a smaller real effect needs more trials than this number, not fewer - this is a design estimate for how much data to collect, not a guarantee about what a real run will show."
+  ]
+}
+```
+
+Two effect values are **both required**, and `--assume-effect` must exceed `--min-effect`:
+
+* **`--min-effect`** - the pass bar, identical meaning to `compare --min-effect`/`--pass-above`.
+* **`--assume-effect`** - the true effect actually being powered for. Evaluating power with the
+  true effect set equal to the pass bar only recovers the CI's own miscoverage at that boundary
+  (`≈ 1 - confidence`) - flat, and it never climbs toward `--target-power` no matter how many
+  trials you add. See [`docs/metrics.md`](docs/metrics.md)'s `power` section for the reasoning,
+  not just the rule.
+
+`estimated_trials` is found by an *exact* search (`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >=
+p0]`, not a textbook approximation) against the same real `wilson`/`exact`/`jeffreys` CI functions
+`compare` itself uses (`elo` accepts only `wilson`, same as `compare --metric elo`). `mean-diff`
+isn't supported (no variance to assume pre-experiment - rejected at the flag level, not silently
+ignored). `--paired-by-id` is accepted but doesn't change the number - see the docs section for
+why.
 
 ## Paired testcases
 

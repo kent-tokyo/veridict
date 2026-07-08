@@ -250,6 +250,92 @@ rather than ranking every pair independently). No real algorithm for that exists
 codebase or its dependencies - see `docs/research-map.md` for what would need to exist before that
 ships.
 
+## `power`
+
+**Established statistic (statistical power), computed exactly against this project's own real CI
+functions rather than a textbook formula.** `veridict power` estimates how many trials
+`compare --metric winrate/sign-test/elo` would need for a `--target-power` probability of reaching
+a passing verdict *before running any of them* - the pre-experiment counterpart to
+`estimated_additional_trials` below, which only ever answers the same question *after* some trials
+already ran.
+
+**Why `--min-effect` and `--assume-effect` are both required, and why they must differ.**
+`compare`'s real decision rule (`verdict::decide`) is: pass iff a CI's lower bound clears
+`pass_above`. If power were evaluated with the *true* effect set equal to that same pass bar, the
+computed number would be the interval's own miscoverage at the boundary it was built against
+(`≈ 1 - confidence`) - flat, and it never climbs toward a target power no matter how large `n`
+gets, because a CI's lower bound crossing the *exact* true value it's centered near is fundamentally
+a coverage-guarantee question, not a sample-size question. A real power calculation needs two
+distinct values: `--min-effect` (the pass bar - identical meaning to `compare --min-effect`/
+`--pass-above`) and a strictly larger `--assume-effect` (the true effect actually being powered
+for). `power` rejects `--assume-effect <= --min-effect` as a hard error rather than silently
+returning a number that looks meaningful but isn't - the standard distinction, present in every
+real power analysis, between "the smallest effect worth caring about" and "the effect you actually
+expect or hope for."
+
+**The exact calculation:**
+
+```
+power(n) = sum_{k=0}^{n} Binomial_pmf(n, p1, k) * [CI_lower(k, n, confidence) >= p0]
+```
+
+`p0`/`p1` are `--min-effect`/`--assume-effect` converted to proportions (`0.5 + effect` for
+`winrate`/`sign-test`; `stats::sprt::score_from_elo(effect)` for `elo` - the same named
+logistic-Elo transform `sprt`'s own hypothesis handling uses, reused directly rather than
+re-derived a third time). `CI_lower` is whichever of `wilson`/`exact`/`jeffreys` `--ci-method`
+selects (`elo` accepts only `wilson`, the same restriction `compare --metric elo` itself has) -
+real, already-tested functions, the same rationale `estimated_additional_trials` already gives for
+searching against real CI math instead of an approximation. The smallest qualifying `n` is found
+via a fast normal-approximation seed, refined by an exact search against the formula above - never
+the normal approximation itself as the reported answer.
+
+**`estimated_trials` counts decisive trials, and for `elo` specifically that's a real, undocumented-
+until-now gap against draw-heavy testing.** The `Binomial(n, p1)` model above draws every trial as
+either a "success" or not - there is no draw outcome in it. For `winrate`/`sign-test` this is
+already exactly what `compare` itself does: both metrics discard draws before computing their own
+CI (`winrate.rs`'s `finish` explicitly drops the draw count), so `n` there genuinely means decisive
+trials, and `power`'s model matches `compare`'s own. For `elo`, `compare --metric elo` computes its
+score as `(candidate_wins + 0.5 * draws) / (wins + losses + draws)` - draws count as half a win and
+sit inside the denominator - which `power`'s pure win/not-win model does not represent. In a
+draw-heavy testcase (the common case in engine testing - the whole reason `--sprt-variant
+pentanomial`/`trinomial` exist), the real `compare --metric elo` run will need more total games than
+`veridict power --metric elo`'s `estimated_trials` says, since some fraction of those games resolve
+as draws rather than decisive results. Treat `power --metric elo`'s number as a lower bound on total
+games for a draw-heavy candidate, not the real game count - a draw-aware `elo` power model is a
+deferred extension (see `docs/research-map.md`), not something this round attempts.
+
+**The "sawtooth" caveat.** Exact power for a discrete CI method (Wilson, and especially
+Clopper-Pearson/Jeffreys) is not perfectly monotonic in `n` - a documented property of exact
+discrete methods, not a bug (Chernick, M.R. & Liu, C.Y. (2002), "The Saw-Toothed Behavior of Power
+Versus Sample Size and Software Solutions: Single Binomial Proportion Using Exact Methods," *The
+American Statistician* 56(2):149-155). `estimated_trials` is confirmed to hold `>= target_power`
+across a window of subsequent `n`, not just at the single point a naive search might land on -
+`achieved_power` in the report is the real exact power at `estimated_trials`, and can overshoot
+`target_power` by a nontrivial margin for exactly this reason. `tests/calibration/
+power_calibration.rs` verifies this empirically via Monte Carlo simulation, not just by trusting
+the derivation.
+
+**Why `--paired-by-id` doesn't change the number.** Pairing reduces testcase/opening variance in
+practice (see "Paired testcases" and the `pentanomial` SPRT section above), but the *actual*
+reduction depends on the data's within-pair correlation, which doesn't exist yet before any trial
+has run - there's nothing to measure it from. `power` accepts the flag and adds a caveat to the
+report's `notes` rather than silently applying an invented correction factor: treat the reported
+number as a conservative (unpaired) upper bound when pairing is planned.
+
+**Why `mean-diff` isn't supported.** No closed-form CI-width-at-n function exists for a bootstrap
+CI without real resampled data (the same reason `estimated_additional_trials` falls back to an
+`O(1/sqrt(n))` approximation for it post-hoc) - but pre-experiment there is no fallback available
+either, since there's no existing sample to approximate a variance from at all. Rejected at the CLI
+flag-parsing level (a distinct `--metric` enum from `compare`'s own), not silently ignored.
+
+**Why the output is a design estimate, not a guarantee.** `estimated_trials` assumes the true
+effect is *exactly* `--assume-effect`. A smaller real effect needs more trials than this number
+says, not fewer - not a corner case, the entire reason `--assume-effect` is a required, separate,
+user-supplied assumption rather than something this tool infers from `--min-effect` alone.
+Consistent with this project's "a false pass is worse than an inconclusive result" bias: `power` is
+a design aid for choosing how much data to collect, never a substitute for the real confidence
+interval `compare` computes from whatever data is actually observed.
+
 ## `pass` / `fail` / `inconclusive`
 
 **Not a citation-backed result - this project's own conservative design choice.** The gate

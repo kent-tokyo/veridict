@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/power-report.schema.json",
+  "title": "veridict power report",
+  "description": "JSON output of `veridict power`. Report-only, no input file - a pure calculation from flags. Estimates how many trials --metric winrate/sign-test/elo would need for a target_power probability of reaching a passing verdict, assuming the true effect is exactly assume_effect against a pass bar of min_effect.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "metric",
+    "ci_method",
+    "min_effect",
+    "assume_effect",
+    "confidence",
+    "target_power",
+    "estimated_trials",
+    "achieved_power",
+    "method",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "metric": {
+      "type": "string",
+      "enum": ["winrate", "sign-test", "elo"],
+      "description": "mean-diff is not supported - rejected at the CLI flag-parsing level (a distinct --metric enum from compare's), and by PowerMetric::new for direct library callers."
+    },
+    "ci_method": {
+      "type": "string",
+      "enum": ["wilson", "exact", "jeffreys"],
+      "description": "Always wilson for metric elo - the same restriction compare --metric elo itself has."
+    },
+    "min_effect": {
+      "type": "number",
+      "description": "The pass bar - identical meaning to compare --min-effect/--pass-above."
+    },
+    "assume_effect": {
+      "type": "number",
+      "description": "The true effect being powered for. Strictly greater than min_effect - evaluating power with the true effect equal to the pass bar only recovers the interval's own miscoverage at that boundary, not a number that climbs toward target_power with more trials."
+    },
+    "confidence": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1
+    },
+    "target_power": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "Target probability of reaching a passing verdict, assuming the true effect is exactly assume_effect."
+    },
+    "estimated_trials": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "achieved_power": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "The real exact power at estimated_trials, always >= target_power - can overshoot the target by a nontrivial margin due to the discrete, non-monotonic ('sawtooth') nature of exact CI methods; see docs/metrics.md's power section."
+    },
+    "method": {
+      "const": "exact_binomial_search"
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Always includes the 'assumes the true effect is exactly assume_effect' caveat; adds a --paired-by-id caveat when that flag was set."
+    }
+  }
+}

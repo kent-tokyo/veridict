@@ -17,3 +17,6 @@ mod matrix_bt_recovery;
 
 #[path = "calibration/verdict_false_pass_rate.rs"]
 mod verdict_false_pass_rate;
+
+#[path = "calibration/power_calibration.rs"]
+mod power_calibration;

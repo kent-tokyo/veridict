@@ -62,6 +62,37 @@ pub enum VeridictError {
     },
 
     #[error(
+        "power estimation for metric {metric} isn't supported yet; only winrate/sign-test/elo \
+         have a closed-form CI to search a hypothetical n against - mean-diff would need a real \
+         or assumed variance, see docs/metrics.md's power section"
+    )]
+    UnsupportedPowerMetric { metric: &'static str },
+
+    #[error(
+        "--assume-effect ({assume_effect}) must be strictly greater than --min-effect \
+         ({min_effect}); power evaluated with the true effect equal to the pass threshold is \
+         just the interval's own miscoverage at that boundary (~1-confidence), not something \
+         more trials climbs toward a target power - see docs/metrics.md's power section"
+    )]
+    PowerRequiresEffectGap { min_effect: f64, assume_effect: f64 },
+
+    #[error("invalid --target-power {0}: must be finite and in (0, 1)")]
+    InvalidTargetPower(f64),
+
+    #[error(
+        "power search exceeded {cap} trials without finding a stable n at target_power \
+         {target_power}; the requested effect gap (min_effect={min_effect}, \
+         assume_effect={assume_effect}) is too small relative to --confidence/--target-power for \
+         this to be a practical experiment size"
+    )]
+    PowerSearchExceededCap {
+        cap: u64,
+        min_effect: f64,
+        assume_effect: f64,
+        target_power: f64,
+    },
+
+    #[error(
         "line {line}: invalid numeric value in field '{field}': {value} (NaN/Infinity not allowed)"
     )]
     InvalidValue {

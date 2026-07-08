@@ -12,6 +12,23 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `veridict power`: estimates how many trials `compare --metric winrate/sign-test/elo` would need
+  for a target probability (power) of reaching a passing verdict, before running any of them -
+  report-only, no input file. Requires both `--min-effect` (the pass bar, same meaning as
+  `compare`) and `--assume-effect` (the true effect being powered for, must exceed `--min-effect`)
+  - evaluating power with the two equal only recovers the CI's own miscoverage at that boundary,
+  not a useful number; `power` rejects that combination as a hard error rather than returning a
+  misleading one. `estimated_trials` is found by an exact search against the real `wilson`/
+  `exact`/`jeffreys` CI functions `compare` itself uses (`elo` accepts only `wilson`), not a
+  textbook approximation - verified empirically via a new Monte Carlo calibration test
+  (`tests/calibration/power_calibration.rs`). `mean-diff` and `sprt`'s own expected-sample-size are
+  out of scope this round (structurally different, deferred - see `docs/research-map.md`). New
+  `schemas/power-report.schema.json`. See `docs/metrics.md`'s new `power` section for the full
+  reasoning, including why two effect values are required and the discrete "sawtooth"
+  non-monotonicity caveat (Chernick & Liu 2002).
+
 ## [0.6.0] - 2026-07-08
 
 Purely additive - no breaking changes since `0.5.0`.

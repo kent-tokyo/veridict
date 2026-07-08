@@ -12,7 +12,7 @@ use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
 use veridict::{
     BootstrapMethod, CiMethod, FailurePolicy, MetricConfig, MetricKind, Verdict, VeridictError,
-    input, matrix,
+    input, matrix, power,
 };
 
 #[derive(Parser)]
@@ -40,6 +40,10 @@ enum Command {
     /// Recommend which pairs from a matrix/tournament result would most reduce uncertainty with
     /// more trials, ranked most-uncertain first. Report-only, same input as `matrix`.
     Plan(PlanArgs),
+    /// Pre-experiment sample-size estimate: how many trials would `compare` need for a target
+    /// probability of reaching a passing verdict. Report-only, no input file - a pure calculation
+    /// from flags.
+    Power(PowerArgs),
 }
 
 #[derive(clap::Args)]
@@ -294,6 +298,68 @@ struct PlanArgs {
     report_md: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct PowerArgs {
+    #[arg(long, value_enum)]
+    metric: PowerMetricArg,
+
+    /// The pass bar - identical meaning to `compare --min-effect`/`--pass-above` (the CI lower
+    /// bound a real run must clear to pass).
+    #[arg(long, allow_hyphen_values = true)]
+    min_effect: f64,
+
+    /// The true effect being powered for - must be strictly greater than --min-effect. Evaluating
+    /// power with the true effect equal to the pass bar only recovers the interval's own
+    /// miscoverage at that boundary (~1-confidence), not a number that climbs toward
+    /// --target-power with more trials - see `docs/metrics.md`'s `power` section.
+    #[arg(long, allow_hyphen_values = true)]
+    assume_effect: f64,
+
+    #[arg(long, default_value_t = 0.95)]
+    confidence: f64,
+
+    /// Target probability of reaching a passing verdict, assuming the true effect is exactly
+    /// --assume-effect.
+    #[arg(long, default_value_t = 0.80)]
+    target_power: f64,
+
+    /// Confidence interval method - same meaning as `compare --ci-method`; `exact`/`jeffreys` are
+    /// only valid for winrate/sign-test, same restriction as `compare`.
+    #[arg(long, value_enum, default_value = "wilson")]
+    ci_method: CiMethodArg,
+
+    /// Accepted but does not change the estimate - see `docs/metrics.md`'s `power` section for
+    /// why the actual variance reduction from pairing can't be predicted without real data. Adds
+    /// a caveat to the report's `notes` instead.
+    #[arg(long)]
+    paired_by_id: bool,
+
+    /// Also write the JSON report to this file.
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PowerMetricArg {
+    Winrate,
+    SignTest,
+    Elo,
+}
+
+impl From<PowerMetricArg> for MetricKind {
+    fn from(m: PowerMetricArg) -> Self {
+        match m {
+            PowerMetricArg::Winrate => MetricKind::WinRate,
+            PowerMetricArg::SignTest => MetricKind::SignTest,
+            PowerMetricArg::Elo => MetricKind::Elo,
+        }
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum MetricArg {
     Winrate,
@@ -394,6 +460,7 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
         Command::Sprt(args) => run_sprt(args),
         Command::Matrix(args) => run_matrix(args),
         Command::Plan(args) => run_plan(args),
+        Command::Power(args) => run_power(args),
     }
 }
 
@@ -604,6 +671,25 @@ fn run_plan(args: PlanArgs) -> Result<ExitCode, VeridictError> {
     )?;
     let json = plan.to_json_pretty();
     let markdown = plan.to_markdown();
+
+    println!("{json}");
+    write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
+    Ok(ExitCode::from(0))
+}
+
+fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
+    let ci_method: CiMethod = args.ci_method.into();
+    let metric = power::PowerMetric::new(args.metric.into(), ci_method)?;
+    let report = power::estimate_trials(
+        metric,
+        args.min_effect,
+        args.assume_effect,
+        args.confidence,
+        args.target_power,
+        args.paired_by_id,
+    )?;
+    let json = report.to_json_pretty();
+    let markdown = report.to_markdown();
 
     println!("{json}");
     write_reports(&json, &markdown, &args.report_json, &args.report_md)?;

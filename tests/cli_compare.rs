@@ -591,6 +591,149 @@ fn plan_report_md_flag_writes_markdown_file() {
 }
 
 #[test]
+fn power_produces_valid_json_and_exits_zero() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "20",
+            "--assume-effect",
+            "35",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains("\"metric\": \"elo\""))
+        .stdout(predicate::str::contains(
+            "\"method\": \"exact_binomial_search\"",
+        ));
+}
+
+#[test]
+fn power_rejects_assume_effect_not_greater_than_min_effect() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "20",
+            "--assume-effect",
+            "15",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--assume-effect"));
+}
+
+#[test]
+fn power_rejects_mean_diff_at_the_clap_parsing_level() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "mean-diff",
+            "--min-effect",
+            "0.01",
+            "--assume-effect",
+            "0.05",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("mean-diff"));
+}
+
+#[test]
+fn power_rejects_exact_ci_method_for_elo() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "elo",
+            "--ci-method",
+            "exact",
+            "--min-effect",
+            "20",
+            "--assume-effect",
+            "35",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--ci-method exact"));
+}
+
+#[test]
+fn power_rejects_out_of_range_target_power_with_the_right_flag_named() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "20",
+            "--assume-effect",
+            "35",
+            "--target-power",
+            "1.5",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--target-power"));
+}
+
+#[test]
+fn power_report_md_flag_writes_markdown_file() {
+    let dir = std::env::temp_dir();
+    let md = dir.join("veridict_cli_test_power_md_report.md");
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--assume-effect",
+            "0.10",
+            "--report-md",
+            md.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+    let contents = std::fs::read_to_string(&md).unwrap();
+    assert!(contents.contains("# Veridict Power"));
+    std::fs::remove_file(&md).ok();
+}
+
+#[test]
+fn power_paired_by_id_adds_a_note_without_changing_the_flag_free_json_shape() {
+    let output = veridict()
+        .args([
+            "power",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--assume-effect",
+            "0.10",
+            "--paired-by-id",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let notes = json["notes"].as_array().unwrap();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("paired-by-id"))
+    );
+}
+
+#[test]
 fn paired_by_id_nets_asymmetric_pairs_to_a_pass() {
     let stdin: String = (0..30)
         .flat_map(|i| {

@@ -52,13 +52,50 @@ normalized Elo exists to solve.
 needed *before* running an experiment (the inverse of what `estimated_additional_trials` already
 does reactively after an inconclusive result).
 
-**Now partly covered:** `veridict plan` (see `docs/metrics.md`'s `plan` section) does this for the
-`matrix`/tournament-comparison case - given `--min-elo` (the effect size worth detecting), it
-estimates additional trials needed per pair, ranked most-uncertain first. What's still missing:
-the same question for a plain two-way `compare`/`sprt` run (no matrix involved) - "how many trials
-would I need to detect a `--min-effect` gap before running any of them at all" - and, separately,
-budget-constrained allocation across a fixed trial budget (see the entry below), which `plan`
-deliberately does not attempt.
+**Now covered, for `matrix`/tournament comparisons and for plain `compare` runs.** `veridict plan`
+(see `docs/metrics.md`'s `plan` section) does this for the `matrix`/tournament-comparison case -
+given `--min-elo`, it estimates additional trials needed per pair, ranked most-uncertain first.
+`veridict power` (see `docs/metrics.md`'s `power` section) does the equivalent for a plain two-way
+`compare --metric winrate/sign-test/elo` run: given `--min-effect` (the pass bar) and
+`--assume-effect` (the true effect being powered for - must exceed `--min-effect`, since power
+evaluated with the two equal is undefined-in-practice, see that section), it estimates trials
+needed for a target power, computed exactly against the real Wilson/Clopper-Pearson/Jeffreys CI
+functions this project already ships, not a textbook approximation.
+
+**What's still missing:** `compare --metric mean-diff`'s equivalent (would need an assumed
+standard deviation - `--assume-sd`/`--pilot FILE`, no real data exists pre-experiment to estimate
+one from) and `sprt`'s own expected-sample-size (Wald's classical Average Sample Number
+approximation - `E[N|H] ≈ [alpha'(H)*ln(A) + (1-alpha'(H))*ln(B)] / E[Z|H]`, where `alpha'(H)` is
+the probability of stopping at the *upper* boundary `ln(A) = ln((1-beta)/alpha)` under hypothesis
+`H` - source: Wald (1947), *Sequential Analysis*; note this pairing, since an earlier draft of this
+project's own proposal had it backwards, which would produce a negative expected sample size under
+H1). Both are a structurally different output shape from `power`'s CI-crossing-probability
+framing (no `--target-power` for the SPRT case - alpha/beta already fix the guaranteed error
+rates, `power` there would only report an expected trial count, not search for one), and are
+deferred as a distinct future `power` extension, not folded into what shipped. Also still separate
+and deferred: budget-constrained allocation across a fixed trial budget for `plan` (see the entry
+below), which neither `plan` nor `power` attempts.
+
+### Draw-aware `power --metric elo`
+
+**What it is:** `power`'s exact search models every trial as a pure win/not-win `Binomial(n, p1)`
+draw. For `winrate`/`sign-test` this exactly matches `compare`'s own math (both metrics discard
+draws before computing their CI). For `elo`, it doesn't: `compare --metric elo` computes its score
+over *all* trials including draws (`(candidate_wins + 0.5*draws) / (wins+losses+draws)`, draws as
+half a win, in the denominator), so `power --metric elo`'s `estimated_trials` undercounts the real
+game count needed whenever the true draw rate is nonzero - documented as a known caveat in
+`docs/metrics.md`'s `power` section (treat it as a lower bound for draw-heavy candidates), not
+silently wrong, but not modeled either.
+
+**Why not yet:** modeling this properly needs a trinomial (win/draw/loss) sampling distribution
+under an assumed draw rate, not just an assumed effect size - a new required input
+(`--assume-draw-rate` or similar) with no natural default, and a genuinely different (three-outcome)
+exact summation than the binomial one `power` ships with. Scoped out of this round the same way
+`mean-diff`/`sprt` support was: a real, structurally different piece of work, not a quick addition.
+
+**What would change this:** a concrete report that `power --metric elo`'s estimate is misleading
+enough in practice (e.g. a draw-heavy shogi/chess engine test needing meaningfully more real games
+than the tool suggested) to justify the added `--assume-draw-rate` input and trinomial search.
 
 ### Budget-constrained match allocation for `plan`
 

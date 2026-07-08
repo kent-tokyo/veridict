@@ -8,6 +8,7 @@ pub mod input;
 pub mod matrix;
 pub mod metrics;
 pub mod plan;
+pub mod power;
 pub mod report;
 pub mod sprt;
 pub mod stats;

@@ -143,6 +143,12 @@ veridict matrix --matches examples/matches_head_to_head.jsonl
 veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
 ```
 
+実際に`compare`を実行する前に、何トライアル必要かを見積もります:
+
+```bash
+veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
+```
+
 ### 終了コード
 
 | コード | 意味 |
@@ -282,6 +288,36 @@ $ veridict plan candidate_a.jsonl candidate_b.jsonl --min-elo 100
 * **`estimated_additional_trials`** - 現在のCIがすでに `--min-elo` を満たしていれば `0`。`current_ci_half_width` が `null` になるのと同じセルでは、理由を説明する `note` とともに `null` になります。Disconnectedなペアはリストの先頭にソートされます(データが繋がるまで推定自体が不可能で、有限だが幅の広いCIよりも強い必要性があるため)。それ以外は推定値が大きい順にソートされます。
 
 元の広いアイデアから削られたもの: `--budget N`/`--goal identify-best` という制約付き割り当てアルゴリズム。どちらも現時点でこのコードベースには実アルゴリズムが存在しません - 意図的に見送っているものの一覧は [`docs/research-map_ja.md`](docs/research-map_ja.md) を参照してください。
+
+## Power
+
+`veridict power` は、`compare --metric winrate/sign-test/elo` が合格判定に到達する目標確率(検出力)のために何トライアル必要かを - *実際に何も実行する前に* - 見積もります。入力ファイルはありません: フラグからの純粋な計算です。
+
+```console
+$ veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
+{
+  "schema_version": 1,
+  "metric": "elo",
+  "ci_method": "wilson",
+  "min_effect": 20.0,
+  "assume_effect": 35.0,
+  "confidence": 0.95,
+  "target_power": 0.8,
+  "estimated_trials": 4281,
+  "achieved_power": 0.8043871725361499,
+  "method": "exact_binomial_search",
+  "notes": [
+    "Assumes the true effect is exactly assume_effect; a smaller real effect needs more trials than this number, not fewer - this is a design estimate for how much data to collect, not a guarantee about what a real run will show."
+  ]
+}
+```
+
+2つの効果量が**両方とも必須**で、`--assume-effect` は `--min-effect` を上回っていなければなりません:
+
+* **`--min-effect`** - 合格ライン。`compare --min-effect`/`--pass-above` と全く同じ意味です。
+* **`--assume-effect`** - 実際に検出力を計算する対象の真の効果。真の効果を合格ラインと等しく設定して検出力を評価すると、その境界そのものにおけるCIの被覆確率の裏返し(`≈ 1 - confidence`)しか得られません - 横ばいで、トライアルをどれだけ追加しても `--target-power` に近づいていきません。理由(ルールだけでなく)は [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power` セクションを参照してください。
+
+`estimated_trials` は*厳密な*探索(`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >= p0]`、教科書的な近似ではありません)により、`compare` 自身が使うのと同じ実際の `wilson`/`exact`/`jeffreys` CI関数に対して求められます(`elo` は `wilson` のみを受け付けます。`compare --metric elo` と同じです)。`mean-diff` はサポートされません(実験前には仮定すべき分散が存在しないため - フラグレベルで拒否され、黙って無視されることはありません)。`--paired-by-id` は受け付けられますが数値は変わりません - 理由はdocsセクションを参照してください。
 
 ## ペアテストケース(paired testcases)
 
