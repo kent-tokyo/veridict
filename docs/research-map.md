@@ -52,8 +52,31 @@ normalized Elo exists to solve.
 needed *before* running an experiment (the inverse of what `estimated_additional_trials` already
 does reactively after an inconclusive result).
 
-**Why not yet:** no concrete request has shaped what the output should look like yet - this is a
-"P2 backlog" idea, not an in-progress design.
+**Now partly covered:** `veridict plan` (see `docs/metrics.md`'s `plan` section) does this for the
+`matrix`/tournament-comparison case - given `--min-elo` (the effect size worth detecting), it
+estimates additional trials needed per pair, ranked most-uncertain first. What's still missing:
+the same question for a plain two-way `compare`/`sprt` run (no matrix involved) - "how many trials
+would I need to detect a `--min-effect` gap before running any of them at all" - and, separately,
+budget-constrained allocation across a fixed trial budget (see the entry below), which `plan`
+deliberately does not attempt.
+
+### Budget-constrained match allocation for `plan`
+
+**What it is:** given a fixed total trial budget (`--budget N`) and/or an explicit goal
+(`--goal identify-best`), recommend the *optimal set* of matches to run - a genuine constrained-
+allocation/optimization problem, not just ranking every pair independently by uncertainty (what
+`plan` ships today).
+
+**Why not yet:** no real algorithm for either exists anywhere in this codebase or its dependencies.
+An earlier, broader design for `plan` included both flags; both were dropped before implementation
+specifically because building a speculative optimizer with no concrete request behind it is exactly
+the over-engineering this project avoids (see `AGENTS.md`). `plan`'s shipped `--min-elo`-ranked list
+already satisfies the motivating "what should I test next" use case without one.
+
+**What would change this:** a concrete workflow where ranking pairs independently (today's `plan`)
+demonstrably produces worse recommendations than a real joint allocator would, with enough detail to
+shape what "optimal" should mean here (fewest total trials to a target confidence across all pairs?
+fastest to identify the single best candidate? something else?).
 
 ### Multiple-comparison correction for multi-metric runs
 

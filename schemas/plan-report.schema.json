@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/plan-report.schema.json",
+  "title": "veridict plan report",
+  "description": "JSON output of `veridict plan`. Report-only (no overall verdict), same input as `matrix` - recommends which pairs would most benefit from more trials to narrow their Elo-difference CI to --min-elo half-width, ranked most-uncertain first.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "min_elo", "recommendations"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "min_elo": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "The Elo gap worth being able to detect - recommendations narrow each pair's CI toward this half-width."
+    },
+    "recommendations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/recommended_match" },
+      "description": "Disconnected/no-CI pairs first, then most-uncertain-first (largest estimated_additional_trials), ties broken by (row, col)."
+    }
+  },
+  "$defs": {
+    "recommended_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["row", "col", "status", "current_ci_half_width", "estimated_additional_trials", "note"],
+      "properties": {
+        "row": { "type": "string" },
+        "col": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["direct", "inferred", "disconnected"]
+        },
+        "current_ci_half_width": {
+          "type": ["number", "null"],
+          "description": "null when no CI exists yet to narrow at all (disconnected, or a fragile-bridge direct/inferred cell) - not when the CI is merely wide."
+        },
+        "estimated_additional_trials": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "0 when the current CI already meets min_elo. null alongside a non-null note for the same cells current_ci_half_width is null for."
+        },
+        "note": {
+          "type": ["string", "null"],
+          "description": "Explains why no estimate is possible yet; null whenever estimated_additional_trials is non-null."
+        }
+      }
+    }
+  }
+}

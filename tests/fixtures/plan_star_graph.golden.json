@@ -1,0 +1,30 @@
+{
+  "min_elo": 400.0,
+  "recommendations": [
+    {
+      "col": "matrix_legacy_a",
+      "current_ci_half_width": 295.3826574093451,
+      "estimated_additional_trials": 0,
+      "note": null,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "col": "matrix_legacy_b",
+      "current_ci_half_width": 295.38265740934514,
+      "estimated_additional_trials": 0,
+      "note": null,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "col": "matrix_legacy_b",
+      "current_ci_half_width": 417.73416019810145,
+      "estimated_additional_trials": 0,
+      "note": null,
+      "row": "matrix_legacy_a",
+      "status": "inferred"
+    }
+  ],
+  "schema_version": 1
+}

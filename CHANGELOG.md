@@ -12,6 +12,17 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `veridict plan`: given the same input `matrix` accepts (legacy files and/or `--matches`) plus a
+  required `--min-elo <f64>`, recommends which pairs would most benefit from more trials to narrow
+  their Elo-difference CI, ranked most-uncertain first. Report-only, like `matrix` (no verdict,
+  always exits `0` on success). New `schemas/plan-report.schema.json`. See `docs/metrics.md`'s
+  `plan` section for the estimation math (an exact Wilson-CI binary search for a
+  baseline-vs-one-candidate cell, the same `O(1/sqrt(n))` CLT-scaling fallback `mean-diff` already
+  uses everywhere else) and `docs/research-map.md` for what's deliberately out of scope
+  (`--budget`/`--goal identify-best` constrained allocation).
+
 ## [0.5.0] - 2026-07-08
 
 ### Added

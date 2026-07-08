@@ -7,6 +7,7 @@ pub mod error;
 pub mod input;
 pub mod matrix;
 pub mod metrics;
+pub mod plan;
 pub mod report;
 pub mod sprt;
 pub mod stats;

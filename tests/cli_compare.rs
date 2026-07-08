@@ -519,6 +519,78 @@ fn matrix_general_graph_reports_real_bootstrap_cis() {
 }
 
 #[test]
+fn plan_recommends_the_narrower_ci_candidate_last() {
+    let dir = std::env::temp_dir();
+    let well_sampled = dir.join("veridict_cli_test_plan_a.jsonl");
+    let barely_sampled = dir.join("veridict_cli_test_plan_b.jsonl");
+    write_winloss_file(&well_sampled, 400, 100);
+    write_winloss_file(&barely_sampled, 4, 1);
+    let output = veridict()
+        .args([
+            "plan",
+            well_sampled.to_str().unwrap(),
+            barely_sampled.to_str().unwrap(),
+            "--min-elo",
+            "10",
+        ])
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    std::fs::remove_file(&well_sampled).ok();
+    std::fs::remove_file(&barely_sampled).ok();
+
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let recs = json["recommendations"].as_array().unwrap();
+    let pos = |col: &str| {
+        recs.iter()
+            .position(|r| r["row"] == "baseline" && r["col"] == col)
+            .unwrap()
+    };
+    assert!(
+        pos("veridict_cli_test_plan_b") < pos("veridict_cli_test_plan_a"),
+        "the barely-sampled candidate should be recommended first: {json}"
+    );
+}
+
+#[test]
+fn plan_rejects_non_positive_min_elo() {
+    let dir = std::env::temp_dir();
+    let a = dir.join("veridict_cli_test_plan_bad_min_elo.jsonl");
+    write_winloss_file(&a, 10, 10);
+    veridict()
+        .args(["plan", a.to_str().unwrap(), "--min-elo", "0"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--min-elo"));
+    std::fs::remove_file(&a).ok();
+}
+
+#[test]
+fn plan_report_md_flag_writes_markdown_file() {
+    let dir = std::env::temp_dir();
+    let a = dir.join("veridict_cli_test_plan_md.jsonl");
+    let md = dir.join("veridict_cli_test_plan_md_report.md");
+    write_winloss_file(&a, 20, 5);
+    veridict()
+        .args([
+            "plan",
+            a.to_str().unwrap(),
+            "--min-elo",
+            "10",
+            "--report-md",
+            md.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+    let contents = std::fs::read_to_string(&md).unwrap();
+    assert!(contents.contains("# Veridict Plan"));
+    std::fs::remove_file(&a).ok();
+    std::fs::remove_file(&md).ok();
+}
+
+#[test]
 fn paired_by_id_nets_asymmetric_pairs_to_a_pass() {
     let stdin: String = (0..30)
         .flat_map(|i| {

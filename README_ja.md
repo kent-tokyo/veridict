@@ -129,6 +129,13 @@ veridict matrix prompt_a.jsonl prompt_b.jsonl prompt_c.jsonl
 veridict matrix --matches examples/matches_head_to_head.jsonl
 ```
 
+これらのペアのうち、追加トライアルによって最も不確実性が減るものを、不確実性が高い順に推薦します
+(`matrix`と同じ入力に、必須の`--min-elo`を追加):
+
+```bash
+veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
+```
+
 ### 終了コード
 
 | コード | 意味 |
@@ -239,6 +246,33 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 * **`disconnected`**(Markdown表では `n/a`)- 両者を結ぶ経路が存在しない(例: 共通の対戦相手を持たない2つの独立した対戦クラスタ)。この場合、両者の間には不確実なレーティング差があるのではなく、有限のレーティング差そのものが存在しません - `elo_diff` は推測値ではなく `null` です。
 
 スターグラフ/レガシー方式のセルは従来どおり実際のWilson区間を保持します。一般グラフモードのマトリクスセル(`direct`/`inferred`)も、実際のブートストラップ信頼区間を得られるようになりました: 各リサンプルではすべての対戦カードの勝敗/引き分けの実測比率からタリーを引き直し、グラフ全体を再フィットします。`ci_low`/`ci_high` は、そのペアが同じコンポーネントに留まったリサンプルにおける `elo_i - elo_j` から得られます。`matrix` の `--resamples`(デフォルト2,000)、`--seed`、`--bootstrap-method percentile`(デフォルト)/`basic`/`bca`(`compare` の同名フラグと同じ3手法・同じ意味)でこれを制御できます(いずれもスターグラフモードでは無視され、閉形式のWilson区間のままです)。`elo_diff` が付いているのに `ci_low`/`ci_high` が `null` のままのセルもあり得ます - これは実測データ上は繋がっているものの、リサンプリングに対してその接続が脆弱すぎる(リサンプルの90%未満でしか同じコンポーネントに留まらない)ため、誤って狭い区間を報告するよりは「信頼区間なし」と明示することを選んだ結果です。`CandidateSummary` 自体の `ci_low`/`ci_high` は、一般グラフモードでは引き続き常に `null` です: 個々のレーティングはそのコンポーネント内の任意の基準対戦相手との相対値でしかなく、`elo_i - elo_j` の信頼区間とは異なり、それ自体に信頼区間を付けると誤解を招くためです。
+
+## Plan
+
+`veridict plan` は `matrix` とまったく同じ入力(レガシーファイルと `--matches` を自由に組み合わせ可能)に加えて、必須の `--min-elo <f64>`(検出したいElo差)を受け取り、追加トライアルによって最も恩恵を受けるペアを不確実性の高い順に推薦します:
+
+```console
+$ veridict plan candidate_a.jsonl candidate_b.jsonl --min-elo 100
+{
+  "schema_version": 1,
+  "min_elo": 100.0,
+  "recommendations": [
+    { "row": "baseline", "col": "candidate_b", "status": "direct",
+      "current_ci_half_width": 254.6, "estimated_additional_trials": 53, "note": null },
+    { "row": "candidate_a", "col": "candidate_b", "status": "inferred",
+      "current_ci_half_width": 274.4, "estimated_additional_trials": 52, "note": null },
+    { "row": "baseline", "col": "candidate_a", "status": "direct",
+      "current_ci_half_width": 102.4, "estimated_additional_trials": 4, "note": null }
+  ]
+}
+```
+
+`matrix` と同様レポート専用です: 判定なし、成功時は常に終了コード0です。各推薦は `matrix` のセル1つに対応し、以下を含みます:
+
+* **`current_ci_half_width`** - そのセルの現在のCI半値幅。narrowにする対象となるCIがまだ存在しない場合は `null`(`disconnected` なペア、またはリサンプリングに対して脆弱すぎて信頼できるCIが得られない `direct`/`inferred` セル - どちらも上の `matrix` の説明を参照)。
+* **`estimated_additional_trials`** - 現在のCIがすでに `--min-elo` を満たしていれば `0`。`current_ci_half_width` が `null` になるのと同じセルでは、理由を説明する `note` とともに `null` になります。Disconnectedなペアはリストの先頭にソートされます(データが繋がるまで推定自体が不可能で、有限だが幅の広いCIよりも強い必要性があるため)。それ以外は推定値が大きい順にソートされます。
+
+元の広いアイデアから削られたもの: `--budget N`/`--goal identify-best` という制約付き割り当てアルゴリズム。どちらも現時点でこのコードベースには実アルゴリズムが存在しません - 意図的に見送っているものの一覧は [`docs/research-map_ja.md`](docs/research-map_ja.md) を参照してください。
 
 ## ペアテストケース(paired testcases)
 

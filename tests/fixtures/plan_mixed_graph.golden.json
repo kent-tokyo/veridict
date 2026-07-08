@@ -1,0 +1,86 @@
+{
+  "min_elo": 20.0,
+  "recommendations": [
+    {
+      "col": "isolated_x",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "baseline",
+      "status": "disconnected"
+    },
+    {
+      "col": "isolated_y",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "baseline",
+      "status": "disconnected"
+    },
+    {
+      "col": "isolated_y",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "connected in the observed data but too fragile under resampling for a reliable CI yet (see matrix.rs's fragile-bridge note) - more games on this pair or its connecting bridge would help",
+      "row": "isolated_x",
+      "status": "direct"
+    },
+    {
+      "col": "isolated_x",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "matrix_legacy_a",
+      "status": "disconnected"
+    },
+    {
+      "col": "isolated_y",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "matrix_legacy_a",
+      "status": "disconnected"
+    },
+    {
+      "col": "matrix_legacy_b",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "connected in the observed data but too fragile under resampling for a reliable CI yet (see matrix.rs's fragile-bridge note) - more games on this pair or its connecting bridge would help",
+      "row": "matrix_legacy_a",
+      "status": "direct"
+    },
+    {
+      "col": "isolated_x",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "matrix_legacy_b",
+      "status": "disconnected"
+    },
+    {
+      "col": "isolated_y",
+      "current_ci_half_width": null,
+      "estimated_additional_trials": null,
+      "note": "disconnected - no head-to-head path exists yet; a direct game between these two is needed before any trial estimate is possible",
+      "row": "matrix_legacy_b",
+      "status": "disconnected"
+    },
+    {
+      "col": "matrix_legacy_b",
+      "current_ci_half_width": 254.2712717376745,
+      "estimated_additional_trials": 963,
+      "note": null,
+      "row": "baseline",
+      "status": "direct"
+    },
+    {
+      "col": "matrix_legacy_a",
+      "current_ci_half_width": 237.8905576726989,
+      "estimated_additional_trials": 842,
+      "note": null,
+      "row": "baseline",
+      "status": "direct"
+    }
+  ],
+  "schema_version": 1
+}

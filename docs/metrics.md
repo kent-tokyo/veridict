@@ -216,6 +216,40 @@ wrong-magnitude) leave-one-*edge*-out. On star-graph topology, `matrix` instead 
 form directly (no iterative solver, no bootstrap needed - a star graph's Bradley-Terry MLE has no
 shared terms to solve jointly).
 
+## `plan`
+
+**This project's own design choice, layered on already-established statistics** - `veridict plan`
+takes `matrix`'s exact input and output (see above) and, for each cell, estimates how many
+additional trials would narrow that pair's Elo-difference CI to `--min-elo` half-width. It
+deliberately does not reuse `verdict::estimate_additional_trials` directly: that function is keyed
+on a verdict/threshold crossing (`Inconclusive` + `Thresholds`), which has no equivalent here -
+`plan` has no verdict at all, just a target half-width to narrow toward. Its own small function
+mirrors that function's two-branch shape instead:
+
+- **Exact Wilson-CI binary search** - for a `baseline`-vs-one-candidate cell (the common star-graph
+  case), the cell's CI *is* that one candidate's own Wilson CI (see `matrix`'s star-graph closed
+  form above), so the same real, already-tested `wilson_ci_from_proportion` function is
+  recomputed at a hypothetical `n`, holding the point estimate fixed, and binary-searched to the
+  target half-width - not an approximation, real math against the same formula the report shows.
+- **`O(1/sqrt(n))` CLT-scaling fallback** - for every other cell shape: a star-graph
+  candidate-vs-candidate cell (its CI is a `hypot` of two Wilson margins, not a single proportion
+  with a closed form) and every general-graph cell (a real bootstrap CI has no CI-width-at-n
+  function at all). This is the exact model `mean-diff` already uses for the same reason, with the
+  same known bias documented under `estimated_additional_trials` below - `n` here is the bottleneck
+  side's own trial count (`min` of the two competitors' `paired_count`), since narrowing a pair's CI
+  is gated by whichever side has fewer trials.
+
+A `disconnected` pair, or a `direct`/`inferred` cell too fragile under resampling for a reliable CI
+(see `matrix`'s general-graph doc above), gets no estimate at all (`null`, with an explanatory
+`note`) rather than a number computed from a CI that doesn't exist yet - narrowing a nonexistent CI
+isn't a "how many more trials" question, it's a "you need a connecting game first" one.
+
+**Deliberately dropped from an earlier, broader idea:** a `--budget N`/`--goal identify-best`
+constrained-allocation solver (recommend an optimal *set* of matches under a fixed trial budget,
+rather than ranking every pair independently). No real algorithm for that exists anywhere in this
+codebase or its dependencies - see `docs/research-map.md` for what would need to exist before that
+ships.
+
 ## `pass` / `fail` / `inconclusive`
 
 **Not a citation-backed result - this project's own conservative design choice.** The gate

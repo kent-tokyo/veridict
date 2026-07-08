@@ -139,6 +139,13 @@ baseline required:
 veridict matrix --matches examples/matches_head_to_head.jsonl
 ```
 
+Recommend which of those pairs would most benefit from more trials, ranked most-uncertain first
+(same input as `matrix`, plus a required `--min-elo`):
+
+```bash
+veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
+```
+
 ### Exit codes
 
 | Code | Meaning |
@@ -391,6 +398,43 @@ than a falsely narrow one. `CandidateSummary`'s own `ci_low`/`ci_high` stay
 `null` in general-graph mode regardless: an individual rating is only
 meaningful relative to its component's arbitrary reference competitor, so a
 CI on it would be misleading in a way `elo_i - elo_j`'s CI isn't.
+
+## Plan
+
+`veridict plan` takes the exact same input as `matrix` (legacy files and/or `--matches`, freely
+combinable) plus a required `--min-elo <f64>` - the Elo gap worth being able to detect - and
+recommends which pairs would most benefit from more trials, ranked most-uncertain first:
+
+```console
+$ veridict plan candidate_a.jsonl candidate_b.jsonl --min-elo 100
+{
+  "schema_version": 1,
+  "min_elo": 100.0,
+  "recommendations": [
+    { "row": "baseline", "col": "candidate_b", "status": "direct",
+      "current_ci_half_width": 254.6, "estimated_additional_trials": 53, "note": null },
+    { "row": "candidate_a", "col": "candidate_b", "status": "inferred",
+      "current_ci_half_width": 274.4, "estimated_additional_trials": 52, "note": null },
+    { "row": "baseline", "col": "candidate_a", "status": "direct",
+      "current_ci_half_width": 102.4, "estimated_additional_trials": 4, "note": null }
+  ]
+}
+```
+
+It's report-only, like `matrix`: no verdict, always exits `0` on success. Each recommendation is
+one `matrix` cell, with:
+
+* **`current_ci_half_width`** - the cell's current CI half-width, or `null` when no CI exists
+  yet to narrow at all (a `disconnected` pair, or a `direct`/`inferred` cell too fragile under
+  resampling for a reliable CI - see `matrix`'s docs above for both).
+* **`estimated_additional_trials`** - `0` when the current CI already meets `--min-elo`; `null`
+  alongside a `note` explaining why for the same cells `current_ci_half_width` is `null` for.
+  Disconnected pairs sort first in the list (no estimate is even possible until a game connects
+  them - a stronger need than any finite-but-wide CI), then the rest by largest estimate first.
+
+Dropped from an earlier, broader idea: a `--budget N`/`--goal identify-best` constrained
+allocator. No real algorithm for either exists in this codebase yet - see
+[`docs/research-map.md`](docs/research-map.md) for what's deliberately deferred.
 
 ## Paired testcases
 

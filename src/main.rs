@@ -37,6 +37,9 @@ enum Command {
     /// tabulate pairwise Elo differences. Report-only: always exits 0 on success (no single
     /// pass/fail verdict applies to a whole matrix).
     Matrix(MatrixArgs),
+    /// Recommend which pairs from a matrix/tournament result would most reduce uncertainty with
+    /// more trials, ranked most-uncertain first. Report-only, same input as `matrix`.
+    Plan(PlanArgs),
 }
 
 #[derive(clap::Args)]
@@ -248,6 +251,49 @@ struct MatrixArgs {
     report_md: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct PlanArgs {
+    /// Same as `matrix`'s `files`/`--matches`/`--format`/`--paired-by-id`/`--resamples`/
+    /// `--seed`/`--bootstrap-method` - `plan` runs `matrix` internally and recommends from its
+    /// result, so every input flag means exactly what it means there.
+    #[arg(num_args = 1.., required_unless_present = "matches")]
+    files: Vec<PathBuf>,
+
+    #[arg(long = "matches", num_args = 1.., required_unless_present = "files")]
+    matches: Vec<PathBuf>,
+
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    #[arg(long, default_value_t = 0.95)]
+    confidence: f64,
+
+    #[arg(long)]
+    paired_by_id: bool,
+
+    #[arg(long, default_value_t = 2_000)]
+    resamples: usize,
+
+    #[arg(long)]
+    seed: Option<u64>,
+
+    #[arg(long, value_enum, default_value = "percentile")]
+    bootstrap_method: BootstrapMethodArg,
+
+    /// The Elo gap worth being able to detect - recommendations narrow each pair's CI toward
+    /// this half-width. Required: there's no sensible default for "how precise do you need this."
+    #[arg(long, allow_hyphen_values = true)]
+    min_elo: f64,
+
+    /// Also write the JSON report to this file.
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum MetricArg {
     Winrate,
@@ -347,6 +393,7 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
         Command::Compare(args) => run_compare(args),
         Command::Sprt(args) => run_sprt(args),
         Command::Matrix(args) => run_matrix(args),
+        Command::Plan(args) => run_plan(args),
     }
 }
 
@@ -516,6 +563,47 @@ fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
     )?;
     let json = matrix.to_json_pretty();
     let markdown = matrix.to_markdown();
+
+    println!("{json}");
+    write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
+    Ok(ExitCode::from(0))
+}
+
+fn run_plan(args: PlanArgs) -> Result<ExitCode, VeridictError> {
+    let format = args.format;
+    let mut seen_names = std::collections::HashSet::new();
+    let named_records = args.files.iter().map(move |path| {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("candidate")
+            .to_string();
+        if !seen_names.insert(name.clone()) {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "duplicate candidate name '{name}' from input file stems; rename one of the files"
+            )));
+        }
+        let fmt = resolve_format(path, format);
+        let records = read_records(path, fmt)?;
+        Ok((name, records))
+    });
+    let match_records = args
+        .matches
+        .iter()
+        .map(move |path| read_match_records(path, resolve_format(path, format)));
+
+    let plan = veridict::plan::run(
+        named_records,
+        match_records,
+        args.confidence,
+        args.paired_by_id,
+        args.resamples,
+        args.seed.unwrap_or(DEFAULT_SEED),
+        args.bootstrap_method.into(),
+        args.min_elo,
+    )?;
+    let json = plan.to_json_pretty();
+    let markdown = plan.to_markdown();
 
     println!("{json}");
     write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
