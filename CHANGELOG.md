@@ -12,6 +12,15 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `sprt --sprt-variant pentanomial`: a generalized LLR test over paired games (same opening,
+  colors swapped), ported from Fishtest's `LLR_logistic`. Always requires `--paired-by-id`; adds
+  `sprt_variant`, `pentanomial_counts`, `raw_trial_count`, and `paired_count` to the SPRT report
+  (purely additive - `schema_version` stays `1`). See `docs/metrics.md`'s `sprt` section for why
+  this captures within-pair correlation that running `trinomial` on the same games ungrouped
+  cannot.
+
 ## [0.3.0] - 2026-07-06
 
 Purely additive - no breaking changes since `0.2.0`.

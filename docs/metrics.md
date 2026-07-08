@@ -88,7 +88,7 @@ that goes *into* the estimate, rather than changing how the interval is computed
 
 ## `sprt`
 
-**Established statistic**, two variants (`--sprt-variant`):
+**Established statistic**, three variants (`--sprt-variant`):
 
 - **`wald` (default)** - the classic two-outcome sequential probability ratio test (Wald 1945).
   Accumulates a log-likelihood ratio over *decisive* (non-draw) trials only and stops as soon as it
@@ -106,11 +106,55 @@ that goes *into* the estimate, rather than changing how the interval is computed
   about 7.3) - which is why the CLI exposes this through separate `--belo0`/`--belo1` flags rather
   than reinterpreting `--elo0`/`--elo1`. At zero draws this reduces exactly to the Wald variant's
   LLR (the algebra collapses exactly, not just in a limit).
+- **`pentanomial`** - a generalized LLR test over *paired* games (same opening, colors swapped),
+  ported from Fishtest's `LLR_logistic` (expectation-constrained multinomial MLE / "exponential
+  tilting" of the empirical pair-outcome distribution to a hypothesized mean score). **Always
+  requires `--paired-by-id`**: two records sharing an `id` are combined into one of 5 outcome
+  categories by their pair's combined candidate score (`0`/`0.5`/`1`/`1.5`/`2` - candidate points
+  summed over the pair's two games), instead of netted down to a single win/loss/draw the way
+  `--paired-by-id` works for `winrate`/`elo`. An id that doesn't appear exactly twice is a hard
+  error, not silently treated as an unpaired sample - a 5-value pair score has no meaning for a
+  lone game. Hypotheses are `--elo0`/`--elo1`, the same logistic Elo scale as `wald` - this model
+  has no `drawelo`-style nuisance parameter to make BayesElo meaningful.
 
-Neither variant is a heuristic - both are the referenced sequential test, evaluated exactly against
+  **Why this isn't just `trinomial` on twice as many games:** a pentanomial pair's entire
+  statistical value comes from the *negative correlation* between its two games. Concretely, model
+  each pair as sharing a per-pair "opening bias" `b` that shifts one game's candidate-win
+  probability up by `b` and the other's down by `b` (colors swapped, so whichever side gets the
+  opening's favorable color benefits in that one game and is disadvantaged in the other): the
+  pair's *combined* score has expectation `2p` regardless of `b` (the `+b`/`-b` terms cancel), so
+  the bias contributes zero variance to the pair total - while each individual game's own
+  *marginal* variance (averaged over the bias distribution) is inflated by the bias spread on top
+  of ordinary sampling variance. Running `trinomial`/`wald` on the ungrouped games sees that
+  inflated per-game variance directly; `pentanomial`'s per-pair scoring cancels it, which is what
+  lets it converge in *fewer pairs* than `trinomial` needs *games* on real paired data - not merely
+  "the same information, batched differently." An earlier design for this variant modeled a pair's
+  outcome as the convolution of two *independent* single-game draws instead: that sets the
+  covariance to exactly zero by construction and throws away this entire effect, which is why it
+  was rejected in favor of the approach actually shipped (treating each pair's outcome as one draw
+  from a free 5-category multinomial, whose *shape* is estimated from the empirical pair-outcome
+  frequencies directly - preserving whatever real correlation the data has - with only the *mean*
+  constrained per hypothesis).
+
+  The report adds `sprt_variant` (present for every variant), and, only for `pentanomial`:
+  `pentanomial_counts` (the 5-bucket breakdown the LLR was computed from), `raw_trial_count`
+  (total input records before pairing), and `paired_count` (number of complete pairs). The
+  existing `candidate_wins`/`baseline_wins`/`draws` fields stay populated too, netted from the same
+  5 buckets by the standard "paired game" convention (`>1` net candidate win, `<1` net baseline
+  win, exactly `1` net draw) for compatibility with tooling that only understands the 3-outcome
+  shape.
+
+  **Not (yet) implemented:** Fishtest's newer *normalized-Elo* pentanomial (`LLR_normalized`,
+  a `t`-value-constrained MLE with its own iterative solve) and the Siegmund discrete-time bound
+  correction some engine-testing tools apply on top of the base LLR - both real refinements, not
+  needed to get a statistically valid pentanomial test, deferred rather than rejected (see
+  `docs/research-map.md`).
+
+Neither `wald` nor `trinomial` is a heuristic, and `pentanomial` isn't either - all three are the
+referenced sequential test, evaluated exactly (mod the numerical `secular`-equation solve
+`pentanomial` needs, itself a standard empirical-likelihood tilting, not an approximation) against
 the observed counts. What *is* a design choice is which variant runs by default (`wald`, since it
-needs no nuisance-parameter estimation) and that veridict doesn't (yet) implement the further
-pentanomial extension some chess-engine testers use (see `docs/research-map.md`).
+needs no nuisance-parameter estimation).
 
 ## `matrix`'s general-graph mode
 

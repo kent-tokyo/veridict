@@ -31,3 +31,7 @@ harness = false
 [[bench]]
 name = "matrix_bt"
 harness = false
+
+[[bench]]
+name = "sprt_pentanomial"
+harness = false

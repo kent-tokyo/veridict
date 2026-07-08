@@ -123,7 +123,10 @@ struct SprtArgs {
     /// estimated as a nuisance parameter, converges faster on draw-heavy
     /// data, via --belo0/--belo1 (BayesElo - a different scale from
     /// logistic Elo whenever the estimated draw rate is nonzero, see
-    /// stats::trinomial_sprt's doc).
+    /// stats::trinomial_sprt's doc). `pentanomial`: paired-game test (same
+    /// opening, colors swapped) over the pair's 5-value combined score,
+    /// via --elo0/--elo1 (logistic Elo, same scale as wald) - always
+    /// requires --paired-by-id, see stats::pentanomial_sprt's doc.
     #[arg(long, value_enum, default_value = "wald")]
     sprt_variant: SprtVariantArg,
 
@@ -289,6 +292,7 @@ impl From<BootstrapMethodArg> for BootstrapMethod {
 enum SprtVariantArg {
     Wald,
     Trinomial,
+    Pentanomial,
 }
 
 fn main() -> ExitCode {
@@ -407,6 +411,27 @@ fn resolve_sprt_hypotheses(args: &SprtArgs) -> Result<(f64, f64, SprtVariant), V
                 (Some(b0), Some(b1)) => Ok((b0, b1, SprtVariant::Trinomial)),
                 _ => Err(VeridictError::InvalidThreshold(
                     "--belo0 and --belo1 are required for --sprt-variant trinomial".to_string(),
+                )),
+            }
+        }
+        // Pentanomial shares wald's logistic-Elo scale (no drawelo-style nuisance parameter
+        // exists in this model, see stats::pentanomial_sprt's doc), so it takes the same
+        // --elo0/--elo1 branch shape as wald, not trinomial's --belo0/--belo1.
+        SprtVariantArg::Pentanomial => {
+            if trinomial_flags_given {
+                return Err(VeridictError::InvalidThreshold(
+                    "--belo0/--belo1 are only used with --sprt-variant trinomial; pass --elo0/--elo1 for --sprt-variant pentanomial".to_string(),
+                ));
+            }
+            if !args.paired_by_id {
+                return Err(VeridictError::InvalidThreshold(
+                    "--sprt-variant pentanomial requires --paired-by-id".to_string(),
+                ));
+            }
+            match (args.elo0, args.elo1) {
+                (Some(e0), Some(e1)) => Ok((e0, e1, SprtVariant::Pentanomial)),
+                _ => Err(VeridictError::InvalidThreshold(
+                    "--elo0 and --elo1 are required for --sprt-variant pentanomial".to_string(),
                 )),
             }
         }

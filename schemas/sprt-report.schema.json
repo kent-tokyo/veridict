@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/sprt-report.schema.json",
   "title": "veridict sprt report",
-  "description": "JSON output of `veridict sprt`, for both --sprt-variant wald (default) and trinomial.",
+  "description": "JSON output of `veridict sprt`, for --sprt-variant wald (default), trinomial, and pentanomial.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -23,7 +23,11 @@
     "invalid",
     "failure_breakdown",
     "reason",
-    "drawelo"
+    "drawelo",
+    "sprt_variant",
+    "pentanomial_counts",
+    "raw_trial_count",
+    "paired_count"
   ],
   "properties": {
     "schema_version": {
@@ -72,7 +76,39 @@
     "reason": { "type": "string" },
     "drawelo": {
       "type": ["number", "null"],
-      "description": "Estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial (reported for transparency, since it's estimated from the same data being judged); null for wald, which doesn't model a draw rate at all."
+      "description": "Estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial (reported for transparency, since it's estimated from the same data being judged); null for wald/pentanomial, neither of which models a draw rate."
+    },
+    "sprt_variant": {
+      "type": "string",
+      "enum": ["wald", "trinomial", "pentanomial"]
+    },
+    "pentanomial_counts": {
+      "description": "Some only for --sprt-variant pentanomial: the 5-value breakdown the LLR was computed from (candidate_wins/baseline_wins/draws above are still populated too, netted from these same 5 buckets); null for wald/trinomial.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["score_0_0", "score_0_5", "score_1_0", "score_1_5", "score_2_0"],
+          "properties": {
+            "score_0_0": { "type": "integer", "minimum": 0 },
+            "score_0_5": { "type": "integer", "minimum": 0 },
+            "score_1_0": { "type": "integer", "minimum": 0 },
+            "score_1_5": { "type": "integer", "minimum": 0 },
+            "score_2_0": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "raw_trial_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Some only for --sprt-variant pentanomial: total input records before pairing (always 2 * paired_count, since an incomplete pair is rejected before a report is produced)."
+    },
+    "paired_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Some only for --sprt-variant pentanomial: number of complete pairs the LLR was computed over."
     }
   },
   "$defs": {

@@ -3,6 +3,7 @@ pub mod bradley_terry;
 pub mod elo;
 pub mod exact;
 pub mod jeffreys;
+pub(crate) mod pentanomial_sprt;
 pub mod sprt;
 pub(crate) mod trinomial_sprt;
 pub mod wilson;

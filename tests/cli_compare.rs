@@ -585,6 +585,121 @@ fn sprt_paired_by_id_nets_split_pairs_to_a_draw() {
 }
 
 #[test]
+fn sprt_pentanomial_clear_h1_stream_passes() {
+    let stdin: String = (0..200)
+        .flat_map(|i| {
+            [
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+            ]
+        })
+        .collect();
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
+        .stdout(predicate::str::contains(
+            "\"sprt_variant\": \"pentanomial\"",
+        ))
+        .stdout(predicate::str::contains("\"score_2_0\": 200"));
+}
+
+#[test]
+fn sprt_pentanomial_requires_paired_by_id() {
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+        ])
+        .write_stdin("{\"id\":\"op1\",\"result\":\"draw\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("requires --paired-by-id"));
+}
+
+#[test]
+fn sprt_pentanomial_rejects_belo_flags() {
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--belo0",
+            "0",
+            "--belo1",
+            "10",
+            "--paired-by-id",
+        ])
+        .write_stdin("{\"id\":\"op1\",\"result\":\"draw\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "--belo0/--belo1 are only used with --sprt-variant trinomial",
+        ));
+}
+
+#[test]
+fn sprt_pentanomial_rejects_incomplete_pair() {
+    let stdin = "{\"id\":\"op1\",\"result\":\"candidate_win\"}\n";
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("pentanomial"));
+}
+
+#[test]
+fn sprt_pentanomial_rejects_triple_id() {
+    let stdin = "{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"candidate_win\"}\n";
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("pentanomial"));
+}
+
+#[test]
 fn ci_method_exact_widens_the_interval_versus_wilson() {
     let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
     let wilson = veridict()

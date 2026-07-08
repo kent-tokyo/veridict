@@ -26,20 +26,25 @@ interval built on top of it, not just one metric's.
 **What would change this:** a concrete accuracy complaint at small n, or someone doing the formula
 verification work up front.
 
-### Pentanomial SPRT
+### Normalized-Elo pentanomial, and the Siegmund discrete-time bound correction
 
-**What it is:** a further generalization of the sequential test beyond the trinomial (draw-aware)
-variant veridict already ships - modeling paired games (e.g. same opening played with colors
-swapped) as one of five outcomes instead of three, which some chess-engine testing tools use to
-reduce variance further on paired test setups.
+**What it is:** `--sprt-variant pentanomial` (shipped) ports Fishtest's *logistic-Elo*
+`LLR_logistic` (expectation-constrained multinomial MLE). Fishtest's newer default is
+*normalized-Elo* (`LLR_normalized`, a `t`-value-constrained MLE with its own iterative solve,
+scaled so a test's expected duration is invariant to draw rate/opening book) - a real refinement,
+not needed for a statistically valid pentanomial test, just a different (and moderately more
+complex) parameterization. Separately, Fishtest applies a Siegmund discrete-time correction on top
+of the base LLR, tightening the bounds slightly for sequential tests that only check at discrete
+intervals rather than continuously - `trinomial` doesn't apply this either, so `pentanomial`
+matches existing precedent by not applying it, not by an oversight.
 
-**Why not yet:** the trinomial variant already solves the problem that originally motivated
-looking at this (slow convergence on draw-heavy data); pentanomial's value is specifically for
-paired-game test designs, which veridict doesn't have separate first-class support for outside
-`--paired-by-id`'s existing win/loss/draw netting.
+**Why not yet:** both are incremental accuracy refinements on an already-valid, already-shipped
+test, not correctness fixes - see `docs/metrics.md`'s `sprt` section for the shipped pentanomial's
+own math and the specific claim (within-pair correlation, not just draw-awareness) it's judged on.
 
-**What would change this:** a concrete workflow that pairs games in a way `--paired-by-id`'s
-current netting doesn't already handle well.
+**What would change this:** a concrete report that logistic-Elo pentanomial bounds behave
+noticeably differently across draw rates/opening books in practice, which is exactly the problem
+normalized Elo exists to solve.
 
 ### Power analysis / required-sample-size subcommand
 

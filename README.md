@@ -117,6 +117,14 @@ estimating the draw rate instead of discarding draws entirely:
 veridict sprt examples/chess_engine_draw_heavy.jsonl --sprt-variant trinomial --belo0 0 --belo1 30
 ```
 
+For paired-game test designs (same opening played twice, colors swapped), the pentanomial
+variant uses the pair's full 5-value combined score instead of netting it down to a single
+win/loss/draw - requires `--paired-by-id`:
+
+```bash
+veridict sprt examples/chess_engine_paired_openings.jsonl --sprt-variant pentanomial --elo0 0 --elo1 20 --paired-by-id
+```
+
 Compare more than two candidates at once, each measured against the same
 shared baseline, and tabulate pairwise Elo differences:
 
@@ -152,6 +160,8 @@ See `examples/`:
 * `examples/status_failures.jsonl` - all supported record shapes together, illustrating the format (not meant to be run against a single metric as-is: a record must carry a field the chosen metric understands, or a `baseline_status`/`candidate_status` field, or it is rejected as a schema mismatch).
 * `examples/chess_engine_draw_heavy.jsonl` - win/loss/draw records with a high draw rate, for
   `veridict sprt --sprt-variant trinomial` (see [SPRT](#sprt)).
+* `examples/chess_engine_paired_openings.jsonl` - each `id` appears exactly twice (same opening,
+  colors swapped), for `veridict sprt --sprt-variant pentanomial --paired-by-id` (see [SPRT](#sprt)).
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}
@@ -268,7 +278,7 @@ candidate is at least `--elo1` points stronger"; `fail` means "confident
 it's at most `--elo0` points stronger"; `inconclusive` means "keep
 collecting data". `--alpha`/`--beta` are its actual guaranteed false
 positive/negative rates, not tunable knobs on a report - there's no
-`--min-effect`/`--confidence` for this subcommand. Two variants
+`--min-effect`/`--confidence` for this subcommand. Three variants
 (`--sprt-variant`):
 
 * **`wald`** (default) - the classic two-outcome SPRT over decisive
@@ -285,9 +295,25 @@ positive/negative rates, not tunable knobs on a report - there's no
   `--elo0`/`--elo1`. The estimated draw rate (`drawelo`) is reported in the
   output for transparency, since it's estimated from the same data being
   judged.
+* **`pentanomial`** - a paired-game test (Fishtest's `LLR_logistic`): two
+  records sharing an `id` (same opening, colors swapped) are combined into
+  one of 5 outcome buckets by their pair's combined candidate score
+  (`0`/`0.5`/`1`/`1.5`/`2`), instead of netted down to a single win/loss/
+  draw. **Always requires `--paired-by-id`** - a 5-value pair score has no
+  meaning for a lone game, so an id that doesn't appear exactly twice is a
+  hard error, not silently treated as an unpaired sample. Hypotheses are
+  `--elo0`/`--elo1`, the same logistic Elo scale as `wald` (this model has
+  no drawelo-style nuisance parameter). Unlike running `trinomial` on twice
+  as many ungrouped games, this captures the *negative correlation* between
+  a pair's two games (an unbalanced opening helps one side in one game and
+  hurts it in the other) - see [`docs/metrics.md`](docs/metrics.md) for why
+  that correlation, not just draw-awareness, is what lets it converge in
+  fewer pairs on real paired-game data. The report adds `sprt_variant`,
+  `pentanomial_counts` (the 5-bucket breakdown), `raw_trial_count`, and
+  `paired_count`.
 
-See [`docs/metrics.md`](docs/metrics.md) for the full mechanics of both
-variants, including the BayesElo/logistic-Elo unit conversion.
+See [`docs/metrics.md`](docs/metrics.md) for the full mechanics of all
+three variants, including the BayesElo/logistic-Elo unit conversion.
 
 ## Comparison matrix
 
@@ -359,6 +385,13 @@ unpaired testcases in one file is fine). Three or more records sharing an
 `--paired-by-id`, a duplicate `id` on `mean-diff`/`sign-test` records is
 still rejected outright, same as before this flag existed.
 
+**`sprt --sprt-variant pentanomial` is the one exception to "an id used once
+is an ordinary unpaired sample":** it keeps the pair's full 5-value score
+instead of netting it (see [SPRT](#sprt)), which has no meaning for a lone
+game, so it always requires `--paired-by-id` and rejects any id that
+doesn't appear exactly twice - a lone id is a hard error here, not treated
+as an unpaired sample the way it is everywhere else.
+
 ## Verdict logic
 
 The gate compares the confidence interval, not the point estimate, against
@@ -383,7 +416,9 @@ what's deliberately out of scope.
   Efron & Tibshirani, *An Introduction to the Bootstrap* (1993, ch. 14).
 * **`elo`** - the logistic Elo model, the widely-used variant of Elo's original rating system
   (Elo 1978).
-* **`sprt`** - Wald's sequential probability ratio test (Wald 1945).
+* **`sprt`** - Wald's sequential probability ratio test (Wald 1945, `--sprt-variant wald`); the
+  `trinomial`/`pentanomial` variants are generalized LLR tests in the style historically used by
+  chess-engine testing tools (Fishtest's `LLRlegacy`/`LLR_logistic`).
 * **`matrix`'s general-graph mode** - the Bradley-Terry paired-comparison model (Bradley & Terry
   1952), fit via the Zermelo (1929)/Hunter (2004) Minorization-Maximization fixed-point iteration;
   the existence condition for a finite solution comes from Ford (1957).

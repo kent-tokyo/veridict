@@ -21,7 +21,7 @@ use rand::{RngExt, SeedableRng};
 use veridict::input::Record;
 use veridict::sprt::{SprtConfig, SprtVariant, run};
 use veridict::stats::sprt::{bounds, llr_delta, score_from_elo};
-use veridict::{Verdict, VeridictError};
+use veridict::{Outcome, Verdict, VeridictError};
 
 const ALPHA: f64 = 0.05;
 const BETA: f64 = 0.05;
@@ -282,5 +282,242 @@ fn trinomial_reaches_a_verdict_faster_than_wald_on_draw_heavy_data() {
         trinomial_mean < wald_mean,
         "trinomial's mean trials-to-decision {trinomial_mean:.1} was not faster than wald's \
          {wald_mean:.1} on draw-heavy data - this is the specific claim the variant exists for"
+    );
+}
+
+/// Draws one pair's two per-game outcomes from a model with real *negative within-pair*
+/// correlation: a per-pair "opening bias" (random sign, drawn fresh per pair) shifts game 1's
+/// candidate win probability up and game 2's down by the same amount, or vice versa - the exact
+/// effect `--paired-by-id` pairing (same opening, colors swapped) exists to cancel, and the
+/// entire reason a pair's *combined* score has lower variance than two independent per-game
+/// draws at the same marginal win probability would: `Var(pair score) = Var_bias[E[score |
+/// bias]] + E_bias[Var(score | bias)]`, and the bias term's contribution to `E[score | bias]`
+/// cancels exactly (`+bias` and `-bias` sum to zero within a pair) - only ordinary sampling
+/// variance survives in the pair total, while each individual game's own *marginal* variance
+/// (averaged over the bias distribution) is inflated by the bias spread on top of ordinary
+/// Bernoulli variance. **This correlation is the entire point of the two checks below** - an
+/// independent-per-game simulator (`Cov(game1, game2) = 0`) would make `pentanomial` look no
+/// better than `trinomial` regardless of whether the port is correct, since there'd be nothing
+/// for pairing to cancel.
+///
+/// No draws (both games are always decisive): this keeps `trinomial`'s estimated `drawelo` at
+/// exactly `0` on the raw ungrouped games, so its LLR is byte-for-byte `wald`'s own closed-form
+/// LLR (already proven exactly in `trinomial_sprt.rs`'s `zero_draws_reduces_to_the_plain_
+/// wald_llr`) - this sidesteps the BayesElo/logistic-Elo unit mismatch that would otherwise
+/// complicate a direct pentanomial-vs-trinomial comparison (the same caveat
+/// `trinomial_reaches_a_verdict_faster_than_wald_on_draw_heavy_data` above documents at length
+/// for wald-vs-trinomial).
+fn simulate_correlated_pair(rng: &mut StdRng, base_p: f64, bias: f64) -> (Outcome, Outcome) {
+    let sign: f64 = if rng.random::<bool>() { 1.0 } else { -1.0 };
+    let p1 = (base_p + sign * bias).clamp(0.01, 0.99);
+    let p2 = (base_p - sign * bias).clamp(0.01, 0.99);
+    let draw = |p: f64, rng: &mut StdRng| -> Outcome {
+        if rng.random::<f64>() < p {
+            Outcome::CandidateWin
+        } else {
+            Outcome::BaselineWin
+        }
+    };
+    (draw(p1, rng), draw(p2, rng))
+}
+
+fn outcome_record(id: Option<&str>, outcome: Outcome) -> Record {
+    let result = match outcome {
+        Outcome::CandidateWin => "candidate_win",
+        Outcome::BaselineWin => "baseline_win",
+        Outcome::Draw => "draw",
+    };
+    Record {
+        id: id.map(str::to_string),
+        baseline: None,
+        candidate: None,
+        result: Some(result.to_string()),
+        baseline_status: None,
+        candidate_status: None,
+    }
+}
+
+/// Grows a simulated stream of correlated pairs, checking `sprt::run` with
+/// `SprtVariant::Pentanomial` every `CHECK_STRIDE` *pairs* (not games) - same
+/// striding-for-tractable-runtime rationale as `simulate_trinomial_stream` above. Returns
+/// `(verdict_at_stop, pairs_used)`.
+fn simulate_pentanomial_pair_stream(
+    rng: &mut StdRng,
+    base_p: f64,
+    bias: f64,
+    elo0: f64,
+    elo1: f64,
+    max_pairs: usize,
+) -> (Verdict, usize) {
+    let config = SprtConfig::new(elo0, elo1, ALPHA, BETA).unwrap();
+    let mut stream: Vec<Result<(usize, Record), VeridictError>> = Vec::with_capacity(max_pairs * 2);
+    let mut pairs = 0;
+    while pairs < max_pairs {
+        for _ in 0..CHECK_STRIDE {
+            if pairs >= max_pairs {
+                break;
+            }
+            let id = format!("pair{pairs}");
+            let (g1, g2) = simulate_correlated_pair(rng, base_p, bias);
+            let l1 = stream.len() + 1;
+            stream.push(Ok((l1, outcome_record(Some(&id), g1))));
+            let l2 = stream.len() + 1;
+            stream.push(Ok((l2, outcome_record(Some(&id), g2))));
+            pairs += 1;
+        }
+        let report = run(
+            stream.iter().map(|r| r.as_ref().unwrap()).cloned().map(Ok),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+        )
+        .unwrap();
+        if report.verdict != Verdict::Inconclusive {
+            return (report.verdict, pairs);
+        }
+    }
+    (Verdict::Inconclusive, max_pairs)
+}
+
+// Pentanomial's false-accept-H1 rate under true H0, on data with real within-pair correlation
+// (see `simulate_correlated_pair`'s doc) - the property that actually matters for a sequential
+// test's validity, checked on the exact scenario this variant is judged against rather than the
+// independent-games case `wald`/`trinomial`'s own checks above already cover.
+#[test]
+fn pentanomial_false_accept_h1_rate_tracks_alpha_under_true_h0_with_correlated_pairs() {
+    let (elo0, elo1) = (0.0, 20.0);
+    let base_p = score_from_elo(elo0);
+    let bias = 0.15;
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let simulations = 150;
+    let max_pairs = 1500;
+    let false_accepts = (0..simulations)
+        .filter(|_| {
+            simulate_pentanomial_pair_stream(&mut rng, base_p, bias, elo0, elo1, max_pairs).0
+                == Verdict::Pass
+        })
+        .count();
+    let rate = false_accepts as f64 / simulations as f64;
+    assert!(
+        rate < ALPHA * 1.5,
+        "pentanomial false-accept-H1 rate {rate:.4} too high for alpha={ALPHA} under true H0"
+    );
+}
+
+/// Grows ONE shared stream of correlated pairs and checks both `pentanomial` (paired) and
+/// `trinomial` (the same raw games, ungrouped) against it at the same checkpoints - common
+/// random numbers, so the two methods are compared on identical underlying data each
+/// replication instead of two independently-noisy streams (the standard variance-reduction
+/// technique for exactly this "which converges faster" shape of comparison). Returns
+/// `(pentanomial_pairs_to_decision, trinomial_pairs_to_decision)` - trinomial's own count is
+/// expressed in pairs too (raw games / 2) so both are on the same basis.
+fn simulate_pentanomial_and_trinomial_streams(
+    rng: &mut StdRng,
+    base_p: f64,
+    bias: f64,
+    elo0: f64,
+    elo1: f64,
+    max_pairs: usize,
+) -> (usize, usize) {
+    let pentanomial_config = SprtConfig::new(elo0, elo1, ALPHA, BETA).unwrap();
+    let trinomial_config = SprtConfig::new(elo0, elo1, ALPHA, BETA).unwrap();
+
+    let mut paired_stream: Vec<Result<(usize, Record), VeridictError>> = Vec::new();
+    let mut raw_stream: Vec<Result<(usize, Record), VeridictError>> = Vec::new();
+    let mut pentanomial_pairs: Option<usize> = None;
+    let mut trinomial_pairs: Option<usize> = None;
+    let mut pair_index = 0usize;
+
+    while pair_index < max_pairs && (pentanomial_pairs.is_none() || trinomial_pairs.is_none()) {
+        for _ in 0..CHECK_STRIDE {
+            if pair_index >= max_pairs {
+                break;
+            }
+            let id = format!("pair{pair_index}");
+            let (g1, g2) = simulate_correlated_pair(rng, base_p, bias);
+            let l1 = paired_stream.len() + 1;
+            paired_stream.push(Ok((l1, outcome_record(Some(&id), g1))));
+            let l2 = paired_stream.len() + 1;
+            paired_stream.push(Ok((l2, outcome_record(Some(&id), g2))));
+            let rl1 = raw_stream.len() + 1;
+            raw_stream.push(Ok((rl1, outcome_record(None, g1))));
+            let rl2 = raw_stream.len() + 1;
+            raw_stream.push(Ok((rl2, outcome_record(None, g2))));
+            pair_index += 1;
+        }
+
+        if pentanomial_pairs.is_none() {
+            let report = run(
+                paired_stream
+                    .iter()
+                    .map(|r| r.as_ref().unwrap())
+                    .cloned()
+                    .map(Ok),
+                &pentanomial_config,
+                SprtVariant::Pentanomial,
+                true,
+            )
+            .unwrap();
+            if report.verdict != Verdict::Inconclusive {
+                pentanomial_pairs = Some(pair_index);
+            }
+        }
+        if trinomial_pairs.is_none() {
+            let report = run(
+                raw_stream
+                    .iter()
+                    .map(|r| r.as_ref().unwrap())
+                    .cloned()
+                    .map(Ok),
+                &trinomial_config,
+                SprtVariant::Trinomial,
+                false,
+            )
+            .unwrap();
+            if report.verdict != Verdict::Inconclusive {
+                trinomial_pairs = Some(pair_index);
+            }
+        }
+    }
+
+    (
+        pentanomial_pairs.unwrap_or(max_pairs),
+        trinomial_pairs.unwrap_or(max_pairs),
+    )
+}
+
+// The claim this variant exists for: on the same within-pair-correlated data (common random
+// numbers with the calibration check above), does `pentanomial` reach a verdict in fewer pairs
+// than `trinomial` run on the same raw, ungrouped games? This is the discriminating check a
+// wrong port (e.g. the independent-games convolution model this implementation deliberately
+// avoids - see `stats::pentanomial_sprt`'s module doc) would fail: an independence assumption
+// throws away exactly the correlation this test's data has, so it provably cannot show a speed
+// advantage here.
+#[test]
+fn pentanomial_reaches_a_verdict_in_fewer_pairs_than_trinomial_on_correlated_pairs() {
+    let (elo0, elo1) = (0.0, 20.0);
+    let base_p = score_from_elo(elo1); // true model clearly candidate-favored (H1)
+    let bias = 0.2; // strong within-pair correlation - the scenario pentanomial exists for
+    let max_pairs = 3000;
+    let simulations = 100;
+
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (pentanomial_pairs, trinomial_pairs): (Vec<usize>, Vec<usize>) = (0..simulations)
+        .map(|_| {
+            simulate_pentanomial_and_trinomial_streams(
+                &mut rng, base_p, bias, elo0, elo1, max_pairs,
+            )
+        })
+        .unzip();
+
+    let mean = |v: &[usize]| v.iter().sum::<usize>() as f64 / v.len() as f64;
+    let pentanomial_mean = mean(&pentanomial_pairs);
+    let trinomial_mean = mean(&trinomial_pairs);
+
+    assert!(
+        pentanomial_mean < trinomial_mean,
+        "pentanomial's mean pairs-to-decision {pentanomial_mean:.1} was not faster than \
+         trinomial's {trinomial_mean:.1} on within-pair-correlated data - this is the specific \
+         effect pentanomial exists to capture (see simulate_correlated_pair's doc)"
     );
 }
