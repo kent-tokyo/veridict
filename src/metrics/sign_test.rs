@@ -11,7 +11,7 @@ use crate::input::Record;
 use crate::metrics::common::SignCounts;
 use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
 use crate::stats::{exact, jeffreys, wilson};
-use crate::{CiMethod, MetricKind};
+use crate::{CiMethod, MetricKind, TrialStatus};
 
 pub(crate) struct SignTestAggregator {
     collector: SignCounts,
@@ -34,9 +34,10 @@ impl MetricAggregator for SignTestAggregator {
         &mut self,
         line: usize,
         record: &Record,
-        has_status: bool,
+        baseline_status: Option<TrialStatus>,
+        candidate_status: Option<TrialStatus>,
     ) -> Result<(), VeridictError> {
-        let mut used = has_status;
+        let mut used = baseline_status.is_some() || candidate_status.is_some();
         if let (Some(b), Some(c)) = (record.baseline, record.candidate) {
             if !b.is_finite() {
                 return Err(VeridictError::InvalidValue {

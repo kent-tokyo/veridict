@@ -125,6 +125,23 @@ pub enum BootstrapMethod {
     Basic,
 }
 
+/// How a failed trial (`baseline_status`/`candidate_status` other than `ok`) affects a
+/// win/loss/draw-shaped metric (`winrate`/`elo`) or `sprt`. `ReportOnly` (default) is exactly
+/// today's existing behavior, unchanged: a failure is still tallied into `failure_breakdown`,
+/// but never itself contributes an outcome - only a literal `result` field does, and a status-
+/// only record (the common case) already contributes nothing today regardless of this enum.
+/// `Exclude`/`Loss` only diverge from `ReportOnly` in the less common case of a record carrying
+/// *both* a failure status and a `result` (the schema doesn't forbid this combination). Only
+/// meaningful for outcome-based metrics - `mean-diff`/`sign-test` have no win/loss/draw outcome
+/// for a failed numeric trial to become, so requesting `Exclude`/`Loss` with either is a config
+/// error (`VeridictError::IncompatibleFailurePolicy`), not an arbitrary numeric penalty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailurePolicy {
+    ReportOnly,
+    Exclude,
+    Loss,
+}
+
 /// Which knob(s) a metric actually uses, replacing the `(MetricKind,
 /// CiMethod, BootstrapMethod)` trio `compare_one`/`compare_many` used to take
 /// as three independent parameters. `elo` reads neither `ci_method` nor
@@ -137,10 +154,19 @@ pub enum BootstrapMethod {
 /// to recover it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricConfig {
-    WinRate { ci_method: CiMethod },
-    SignTest { ci_method: CiMethod },
-    MeanDiff { bootstrap_method: BootstrapMethod },
-    Elo,
+    WinRate {
+        ci_method: CiMethod,
+        failure_policy: FailurePolicy,
+    },
+    SignTest {
+        ci_method: CiMethod,
+    },
+    MeanDiff {
+        bootstrap_method: BootstrapMethod,
+    },
+    Elo {
+        failure_policy: FailurePolicy,
+    },
 }
 
 impl MetricConfig {
@@ -151,33 +177,46 @@ impl MetricConfig {
             Self::WinRate { .. } => MetricKind::WinRate,
             Self::SignTest { .. } => MetricKind::SignTest,
             Self::MeanDiff { .. } => MetricKind::MeanDiff,
-            Self::Elo => MetricKind::Elo,
+            Self::Elo { .. } => MetricKind::Elo,
         }
     }
 
     /// Builds a validated config from flat, CLI-flag-shaped inputs - the
-    /// same compatibility check `compute_many` used to run on every call
+    /// same compatibility checks `compute_many` used to run on every call
     /// (`ci_method` other than `Wilson` is only valid for `WinRate`/
-    /// `SignTest`), now run once at construction instead of once per call.
-    /// A caller that already knows which knob its metric needs can
-    /// construct a variant directly (e.g. `MetricConfig::Elo`) and skip
-    /// this - it's valid by construction, no runtime check needed.
+    /// `SignTest`; `failure_policy` other than `ReportOnly` is only valid
+    /// for `WinRate`/`Elo`), now run once at construction instead of once
+    /// per call. A caller that already knows which knobs its metric needs
+    /// can construct a variant directly (e.g. `MetricConfig::MeanDiff { .. }`)
+    /// and skip this - it's valid by construction, no runtime check needed.
     pub fn new(
         kind: MetricKind,
         ci_method: CiMethod,
         bootstrap_method: BootstrapMethod,
+        failure_policy: FailurePolicy,
     ) -> Result<Self, VeridictError> {
         match kind {
-            MetricKind::WinRate => Ok(Self::WinRate { ci_method }),
-            MetricKind::SignTest => Ok(Self::SignTest { ci_method }),
+            MetricKind::WinRate => Ok(Self::WinRate {
+                ci_method,
+                failure_policy,
+            }),
+            MetricKind::SignTest | MetricKind::MeanDiff
+                if failure_policy != FailurePolicy::ReportOnly =>
+            {
+                Err(VeridictError::IncompatibleFailurePolicy {
+                    policy: metrics::failure_policy_label(failure_policy),
+                    metric: metrics::metric_label(kind),
+                })
+            }
             MetricKind::MeanDiff | MetricKind::Elo if ci_method != CiMethod::Wilson => {
                 Err(VeridictError::IncompatibleCiMethod {
                     method: metrics::ci_method_label(ci_method),
                     metric: metrics::metric_label(kind),
                 })
             }
+            MetricKind::SignTest => Ok(Self::SignTest { ci_method }),
             MetricKind::MeanDiff => Ok(Self::MeanDiff { bootstrap_method }),
-            MetricKind::Elo => Ok(Self::Elo),
+            MetricKind::Elo => Ok(Self::Elo { failure_policy }),
         }
     }
 
@@ -190,8 +229,8 @@ impl MetricConfig {
     /// choice being made on their behalf.
     fn ci_method(&self) -> CiMethod {
         match self {
-            Self::WinRate { ci_method } | Self::SignTest { ci_method } => *ci_method,
-            Self::MeanDiff { .. } | Self::Elo => CiMethod::Wilson,
+            Self::WinRate { ci_method, .. } | Self::SignTest { ci_method } => *ci_method,
+            Self::MeanDiff { .. } | Self::Elo { .. } => CiMethod::Wilson,
         }
     }
 }
@@ -361,6 +400,17 @@ fn collect_data_quality(
         ));
     }
 
+    // ponytail: this treats `paired_count` and the failure counts as disjoint - true under
+    // `FailurePolicy::ReportOnly`/`Exclude` for the common status-only-record case, but a record
+    // carrying both a failure status and a counted outcome (a mixed status+result record under
+    // `ReportOnly`, or *any* failure under `Loss`, whose synthesized outcome lands in
+    // `paired_count` too) is double-counted here: once as a failure, once as a trial. This can
+    // under-report `high_failure_rate` for a true failure rate a little above 20% (e.g. true 22%
+    // reports as ~18%, a real miss). Advisory-only - never affects `verdict` - and the practical
+    // miss window is narrow (only near the 20% boundary; far above or below it the discount
+    // doesn't change which side of 20% it lands on). Fix properly if this bites in practice: track
+    // "outcome came from a failure" separately per aggregator and exclude it from `paired_count`
+    // here, rather than trying to disentangle it from this already-summed total.
     let total_trials = out.paired_count + out.timeouts + out.crashes + out.invalid;
     if total_trials > 0 {
         let failure_rate = (out.timeouts + out.crashes + out.invalid) as f64 / total_trials as f64;
@@ -478,6 +528,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -521,6 +572,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -541,6 +593,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -574,6 +627,7 @@ mod tests {
             &[
                 MetricConfig::WinRate {
                     ci_method: CiMethod::Wilson,
+                    failure_policy: FailurePolicy::ReportOnly,
                 },
                 MetricConfig::MeanDiff {
                     bootstrap_method: BootstrapMethod::Percentile,
@@ -616,6 +670,7 @@ mod tests {
             &[
                 MetricConfig::WinRate {
                     ci_method: CiMethod::Wilson,
+                    failure_policy: FailurePolicy::ReportOnly,
                 },
                 MetricConfig::MeanDiff {
                     bootstrap_method: BootstrapMethod::Percentile,
@@ -657,6 +712,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -695,6 +751,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -722,6 +779,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -743,6 +801,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -776,6 +835,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -800,6 +860,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -839,6 +900,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -895,7 +957,9 @@ mod tests {
         let thresholds = Thresholds::symmetric(0.0).unwrap();
         let report = compare_one(
             records.iter().cloned(),
-            MetricConfig::Elo,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
             0.95,
             &thresholds,
             2000,
@@ -928,6 +992,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,
@@ -978,6 +1043,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             &thresholds,

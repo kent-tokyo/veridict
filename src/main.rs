@@ -11,7 +11,8 @@ use veridict::sprt::{SprtConfig, SprtVariant};
 use veridict::stats::bootstrap::DEFAULT_SEED;
 use veridict::verdict::Thresholds;
 use veridict::{
-    BootstrapMethod, CiMethod, MetricConfig, MetricKind, Verdict, VeridictError, input, matrix,
+    BootstrapMethod, CiMethod, FailurePolicy, MetricConfig, MetricKind, Verdict, VeridictError,
+    input, matrix,
 };
 
 #[derive(Parser)]
@@ -99,6 +100,17 @@ struct CompareArgs {
     #[arg(long)]
     paired_by_id: bool,
 
+    /// How a failed trial affects --metric winrate/elo (mean-diff/sign-test reject anything but
+    /// the default as a config error). `report-only` (default): failures are tallied and
+    /// reported but never contribute an outcome, same as before this flag existed. `exclude`:
+    /// a failed side's `result` (if present) is never tallied as an outcome either - only
+    /// diverges from `report-only` when a record carries both a failure status and a `result`.
+    /// `loss`: a failed side's outcome is synthesized (candidate failed -> baseline_win,
+    /// baseline failed -> candidate_win, both failed -> draw), overriding any literal `result`
+    /// on the same record.
+    #[arg(long, value_enum, default_value = "report-only")]
+    failure_policy: FailurePolicyArg,
+
     /// Also write the JSON report to this file.
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -163,6 +175,13 @@ struct SprtArgs {
     /// --paired-by-id` for the exact semantics.
     #[arg(long)]
     paired_by_id: bool,
+
+    /// How a failed trial affects the LLR. See `compare --failure-policy` for the exact
+    /// semantics (applies identically here, across all three --sprt-variant choices - a `loss`-
+    /// synthesized outcome nets against its pair partner the same way for --sprt-variant
+    /// pentanomial as it does for wald/trinomial).
+    #[arg(long, value_enum, default_value = "report-only")]
+    failure_policy: FailurePolicyArg,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -289,6 +308,23 @@ impl From<BootstrapMethodArg> for BootstrapMethod {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum FailurePolicyArg {
+    ReportOnly,
+    Exclude,
+    Loss,
+}
+
+impl From<FailurePolicyArg> for FailurePolicy {
+    fn from(m: FailurePolicyArg) -> Self {
+        match m {
+            FailurePolicyArg::ReportOnly => FailurePolicy::ReportOnly,
+            FailurePolicyArg::Exclude => FailurePolicy::Exclude,
+            FailurePolicyArg::Loss => FailurePolicy::Loss,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum SprtVariantArg {
     Wald,
     Trinomial,
@@ -325,10 +361,11 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
     let seed = args.seed.unwrap_or(DEFAULT_SEED);
     let ci_method: CiMethod = args.ci_method.into();
     let bootstrap_method: BootstrapMethod = args.bootstrap_method.into();
+    let failure_policy: FailurePolicy = args.failure_policy.into();
     let metrics: Vec<MetricConfig> = args
         .metrics
         .into_iter()
-        .map(|m| MetricConfig::new(m.into(), ci_method, bootstrap_method))
+        .map(|m| MetricConfig::new(m.into(), ci_method, bootstrap_method, failure_policy))
         .collect::<Result<_, _>>()?;
 
     let (verdict, json, markdown) = if let [only] = metrics[..] {
@@ -369,8 +406,9 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     let config = SprtConfig::new(elo0, elo1, args.alpha, args.beta)?;
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;
+    let failure_policy: FailurePolicy = args.failure_policy.into();
 
-    let report = veridict::sprt::run(records, &config, variant, args.paired_by_id)?;
+    let report = veridict::sprt::run(records, &config, variant, args.paired_by_id, failure_policy)?;
     let json = report.to_json_pretty();
     let markdown = report.to_markdown();
 

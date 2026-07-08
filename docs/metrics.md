@@ -156,6 +156,38 @@ referenced sequential test, evaluated exactly (mod the numerical `secular`-equat
 the observed counts. What *is* a design choice is which variant runs by default (`wald`, since it
 needs no nuisance-parameter estimation).
 
+## `--failure-policy`
+
+**This project's own design choice, not a citation-backed method** - it controls whether a failed
+trial (`baseline_status`/`candidate_status` other than `ok`) affects the *computation*, not just
+whether it's *reported* (`failure_breakdown` tallies every failure regardless of this flag). Only
+meaningful for outcome-based metrics (`winrate`/`elo`) and `sprt`; `mean-diff`/`sign-test` have no
+win/loss/draw outcome for a failed numeric trial to become, so requesting `exclude`/`loss` with
+either is a config error (`IncompatibleFailurePolicy`), not an arbitrary numeric penalty invented
+for the occasion.
+
+- **`report-only`** (default) - exactly the behavior that existed before this flag did: a status-
+  only record (no `result`) already contributes nothing to any outcome-based metric, so this is a
+  no-op in the common case. The one place it's *not* a no-op: a record carrying both a failure
+  status and a `result` still has that `result` counted.
+- **`exclude`** - a failed side's `result` is never counted, even when present alongside the
+  status. This is where it actually diverges from `report-only`, and only in that same mixed-
+  field case - worth calling out explicitly so it isn't mistaken for a broader behavior change on
+  ordinary data.
+- **`loss`** - the failed side's outcome is synthesized: candidate failed -> `baseline_win`,
+  baseline failed -> `candidate_win`, both sides failed -> `draw` (a symmetric "wash", not an
+  arbitrary tie-break). This synthesized outcome *overrides* any literal `result` on the same
+  record - trusting the execution-level failure signal over a same-record `result` is the
+  conservative choice, consistent with this project's "a false pass is worse than an inconclusive
+  result" bias (a `candidate_win` result next to a `candidate_status: crash` must never silently
+  win out over the crash).
+
+Applies identically under `--paired-by-id`: the resolved outcome (literal or synthesized) is what
+gets fed into the pairing/netting logic, so a `loss`-synthesized failure inside a pair nets
+against its partner exactly the way any other outcome would - `--sprt-variant pentanomial`
+included, where a failure's synthesized outcome becomes one of the pair's two games going into the
+5-value bucket.
+
 ## `matrix`'s general-graph mode
 
 **Established statistic.** Once real candidate-vs-candidate games make the observed graph
@@ -226,7 +258,10 @@ warning never changes `pass`/`fail`/`inconclusive`):
 - **Tiny sample** - under 30 paired trials, the conventional threshold below which CI methods are
   considered unreliable.
 - **High failure rate** - over 20% of trials failed to execute (timeout/crash/invalid) rather than
-  producing a usable result.
+  producing a usable result. Under `--failure-policy loss`, a failure's synthesized outcome is
+  counted both as a failure and as a trial in this rate's denominator, which can under-report the
+  true rate near the 20% boundary (see the `ponytail:` comment on `collect_data_quality` in
+  `src/lib.rs`) - a known, narrow gap, not a silent one.
 - **Draw-heavy** (`elo` only) - over 50% of trials were draws, leaving few decisive outcomes to
   estimate Elo from. (Not yet extended to `winrate`/`sign-test`, which discard their tie/draw count
   before it reaches the shared `MetricOutput` struct - a real gap, not a silent omission; see

@@ -11,12 +11,12 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::{FailureBreakdown, OutcomeCollector, tally_status};
+use crate::metrics::{FailureBreakdown, OutcomeCollector, effective_outcome, tally_status};
 use crate::report::serde_str;
 use crate::stats::pentanomial_sprt;
 use crate::stats::sprt as math;
 use crate::stats::trinomial_sprt;
-use crate::{Outcome, Verdict};
+use crate::{FailurePolicy, Outcome, Verdict};
 
 /// Which SPRT is run. `Wald` (default): classic two-outcome test, draws
 /// excluded, `elo0`/`elo1` are logistic Elo (`stats::sprt::score_from_elo`).
@@ -255,11 +255,17 @@ fn net_pentanomial_buckets(buckets: &[u64; 5]) -> (u64, u64, u64) {
 /// `SprtVariant::Pentanomial` always requires `paired_by_id`: rejected up front rather than
 /// silently ignored, matching `resolve_sprt_hypotheses`'s existing "never silently ignore
 /// invalid data" precedent for the `--elo0`/`--belo0` cross-variant flags.
+///
+/// `failure_policy`: see `metrics::effective_outcome` (the same shared resolver `winrate`/`elo`
+/// use) - `FailurePolicy::Loss`'s synthesized outcome flows into whichever collector `variant`
+/// uses exactly like a literal `result` would, `Pentanomial` included: a crash on one side of a
+/// pair nets against its partner's real result the same way any other outcome pair would.
 pub fn run<I>(
     records: I,
     config: &SprtConfig,
     variant: SprtVariant,
     paired_by_id: bool,
+    failure_policy: FailurePolicy,
 ) -> Result<SprtReport, VeridictError>
 where
     I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
@@ -284,29 +290,35 @@ where
 
     for item in records {
         let (line, record) = item?;
-        let mut used = false;
+        let mut baseline_status = None;
+        let mut candidate_status = None;
 
         if let Some(status) = record.baseline_status.as_deref() {
-            used = true;
-            tally_status(status, line, "baseline_status", &mut failures.baseline)?;
+            baseline_status = Some(tally_status(
+                status,
+                line,
+                "baseline_status",
+                &mut failures.baseline,
+            )?);
         }
         if let Some(status) = record.candidate_status.as_deref() {
-            used = true;
-            tally_status(status, line, "candidate_status", &mut failures.candidate)?;
+            candidate_status = Some(tally_status(
+                status,
+                line,
+                "candidate_status",
+                &mut failures.candidate,
+            )?);
         }
+        let used =
+            baseline_status.is_some() || candidate_status.is_some() || record.result.is_some();
 
-        if let Some(result) = record.result.as_deref() {
-            used = true;
-            let outcome = match Outcome::parse(result) {
-                Some(outcome) => outcome,
-                None => {
-                    return Err(VeridictError::UnrecognizedOutcome {
-                        line,
-                        value: result.to_string(),
-                        expected: "baseline_win|candidate_win|draw",
-                    });
-                }
-            };
+        if let Some(outcome) = effective_outcome(
+            failure_policy,
+            baseline_status,
+            candidate_status,
+            record.result.as_deref(),
+            line,
+        )? {
             if variant == SprtVariant::Pentanomial {
                 let id = record
                     .id
@@ -547,7 +559,14 @@ mod tests {
         let records: Vec<_> = (0..2000)
             .map(|i| (i + 1, rec(Some("candidate_win"))))
             .collect();
-        let report = run(ok_iter(&records), &config, SprtVariant::Wald, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
         assert!(report.llr >= report.upper_bound);
         assert_eq!(report.drawelo, None);
@@ -559,7 +578,14 @@ mod tests {
         let records: Vec<_> = (0..2000)
             .map(|i| (i + 1, rec(Some("candidate_win"))))
             .collect();
-        let report = run(ok_iter(&records), &config, SprtVariant::Trinomial, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Trinomial,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
         assert!(report.llr >= report.upper_bound);
         assert!(report.drawelo.is_some());
@@ -577,7 +603,14 @@ mod tests {
             records.push((i * 2 + 2, rec(Some("candidate_win"))));
         }
         let config = SprtConfig::new(0.0, 30.0, 0.05, 0.05).unwrap();
-        let report = run(ok_iter(&records), &config, SprtVariant::Trinomial, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Trinomial,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert!(report.llr.is_finite());
         assert!(report.drawelo.unwrap().is_finite());
     }
@@ -600,8 +633,22 @@ mod tests {
                 )
             })
             .collect();
-        let wald = run(ok_iter(&records), &config, SprtVariant::Wald, false).unwrap();
-        let trinomial = run(ok_iter(&records), &config, SprtVariant::Trinomial, false).unwrap();
+        let wald = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
+        let trinomial = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Trinomial,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(wald.verdict, trinomial.verdict);
         assert!((wald.llr - trinomial.llr).abs() < 1e-6);
     }
@@ -612,7 +659,14 @@ mod tests {
         let records: Vec<_> = (0..2000)
             .map(|i| (i + 1, rec(Some("baseline_win"))))
             .collect();
-        let report = run(ok_iter(&records), &config, SprtVariant::Wald, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Fail);
         assert!(report.llr <= report.lower_bound);
     }
@@ -624,7 +678,14 @@ mod tests {
             (1, rec(Some("candidate_win"))),
             (2, rec(Some("baseline_win"))),
         ];
-        let report = run(ok_iter(&records), &config, SprtVariant::Wald, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
     }
 
@@ -632,7 +693,14 @@ mod tests {
     fn draws_do_not_move_the_llr() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = vec![(1, rec(Some("draw"))), (2, rec(Some("draw")))];
-        let report = run(ok_iter(&records), &config, SprtVariant::Wald, false).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.llr, 0.0);
         assert_eq!(report.draws, 2);
     }
@@ -665,7 +733,13 @@ mod tests {
     fn empty_input_is_an_error() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         assert!(matches!(
-            run(ok_iter(&[]), &config, SprtVariant::Wald, false),
+            run(
+                ok_iter(&[]),
+                &config,
+                SprtVariant::Wald,
+                false,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::EmptyInput)
         ));
     }
@@ -675,7 +749,13 @@ mod tests {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = vec![(1, rec(None))];
         assert!(matches!(
-            run(ok_iter(&records), &config, SprtVariant::Wald, false),
+            run(
+                ok_iter(&records),
+                &config,
+                SprtVariant::Wald,
+                false,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::SchemaMismatch { .. })
         ));
     }
@@ -700,7 +780,14 @@ mod tests {
                 ]
             })
             .collect();
-        let report = run(ok_iter(&records), &config, SprtVariant::Wald, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.llr, 0.0);
         assert_eq!(report.draws, 1000);
     }
@@ -723,7 +810,14 @@ mod tests {
     fn pentanomial_paired_2_0_favors_candidate() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(200, ("candidate_win", "candidate_win"));
-        let report = run(ok_iter(&records), &config, SprtVariant::Pentanomial, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         assert_eq!(report.sprt_variant, "pentanomial");
         assert_eq!(report.paired_count, Some(200));
         assert_eq!(report.raw_trial_count, Some(400));
@@ -748,7 +842,14 @@ mod tests {
     fn pentanomial_paired_1_5_0_5_favors_candidate() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(200, ("candidate_win", "draw"));
-        let report = run(ok_iter(&records), &config, SprtVariant::Pentanomial, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         let counts = report.pentanomial_counts.as_ref().unwrap();
         assert_eq!(counts.score_1_5, 200);
         assert_eq!(report.candidate_wins, 200);
@@ -759,7 +860,14 @@ mod tests {
     fn pentanomial_paired_1_1_is_neutral() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(200, ("candidate_win", "baseline_win"));
-        let report = run(ok_iter(&records), &config, SprtVariant::Pentanomial, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         let counts = report.pentanomial_counts.as_ref().unwrap();
         assert_eq!(counts.score_1_0, 200);
         assert_eq!(report.draws, 200);
@@ -771,7 +879,14 @@ mod tests {
     fn pentanomial_paired_0_5_1_5_favors_baseline() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(200, ("baseline_win", "draw"));
-        let report = run(ok_iter(&records), &config, SprtVariant::Pentanomial, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         let counts = report.pentanomial_counts.as_ref().unwrap();
         assert_eq!(counts.score_0_5, 200);
         assert_eq!(report.baseline_wins, 200);
@@ -782,7 +897,14 @@ mod tests {
     fn pentanomial_paired_0_2_favors_baseline() {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(200, ("baseline_win", "baseline_win"));
-        let report = run(ok_iter(&records), &config, SprtVariant::Pentanomial, true).unwrap();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
         let counts = report.pentanomial_counts.as_ref().unwrap();
         assert_eq!(counts.score_0_0, 200);
         assert_eq!(report.baseline_wins, 200);
@@ -796,7 +918,13 @@ mod tests {
         let mut records = pentanomial_records(50, ("candidate_win", "baseline_win"));
         records.push((999, rec_with_id(Some("lonely"), Some("candidate_win"))));
         assert!(matches!(
-            run(ok_iter(&records), &config, SprtVariant::Pentanomial, true),
+            run(
+                ok_iter(&records),
+                &config,
+                SprtVariant::Pentanomial,
+                true,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::SchemaMismatch {
                 context: "pentanomial",
                 ..
@@ -810,7 +938,13 @@ mod tests {
         let mut records = pentanomial_records(50, ("candidate_win", "baseline_win"));
         records.push((997, rec_with_id(Some("op0"), Some("candidate_win"))));
         assert!(matches!(
-            run(ok_iter(&records), &config, SprtVariant::Pentanomial, true),
+            run(
+                ok_iter(&records),
+                &config,
+                SprtVariant::Pentanomial,
+                true,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::SchemaMismatch {
                 context: "pentanomial",
                 ..
@@ -823,7 +957,13 @@ mod tests {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = vec![(1, rec(Some("candidate_win")))];
         assert!(matches!(
-            run(ok_iter(&records), &config, SprtVariant::Pentanomial, true),
+            run(
+                ok_iter(&records),
+                &config,
+                SprtVariant::Pentanomial,
+                true,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::SchemaMismatch {
                 context: "pentanomial",
                 ..
@@ -836,7 +976,13 @@ mod tests {
         let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
         let records = pentanomial_records(50, ("candidate_win", "baseline_win"));
         assert!(matches!(
-            run(ok_iter(&records), &config, SprtVariant::Pentanomial, false),
+            run(
+                ok_iter(&records),
+                &config,
+                SprtVariant::Pentanomial,
+                false,
+                FailurePolicy::ReportOnly
+            ),
             Err(VeridictError::InvalidThreshold(_))
         ));
     }

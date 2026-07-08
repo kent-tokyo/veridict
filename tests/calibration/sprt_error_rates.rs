@@ -21,7 +21,7 @@ use rand::{RngExt, SeedableRng};
 use veridict::input::Record;
 use veridict::sprt::{SprtConfig, SprtVariant, run};
 use veridict::stats::sprt::{bounds, llr_delta, score_from_elo};
-use veridict::{Outcome, Verdict, VeridictError};
+use veridict::{FailurePolicy, Outcome, Verdict, VeridictError};
 
 const ALPHA: f64 = 0.05;
 const BETA: f64 = 0.05;
@@ -164,6 +164,7 @@ fn simulate_trinomial_stream(
             &config,
             SprtVariant::Trinomial,
             false,
+            FailurePolicy::ReportOnly,
         )
         .unwrap();
         if report.verdict != Verdict::Inconclusive {
@@ -370,6 +371,7 @@ fn simulate_pentanomial_pair_stream(
             &config,
             SprtVariant::Pentanomial,
             true,
+            FailurePolicy::ReportOnly,
         )
         .unwrap();
         if report.verdict != Verdict::Inconclusive {
@@ -456,6 +458,7 @@ fn simulate_pentanomial_and_trinomial_streams(
                 &pentanomial_config,
                 SprtVariant::Pentanomial,
                 true,
+                FailurePolicy::ReportOnly,
             )
             .unwrap();
             if report.verdict != Verdict::Inconclusive {
@@ -472,6 +475,7 @@ fn simulate_pentanomial_and_trinomial_streams(
                 &trinomial_config,
                 SprtVariant::Trinomial,
                 false,
+                FailurePolicy::ReportOnly,
             )
             .unwrap();
             if report.verdict != Verdict::Inconclusive {

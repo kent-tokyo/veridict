@@ -22,7 +22,9 @@ use std::collections::HashMap;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::{CiMethod, IntoRecordResult, MetricConfig, MetricKind, TrialStatus};
+use crate::{
+    CiMethod, FailurePolicy, IntoRecordResult, MetricConfig, MetricKind, Outcome, TrialStatus,
+};
 
 /// Per-side failure tally, so a report can distinguish "the baseline kept
 /// crashing" from "the candidate kept timing out" instead of one opaque
@@ -68,21 +70,25 @@ pub struct MetricOutput {
     pub max_id_count: u64,
 }
 
-/// One metric's independent, incremental computation. `ingest` is called
-/// once per record (`has_status` is computed once per record by the shared
-/// driver below, since status-tally logic is identical regardless of which
-/// metric is running - today that work would otherwise be redone per
-/// metric). If this aggregator finds none of its own required fields on a
-/// record AND `has_status` is false, it must reject with `SchemaMismatch` -
-/// this preserves strict per-metric validation even when several metrics
-/// share one pass: a record usable by metric A but not metric B still
-/// errors when B is requested, exactly as if B had run alone.
+/// One metric's independent, incremental computation. `ingest` is called once per record
+/// (`baseline_status`/`candidate_status` are parsed once per record by the shared driver below,
+/// since status-tally logic is identical regardless of which metric is running - today that
+/// work would otherwise be redone per metric). Passed as parsed `TrialStatus`, not a resolved
+/// `Outcome`: `mean-diff`/`sign-test` have no use for an outcome (they only ever check
+/// presence, via `.is_some()`), while `winrate`/`elo` resolve it themselves via
+/// `effective_outcome` using their own stored `FailurePolicy` - a shared "resolved outcome"
+/// wouldn't fit the numeric metrics at all. If this aggregator finds none of its own required
+/// fields on a record AND both statuses are `None`, it must reject with `SchemaMismatch` - this
+/// preserves strict per-metric validation even when several metrics share one pass: a record
+/// usable by metric A but not metric B still errors when B is requested, exactly as if B had
+/// run alone.
 pub(crate) trait MetricAggregator {
     fn ingest(
         &mut self,
         line: usize,
         record: &Record,
-        has_status: bool,
+        baseline_status: Option<TrialStatus>,
+        candidate_status: Option<TrialStatus>,
     ) -> Result<(), VeridictError>;
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError>;
 }
@@ -95,12 +101,20 @@ fn build_aggregator(
     paired_by_id: bool,
 ) -> Box<dyn MetricAggregator> {
     match config {
-        MetricConfig::WinRate { ci_method } => Box::new(winrate::WinRateAggregator::new(
+        MetricConfig::WinRate {
+            ci_method,
+            failure_policy,
+        } => Box::new(winrate::WinRateAggregator::new(
             confidence,
             paired_by_id,
             ci_method,
+            failure_policy,
         )),
-        MetricConfig::Elo => Box::new(elo::EloAggregator::new(confidence, paired_by_id)),
+        MetricConfig::Elo { failure_policy } => Box::new(elo::EloAggregator::new(
+            confidence,
+            paired_by_id,
+            failure_policy,
+        )),
         MetricConfig::MeanDiff { bootstrap_method } => {
             Box::new(mean_diff::MeanDiffAggregator::new(
                 confidence,
@@ -178,21 +192,30 @@ where
 
     for item in records {
         let (line, record) = item?;
-        let mut has_status = false;
+        let mut baseline_status = None;
+        let mut candidate_status = None;
         if let Some(status) = record.baseline_status.as_deref() {
-            has_status = true;
-            tally_status(status, line, "baseline_status", &mut failures.baseline)?;
+            baseline_status = Some(tally_status(
+                status,
+                line,
+                "baseline_status",
+                &mut failures.baseline,
+            )?);
         }
         if let Some(status) = record.candidate_status.as_deref() {
-            has_status = true;
-            tally_status(status, line, "candidate_status", &mut failures.candidate)?;
+            candidate_status = Some(tally_status(
+                status,
+                line,
+                "candidate_status",
+                &mut failures.candidate,
+            )?);
         }
         if !paired_by_id && let Some(id) = record.id.as_deref() {
             records_with_id += 1;
             *id_counts.entry(id.to_string()).or_insert(0) += 1;
         }
         for agg in &mut aggregators {
-            agg.ingest(line, &record, has_status)?;
+            agg.ingest(line, &record, baseline_status, candidate_status)?;
         }
     }
     let max_id_count = id_counts.values().copied().max().unwrap_or(0);
@@ -256,31 +279,103 @@ pub(crate) fn ci_method_label(ci_method: CiMethod) -> &'static str {
     }
 }
 
+/// A label for `IncompatibleFailurePolicy`'s error message; matches the CLI's `--failure-policy`
+/// spelling. Only ever reached for a non-`ReportOnly` policy (the upfront guard in
+/// `MetricConfig::new` never fires for `ReportOnly`), but kept total rather than `unreachable!()`
+/// for that arm, same precedent as `ci_method_label`.
+pub(crate) fn failure_policy_label(policy: FailurePolicy) -> &'static str {
+    match policy {
+        FailurePolicy::ReportOnly => "report-only",
+        FailurePolicy::Exclude => "exclude",
+        FailurePolicy::Loss => "loss",
+    }
+}
+
+/// Parses `raw` and tallies it into `counts` if it's a failure - returns the parsed
+/// `TrialStatus` either way (not just `Ok(())`) so callers can also feed it to
+/// `effective_outcome` without re-parsing the same string a second time.
 pub(crate) fn tally_status(
     raw: &str,
     line: usize,
     field: &'static str,
     counts: &mut FailureCounts,
-) -> Result<(), VeridictError> {
+) -> Result<TrialStatus, VeridictError> {
     match TrialStatus::parse(raw) {
-        Some(TrialStatus::Ok) => Ok(()),
-        Some(TrialStatus::Timeout) => {
+        Some(TrialStatus::Ok) => Ok(TrialStatus::Ok),
+        Some(status @ TrialStatus::Timeout) => {
             counts.timeout += 1;
-            Ok(())
+            Ok(status)
         }
-        Some(TrialStatus::Crash) => {
+        Some(status @ TrialStatus::Crash) => {
             counts.crash += 1;
-            Ok(())
+            Ok(status)
         }
-        Some(TrialStatus::Invalid) => {
+        Some(status @ TrialStatus::Invalid) => {
             counts.invalid += 1;
-            Ok(())
+            Ok(status)
         }
         None => Err(VeridictError::UnrecognizedStatus {
             line,
             field,
             value: raw.to_string(),
         }),
+    }
+}
+
+/// The outcome to actually record for win/loss/draw-shaped metrics (`winrate`/`elo`) and `sprt`,
+/// given the record's parsed per-side status and `--failure-policy`. `ReportOnly` is exactly
+/// today's pre-`FailurePolicy` behavior, unchanged: a failure is tallied by the caller (via
+/// `tally_status`, before this runs) but never itself contributes an outcome - only a literal
+/// `result` field does. `Exclude`/`Loss` only diverge from `ReportOnly` when a failure status is
+/// present (a status-only record, the common case, already contributes nothing under any
+/// policy).
+///
+/// Neither `Exclude` nor `Loss` validates `result`'s contents when a failure status is present -
+/// once a policy has decided the trial's outcome is excluded or overridden, an unparseable
+/// `result` string alongside it is moot, not silently-ignored invalid data (the ordinary
+/// `UnrecognizedOutcome` check still applies whenever `result` is actually consulted, i.e.
+/// whenever neither side failed, or under `ReportOnly`).
+pub(crate) fn effective_outcome(
+    policy: FailurePolicy,
+    baseline_status: Option<TrialStatus>,
+    candidate_status: Option<TrialStatus>,
+    result: Option<&str>,
+    line: usize,
+) -> Result<Option<Outcome>, VeridictError> {
+    let baseline_failed = matches!(baseline_status, Some(s) if s != TrialStatus::Ok);
+    let candidate_failed = matches!(candidate_status, Some(s) if s != TrialStatus::Ok);
+
+    match policy {
+        FailurePolicy::ReportOnly => parse_result_outcome(result, line),
+        FailurePolicy::Exclude if baseline_failed || candidate_failed => Ok(None),
+        FailurePolicy::Exclude => parse_result_outcome(result, line),
+        // A failure status overrides any literal `result` on the same record - trusting the
+        // execution-level failure signal is the conservative choice (AGENTS.md: "a false pass
+        // is worse than an inconclusive result"), so a `candidate_win` result next to a
+        // `candidate_status: crash` can never silently override the crash.
+        FailurePolicy::Loss => match (baseline_failed, candidate_failed) {
+            (true, true) => Ok(Some(Outcome::Draw)),
+            (true, false) => Ok(Some(Outcome::CandidateWin)),
+            (false, true) => Ok(Some(Outcome::BaselineWin)),
+            (false, false) => parse_result_outcome(result, line),
+        },
+    }
+}
+
+fn parse_result_outcome(
+    result: Option<&str>,
+    line: usize,
+) -> Result<Option<Outcome>, VeridictError> {
+    match result {
+        None => Ok(None),
+        Some(r) => match Outcome::parse(r) {
+            Some(o) => Ok(Some(o)),
+            None => Err(VeridictError::UnrecognizedOutcome {
+                line,
+                value: r.to_string(),
+                expected: "baseline_win|candidate_win|draw",
+            }),
+        },
     }
 }
 
@@ -310,6 +405,139 @@ mod tests {
     }
 
     #[test]
+    fn effective_outcome_report_only_ignores_a_status_only_failure() {
+        let out = effective_outcome(
+            FailurePolicy::ReportOnly,
+            Some(TrialStatus::Crash),
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn effective_outcome_report_only_still_honors_a_result_next_to_a_failure() {
+        // Mixed status+result: `ReportOnly` keeps today's pre-`FailurePolicy` behavior - the
+        // literal `result` still counts, the failure status is only tallied, not consulted here.
+        let out = effective_outcome(
+            FailurePolicy::ReportOnly,
+            None,
+            Some(TrialStatus::Crash),
+            Some("candidate_win"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, Some(Outcome::CandidateWin));
+    }
+
+    #[test]
+    fn effective_outcome_exclude_drops_a_result_next_to_a_failure() {
+        let out = effective_outcome(
+            FailurePolicy::Exclude,
+            None,
+            Some(TrialStatus::Crash),
+            Some("candidate_win"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn effective_outcome_exclude_matches_report_only_without_a_failure() {
+        let out = effective_outcome(FailurePolicy::Exclude, None, None, Some("candidate_win"), 1)
+            .unwrap();
+        assert_eq!(out, Some(Outcome::CandidateWin));
+    }
+
+    #[test]
+    fn effective_outcome_loss_synthesizes_baseline_win_on_a_candidate_failure() {
+        let out = effective_outcome(
+            FailurePolicy::Loss,
+            None,
+            Some(TrialStatus::Timeout),
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, Some(Outcome::BaselineWin));
+    }
+
+    #[test]
+    fn effective_outcome_loss_synthesizes_candidate_win_on_a_baseline_failure() {
+        let out = effective_outcome(FailurePolicy::Loss, Some(TrialStatus::Crash), None, None, 1)
+            .unwrap();
+        assert_eq!(out, Some(Outcome::CandidateWin));
+    }
+
+    #[test]
+    fn effective_outcome_loss_both_sides_failing_nets_to_a_draw() {
+        let out = effective_outcome(
+            FailurePolicy::Loss,
+            Some(TrialStatus::Invalid),
+            Some(TrialStatus::Crash),
+            None,
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, Some(Outcome::Draw));
+    }
+
+    #[test]
+    fn effective_outcome_loss_overrides_a_literal_result() {
+        // The crash wins even though `result` says `candidate_win` - AGENTS.md's "a false pass
+        // is worse than an inconclusive result" means the execution-level failure signal is
+        // trusted over a same-record `result` field, not the other way around.
+        let out = effective_outcome(
+            FailurePolicy::Loss,
+            None,
+            Some(TrialStatus::Crash),
+            Some("candidate_win"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, Some(Outcome::BaselineWin));
+    }
+
+    #[test]
+    fn effective_outcome_loss_falls_through_to_result_without_a_failure() {
+        let out =
+            effective_outcome(FailurePolicy::Loss, None, None, Some("candidate_win"), 1).unwrap();
+        assert_eq!(out, Some(Outcome::CandidateWin));
+    }
+
+    #[test]
+    fn effective_outcome_malformed_result_next_to_a_failure_is_not_an_error_under_exclude() {
+        // Once a policy has decided the trial's outcome is excluded, an unparseable `result`
+        // alongside it is moot, not silently-ignored invalid data - see `effective_outcome`'s doc.
+        let out = effective_outcome(
+            FailurePolicy::Exclude,
+            None,
+            Some(TrialStatus::Crash),
+            Some("not-a-real-outcome"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn effective_outcome_malformed_result_is_still_an_error_when_actually_consulted() {
+        assert!(matches!(
+            effective_outcome(
+                FailurePolicy::ReportOnly,
+                None,
+                None,
+                Some("not-a-real-outcome"),
+                1
+            ),
+            Err(VeridictError::UnrecognizedOutcome { .. })
+        ));
+    }
+
+    #[test]
     fn winrate_excludes_draws_from_n() {
         let records = [
             (1, rec("a", None, None, Some("candidate_win"), None, None)),
@@ -320,6 +548,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -338,6 +567,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -418,6 +648,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -437,6 +668,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -453,6 +685,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -472,6 +705,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -490,6 +724,7 @@ mod tests {
             std::iter::empty::<(usize, Record)>(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -547,7 +782,9 @@ mod tests {
         ];
         let out = compute(
             records.iter().cloned(),
-            MetricConfig::Elo,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
             0.95,
             1000,
             SEED,
@@ -567,7 +804,9 @@ mod tests {
         ];
         let out = compute(
             records.iter().cloned(),
-            MetricConfig::Elo,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
             0.95,
             1000,
             SEED,
@@ -582,7 +821,9 @@ mod tests {
         let records = [(1, rec("a", None, None, None, Some("timeout"), None))];
         let out = compute(
             records.iter().cloned(),
-            MetricConfig::Elo,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
             0.95,
             1000,
             SEED,
@@ -608,6 +849,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -631,6 +873,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -653,6 +896,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,
@@ -743,7 +987,9 @@ mod tests {
         // total = 1.0 + 0.5 = 1.5 pts across the pair -> net candidate win.
         let out = compute(
             records.iter().cloned(),
-            MetricConfig::Elo,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
             0.95,
             1000,
             SEED,
@@ -768,6 +1014,7 @@ mod tests {
                 },
                 MetricConfig::WinRate {
                     ci_method: CiMethod::Wilson,
+                    failure_policy: FailurePolicy::ReportOnly,
                 },
             ],
             0.95,
@@ -796,6 +1043,7 @@ mod tests {
             &[
                 MetricConfig::WinRate {
                     ci_method: CiMethod::Wilson,
+                    failure_policy: FailurePolicy::ReportOnly,
                 },
                 MetricConfig::MeanDiff {
                     bootstrap_method: BootstrapMethod::Percentile,
@@ -814,6 +1062,7 @@ mod tests {
             records.iter().cloned(),
             MetricConfig::WinRate {
                 ci_method: CiMethod::Wilson,
+                failure_policy: FailurePolicy::ReportOnly,
             },
             0.95,
             1000,

@@ -5,6 +5,7 @@
 //! non-iterative estimate (`trinomial`).
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use veridict::FailurePolicy;
 use veridict::VeridictError;
 use veridict::input::Record;
 use veridict::sprt::{SprtConfig, SprtVariant, run};
@@ -49,6 +50,7 @@ fn bench_pentanomial_sprt_large_jsonl(c: &mut Criterion) {
                 &config,
                 SprtVariant::Pentanomial,
                 true,
+                FailurePolicy::ReportOnly,
             )
             .unwrap()
         });

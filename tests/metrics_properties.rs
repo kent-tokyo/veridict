@@ -10,7 +10,7 @@
 use proptest::prelude::*;
 use veridict::input::Record;
 use veridict::metrics::{compute, compute_many};
-use veridict::{BootstrapMethod, CiMethod, MetricConfig};
+use veridict::{BootstrapMethod, CiMethod, FailurePolicy, MetricConfig};
 
 const SEED: u64 = 0x5EED;
 
@@ -35,10 +35,10 @@ proptest! {
     fn compute_many_matches_independent_compute_calls(records in prop::collection::vec(arb_record(), 1..40)) {
         let records: Vec<(usize, Record)> = records.into_iter().enumerate().map(|(i, r)| (i + 1, r)).collect();
         let metrics = [
-            MetricConfig::WinRate { ci_method: CiMethod::Wilson },
+            MetricConfig::WinRate { ci_method: CiMethod::Wilson, failure_policy: FailurePolicy::ReportOnly },
             MetricConfig::MeanDiff { bootstrap_method: BootstrapMethod::Percentile },
             MetricConfig::SignTest { ci_method: CiMethod::Wilson },
-            MetricConfig::Elo,
+            MetricConfig::Elo { failure_policy: FailurePolicy::ReportOnly },
         ];
 
         let combined = compute_many(records.iter().cloned(), &metrics, 0.95, 1000, SEED, false).unwrap();

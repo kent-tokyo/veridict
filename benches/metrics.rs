@@ -22,7 +22,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use veridict::input::Record;
 use veridict::metrics::{compute, compute_many};
-use veridict::{BootstrapMethod, CiMethod, MetricConfig};
+use veridict::{BootstrapMethod, CiMethod, FailurePolicy, MetricConfig};
 
 const N: usize = 20_000;
 
@@ -54,6 +54,7 @@ fn synthetic_records() -> Vec<(usize, Record)> {
 const ALL_METRICS: [MetricConfig; 4] = [
     MetricConfig::WinRate {
         ci_method: CiMethod::Wilson,
+        failure_policy: FailurePolicy::ReportOnly,
     },
     MetricConfig::MeanDiff {
         bootstrap_method: BootstrapMethod::Percentile,
@@ -61,7 +62,9 @@ const ALL_METRICS: [MetricConfig; 4] = [
     MetricConfig::SignTest {
         ci_method: CiMethod::Wilson,
     },
-    MetricConfig::Elo,
+    MetricConfig::Elo {
+        failure_policy: FailurePolicy::ReportOnly,
+    },
 ];
 // mean-diff's bootstrap resampling dominates total runtime regardless of how
 // many passes over `records` happen, which swamps the single-pass win in a
@@ -71,11 +74,14 @@ const ALL_METRICS: [MetricConfig; 4] = [
 const CHEAP_METRICS: [MetricConfig; 3] = [
     MetricConfig::WinRate {
         ci_method: CiMethod::Wilson,
+        failure_policy: FailurePolicy::ReportOnly,
     },
     MetricConfig::SignTest {
         ci_method: CiMethod::Wilson,
     },
-    MetricConfig::Elo,
+    MetricConfig::Elo {
+        failure_policy: FailurePolicy::ReportOnly,
+    },
 ];
 
 fn bench_single_pass_all_metrics(c: &mut Criterion) {

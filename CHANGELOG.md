@@ -12,6 +12,24 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `--failure-policy report-only|exclude|loss` on `compare --metric winrate`/`--metric elo` and
+  `sprt` (all three `--sprt-variant` choices): controls whether a failed trial affects the
+  *computation*, not just whether it's reported. `report-only` (default) is unchanged from before
+  this flag existed. `exclude`/`loss` are config errors for `--metric mean-diff`/`--metric
+  sign-test`, which have no win/loss/draw outcome for a failed numeric trial to become. See
+  `docs/metrics.md`'s new `--failure-policy` section for the exact semantics, including how a
+  `loss`-synthesized outcome interacts with `--paired-by-id` netting.
+
+### Changed
+
+- **Breaking**: `MetricConfig::new` takes a new `failure_policy: FailurePolicy` parameter;
+  `MetricConfig::Elo` changed from a unit variant to `Elo { failure_policy: FailurePolicy }`
+  (`WinRate` gained the same field). `sprt::run` takes a new `failure_policy: FailurePolicy`
+  parameter. Report JSON shapes are unchanged - this only affects direct library callers, not the
+  CLI or any JSON schema.
+
 ## [0.4.0] - 2026-07-08
 
 Purely additive - no breaking changes since `0.3.0`.

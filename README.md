@@ -222,7 +222,27 @@ even score is 0 Elo). All three compose directly with `--min-effect`.
 Every trial's `baseline_status`/`candidate_status` (`timeout`, `crash`,
 `invalid`) is tallied and reported regardless of which metric you run, both
 combined and broken down by which side failed (`failure_breakdown` in the
-JSON report).
+JSON report). `--failure-policy` (on `compare --metric winrate`/`--metric elo`
+and `sprt`, all three `--sprt-variant` choices) controls whether a failure
+also affects the *computation*, not just the report:
+
+* **`report-only`** (default) - unchanged from before this flag existed: a
+  failure is tallied, but a status-only record (no `result`) still
+  contributes nothing to the metric either way. A record carrying *both* a
+  failure status and a `result` still has that `result` counted.
+* **`exclude`** - a failed side's `result` is never counted, even when
+  present alongside the status. Only diverges from `report-only` in that
+  mixed-field case - the common status-only case already behaves the same
+  under both.
+* **`loss`** - a failed side's outcome is synthesized instead of read from
+  `result`: candidate failed -> `baseline_win`, baseline failed ->
+  `candidate_win`, both failed -> `draw`. This *overrides* any literal
+  `result` on the same record - a failure status is trusted over whatever
+  `result` says next to it.
+
+`exclude`/`loss` only apply to outcome-based metrics (`winrate`/`elo`);
+requesting either with `--metric mean-diff`/`--metric sign-test` is a config
+error, not an arbitrary numeric penalty for a failed numeric trial.
 
 Requesting several `--metric` flags together scans the input once, feeding
 every record to every requested metric, rather than one full pass per
@@ -314,6 +334,11 @@ positive/negative rates, not tunable knobs on a report - there's no
 
 See [`docs/metrics.md`](docs/metrics.md) for the full mechanics of all
 three variants, including the BayesElo/logistic-Elo unit conversion.
+
+`sprt` also accepts `--failure-policy` (see [Metrics](#metrics) for the exact
+`report-only`/`exclude`/`loss` semantics) - applies identically across all three
+`--sprt-variant` choices, including `pentanomial`: a `loss`-synthesized outcome nets
+against its pair partner the same way any other outcome would.
 
 ## Comparison matrix
 

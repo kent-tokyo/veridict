@@ -66,6 +66,20 @@ with `verdict::aggregate`'s existing "any fail sinks the whole run" logic in a w
 thinking through (correction changes *which* individual verdicts are significant, not how they
 combine).
 
+### `--failure-policy` for `matrix`
+
+**What it is:** `compare`/`sprt` support `--failure-policy report-only`/`exclude`/`loss` (see
+`docs/metrics.md`); `matrix` doesn't - every candidate's failures are still tallied and reported
+per-candidate, but always behave as `report-only`.
+
+**Why not yet:** `matrix` has no verdict for a failure policy to influence (it's report-only by
+design - see the README's "Comparison matrix" section), unlike `compare`/`sprt` where `loss`
+changes which side of a threshold/LLR boundary a run lands on. No concrete workflow has asked for
+`matrix`'s per-candidate Elo estimates themselves to treat a failure as a loss yet.
+
+**What would change this:** a concrete request to have a candidate's crash/timeout rate pull its
+own Elo estimate down in a matrix run, not just get reported alongside it.
+
 ## Deliberately out of scope
 
 veridict judges results; it does not produce them. These are not "not yet" items - they're

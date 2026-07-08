@@ -181,7 +181,13 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 
 `winrate` と `sign-test` は `effect`/`ci_low`/`ci_high` を0を中心とした値(五分五分からの偏差)として報告します。`elo` も構造上0を中心とします(五分の成績は0 Elo)。この3つはいずれも `--min-effect` とそのまま組み合わせられます。`mean-diff` は入力そのものの単位で報告します。
 
-各トライアルの `baseline_status`/`candidate_status`(`timeout`、`crash`、`invalid`)は、どのメトリクスを実行してもタリーされ、レポートに含まれます。合計値だけでなく、どちら側で失敗したかの内訳(JSONレポートの `failure_breakdown`)も出力されます。
+各トライアルの `baseline_status`/`candidate_status`(`timeout`、`crash`、`invalid`)は、どのメトリクスを実行してもタリーされ、レポートに含まれます。合計値だけでなく、どちら側で失敗したかの内訳(JSONレポートの `failure_breakdown`)も出力されます。`--failure-policy`(`compare --metric winrate`/`--metric elo` と `sprt` の全 `--sprt-variant` で使用可能)は、失敗がレポートだけでなく*計算そのもの*にも影響するかどうかを制御します:
+
+* **`report-only`**(デフォルト) - このフラグが存在する前と変わりません: 失敗はタリーされますが、ステータスのみのレコード(`result` なし)はどちらにせよメトリクスに何も寄与しません。失敗ステータスと `result` の両方を持つレコードは、引き続き `result` がカウントされます。
+* **`exclude`** - 失敗した側の `result` は、ステータスと同居していてもカウントされません。`report-only` と異なるのはこの混在ケースだけで、ステータスのみの一般的なケースはどちらでも同じ挙動です。
+* **`loss`** - 失敗した側の結果を `result` から読む代わりに合成します: candidateが失敗 -> `baseline_win`、baselineが失敗 -> `candidate_win`、両方失敗 -> `draw`。これは同じレコード上の `result` を*上書き*します - `result` が何と言っていようと、失敗ステータスの方が信頼されます。
+
+`exclude`/`loss` は勝敗ベースのメトリクス(`winrate`/`elo`)にのみ適用されます。`--metric mean-diff`/`--metric sign-test` と組み合わせるのは設定エラーです - 失敗した数値トライアルに恣意的なペナルティを課す原理的な方法がないためです。
 
 複数の `--metric` を同時に指定した場合も、入力全体のスキャンは1回だけです(メトリクスの数だけスキャンを繰り返すのではなく、1回のスキャンで全メトリクスに各レコードを渡します)。
 
@@ -214,6 +220,10 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
   レポートには `sprt_variant`(全バリアント共通)に加えて、`pentanomial` のときだけ `pentanomial_counts`(LLR計算に使った5値の内訳)、`raw_trial_count`(ペア化前の入力レコード総数)、`paired_count`(完全なペアの数)が追加されます。既存の `candidate_wins`/`baseline_wins`/`draws` も、同じ5値を通常の「ペア対局」規約(合計 `>1` は候補側の正味勝ち、`<1` は基準側の正味勝ち、ちょうど `1` は正味引き分け)で正味化した値として引き続き入ります。
 
 3つのバリアントすべての詳細な仕組み(BayesEloとロジスティックEloの単位変換を含む)は [`docs/metrics_ja.md`](docs/metrics_ja.md) を参照してください。
+
+`sprt` も `--failure-policy` を受け付けます(正確な `report-only`/`exclude`/`loss` の意味は
+[メトリクス](#メトリクス)を参照) - 3つの `--sprt-variant` すべてで同じように適用され、
+`pentanomial` でも `loss` によって合成された結果がペアの相手と通常どおり正味化されます。
 
 ## 比較マトリクス(comparison matrix)
 

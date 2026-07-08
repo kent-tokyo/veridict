@@ -52,6 +52,16 @@ pub enum VeridictError {
     },
 
     #[error(
+        "--failure-policy {policy} is only supported for metric winrate or elo (got {metric}); \
+         mean-diff/sign-test have no win/loss/draw outcome for a failed trial to become, so \
+         there's no principled way to exclude or lose a numeric trial"
+    )]
+    IncompatibleFailurePolicy {
+        policy: &'static str,
+        metric: &'static str,
+    },
+
+    #[error(
         "line {line}: invalid numeric value in field '{field}': {value} (NaN/Infinity not allowed)"
     )]
     InvalidValue {

@@ -70,7 +70,7 @@ use crate::error::VeridictError;
 use crate::input::{MatchRecord, Record};
 use crate::stats::bradley_terry::{self, PairRecord};
 use crate::stats::{elo as elo_math, wilson};
-use crate::{BootstrapMethod, MatchOutcome, MetricConfig, metrics};
+use crate::{BootstrapMethod, FailurePolicy, MatchOutcome, MetricConfig, metrics};
 
 const BASELINE: &str = "baseline";
 
@@ -362,8 +362,19 @@ where
         let (name, records) = item?;
         // resamples/seed are mean-diff-only knobs; elo ignores them - unlike
         // CiMethod/BootstrapMethod, MetricConfig::Elo makes that structural
-        // rather than passed-but-unused.
-        let out = metrics::compute(records, MetricConfig::Elo, confidence, 1, 0, paired_by_id)?;
+        // rather than passed-but-unused. `matrix` has no `--failure-policy` of
+        // its own (no verdict for one to influence - see docs/research-map.md),
+        // so this always runs report-only, unchanged from before that flag existed.
+        let out = metrics::compute(
+            records,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
+            confidence,
+            1,
+            0,
+            paired_by_id,
+        )?;
         let draws = out
             .paired_count
             .saturating_sub(out.baseline_count)

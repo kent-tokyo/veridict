@@ -9,22 +9,31 @@
 use crate::error::VeridictError;
 use crate::input::Record;
 use crate::metrics::common::OutcomeCollector;
-use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
+use crate::metrics::{
+    FailureBreakdown, MetricAggregator, MetricOutput, effective_outcome, metric_label,
+};
 use crate::stats::{exact, jeffreys, wilson};
-use crate::{CiMethod, MetricKind};
+use crate::{CiMethod, FailurePolicy, MetricKind, TrialStatus};
 
 pub(crate) struct WinRateAggregator {
     collector: OutcomeCollector,
     confidence: f64,
     ci_method: CiMethod,
+    failure_policy: FailurePolicy,
 }
 
 impl WinRateAggregator {
-    pub(crate) fn new(confidence: f64, paired_by_id: bool, ci_method: CiMethod) -> Self {
+    pub(crate) fn new(
+        confidence: f64,
+        paired_by_id: bool,
+        ci_method: CiMethod,
+        failure_policy: FailurePolicy,
+    ) -> Self {
         Self {
             collector: OutcomeCollector::new(paired_by_id),
             confidence,
             ci_method,
+            failure_policy,
         }
     }
 }
@@ -34,21 +43,19 @@ impl MetricAggregator for WinRateAggregator {
         &mut self,
         line: usize,
         record: &Record,
-        has_status: bool,
+        baseline_status: Option<TrialStatus>,
+        candidate_status: Option<TrialStatus>,
     ) -> Result<(), VeridictError> {
-        let mut used = has_status;
-        if let Some(result) = record.result.as_deref() {
-            used = true;
-            match crate::Outcome::parse(result) {
-                Some(outcome) => self.collector.record(line, record.id.as_deref(), outcome),
-                None => {
-                    return Err(VeridictError::UnrecognizedOutcome {
-                        line,
-                        value: result.to_string(),
-                        expected: "baseline_win|candidate_win|draw",
-                    });
-                }
-            }
+        let used =
+            baseline_status.is_some() || candidate_status.is_some() || record.result.is_some();
+        if let Some(outcome) = effective_outcome(
+            self.failure_policy,
+            baseline_status,
+            candidate_status,
+            record.result.as_deref(),
+            line,
+        )? {
+            self.collector.record(line, record.id.as_deref(), outcome);
         }
         if !used {
             return Err(VeridictError::SchemaMismatch {
