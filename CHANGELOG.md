@@ -12,6 +12,8 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-08
+
 ### Added
 
 - `--failure-policy report-only|exclude|loss` on `compare --metric winrate`/`--metric elo` and
