@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-08
+
+Purely additive - no breaking changes since `0.5.0`.
+
 ### Added
 
 - `veridict plan`: given the same input `matrix` accepts (legacy files and/or `--matches`) plus a
