@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-09
+
+Purely additive - no breaking changes since `0.6.0`.
+
 ### Added
 
 - `veridict power`: estimates how many trials `compare --metric winrate/sign-test/elo` would need
