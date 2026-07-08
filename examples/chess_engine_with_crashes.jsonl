@@ -1,0 +1,10 @@
+{"id":"opening-001","result":"candidate_win"}
+{"id":"opening-002","result":"candidate_win"}
+{"id":"opening-003","result":"baseline_win"}
+{"id":"opening-004","result":"candidate_win"}
+{"id":"opening-005","result":"draw"}
+{"id":"opening-006","result":"candidate_win"}
+{"id":"opening-007","baseline_status":"ok","candidate_status":"crash"}
+{"id":"opening-008","baseline_status":"ok","candidate_status":"timeout"}
+{"id":"opening-009","result":"baseline_win"}
+{"id":"opening-010","result":"candidate_win"}

@@ -102,6 +102,13 @@ veridict compare results.jsonl --metric winrate --ci-method exact
 veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
 ```
 
+Treat a candidate crash/timeout as a loss instead of just reporting it (see [Metrics](#metrics)
+for `report-only`/`exclude`/`loss`'s exact semantics):
+
+```bash
+veridict compare examples/chess_engine_with_crashes.jsonl --metric winrate --failure-policy loss
+```
+
 Sequential testing: keep feeding it results until it can confidently say
 the candidate is at least `--elo1` points stronger (pass), at most `--elo0`
 points stronger (fail), or it needs more data (inconclusive):
@@ -169,6 +176,8 @@ See `examples/`:
   `veridict sprt --sprt-variant trinomial` (see [SPRT](#sprt)).
 * `examples/chess_engine_paired_openings.jsonl` - each `id` appears exactly twice (same opening,
   colors swapped), for `veridict sprt --sprt-variant pentanomial --paired-by-id` (see [SPRT](#sprt)).
+* `examples/chess_engine_with_crashes.jsonl` - win/loss/draw records with a couple of candidate
+  failures mixed in, for `--failure-policy loss` (see [Metrics](#metrics)).
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}

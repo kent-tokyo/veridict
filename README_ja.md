@@ -96,6 +96,13 @@ veridict compare results.jsonl --metric winrate --ci-method exact
 veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
 ```
 
+candidateのクラッシュ/タイムアウトを、単に報告するだけでなく敗北として扱う(正確な
+`report-only`/`exclude`/`loss` の意味は[メトリクス](#メトリクス)を参照):
+
+```bash
+veridict compare examples/chess_engine_with_crashes.jsonl --metric winrate --failure-policy loss
+```
+
 逐次検定(sequential testing): 候補が少なくとも `--elo1` ポイント強いと確信できるまで(pass)、あるいは高々 `--elo0` ポイントの強さだと確信できるまで(fail)、もしくはデータが足りない(inconclusive)と判定されるまで、結果を投入し続けます:
 
 ```bash
@@ -157,6 +164,8 @@ veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
   `veridict sprt --sprt-variant trinomial` 用([SPRT](#sprt)参照)。
 * `examples/chess_engine_paired_openings.jsonl` - 各 `id` がちょうど2回ずつ出現(同じ開始局面を
   先後入れ替え)。`veridict sprt --sprt-variant pentanomial --paired-by-id` 用([SPRT](#sprt)参照)。
+* `examples/chess_engine_with_crashes.jsonl` - 勝敗/引き分けレコードにcandidate側の失敗を数件
+  混ぜたもの。`--failure-policy loss` 用([メトリクス](#メトリクス)参照)。
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}
