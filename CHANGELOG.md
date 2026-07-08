@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-08
+
+Purely additive - no breaking changes since `0.3.0`.
+
 ### Added
 
 - `sprt --sprt-variant pentanomial`: a generalized LLR test over paired games (same opening,
