@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-09
+
+Purely additive - no breaking changes since `0.7.0`.
+
 ### Added
 
 - `veridict power --sprt`: estimates the expected number of trials to an SPRT decision under each
@@ -24,10 +28,13 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
   `--metric`/`--min-effect`/`--assume-effect`/`--confidence`/`--target-power`/`--ci-method`, not a
   new `--metric` value. The formula's `alpha'(H)`/boundary pairing was corrected before
   implementation (an earlier draft had it backwards, which would have produced a negative expected
-  sample size under H1 - see `docs/research-map.md`). Wald's ASN is a known approximation (ignores
-  "overshoot"); the real bias is measured empirically via a new Monte Carlo calibration test
-  (`tests/calibration/sprt_asn_calibration.rs`), not just cited. New
-  `schemas/power-sprt-report.schema.json`. See `docs/metrics.md`'s new `power --sprt` section.
+  sample size under H1 - see `docs/research-map.md`). Two caveats measured empirically rather than
+  left as cited theory (`tests/calibration/sprt_asn_calibration.rs`): Wald's ASN ignores
+  "overshoot" (real runs need ~1-2% more trials than the formula predicts), and more significantly,
+  `expected_trials_under_h0`/`expected_trials_under_h1` are the two optimistic endpoints, not the
+  expected sample size for a candidate of unknown strength - ASN peaks between the two hypotheses,
+  ~1.6x either endpoint at the same config. New `schemas/power-sprt-report.schema.json`. See
+  `docs/metrics.md`'s new `power --sprt` section.
 
 ## [0.7.0] - 2026-07-09
 
