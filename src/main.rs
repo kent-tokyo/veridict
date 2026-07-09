@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use veridict::correction::Correction;
 use veridict::sprt::{SprtConfig, SprtVariant};
-use veridict::stats::bootstrap::DEFAULT_SEED;
+use veridict::stats::bootstrap::{DEFAULT_SEED, sample_sd};
 use veridict::verdict::{self, Thresholds};
 use veridict::{
     BootstrapMethod, CiMethod, FailurePolicy, MetricConfig, MetricKind, Verdict, VeridictError,
@@ -42,8 +42,9 @@ enum Command {
     /// more trials, ranked most-uncertain first. Report-only, same input as `matrix`.
     Plan(PlanArgs),
     /// Pre-experiment sample-size estimate: how many trials would `compare` need for a target
-    /// probability of reaching a passing verdict. Report-only, no input file - a pure calculation
-    /// from flags.
+    /// probability of reaching a passing verdict. Report-only, a pure calculation from flags -
+    /// except `--metric mean-diff --pilot FILE`, which reads real pilot data to estimate a
+    /// standard deviation from (the one input file this subcommand takes).
     Power(PowerArgs),
 }
 
@@ -355,9 +356,28 @@ struct PowerArgs {
 
     /// Accepted but does not change the estimate - see `docs/metrics.md`'s `power` section for
     /// why the actual variance reduction from pairing can't be predicted without real data. Adds
-    /// a caveat to the report's `notes` instead.
+    /// a caveat to the report's `notes` instead. For `--metric mean-diff --pilot FILE`, this DOES
+    /// change the estimate - same-id records in the pilot data are netted before estimating a
+    /// standard deviation, same as `compare --paired-by-id` itself.
     #[arg(long, conflicts_with = "sprt")]
     paired_by_id: bool,
+
+    /// Assumed standard deviation of the paired (candidate - baseline) difference, for --metric
+    /// mean-diff (mean-diff has no closed-form CI to search a hypothetical n against, so power
+    /// analysis needs this assumption from the caller instead). Mutually exclusive with --pilot;
+    /// exactly one is required when --metric mean-diff, neither is accepted otherwise.
+    #[arg(long, conflicts_with_all = ["pilot", "sprt"])]
+    assume_sd: Option<f64>,
+
+    /// Pilot data file (same JSONL/CSV format as `compare`'s input) to estimate --metric
+    /// mean-diff's standard deviation from, instead of supplying --assume-sd directly. Use "-" to
+    /// read from stdin.
+    #[arg(long, conflicts_with_all = ["assume_sd", "sprt"])]
+    pilot: Option<PathBuf>,
+
+    /// Format override for --pilot; same sniffing rules as `compare --format`.
+    #[arg(long, value_enum, conflicts_with = "sprt")]
+    pilot_format: Option<FormatArg>,
 
     /// Estimate SPRT's expected sample size (Wald's ASN approximation) instead of a
     /// CI-crossing-probability search. Requires --elo0/--elo1; mutually exclusive with
@@ -394,11 +414,12 @@ struct PowerArgs {
     report_md: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PowerMetricArg {
     Winrate,
     SignTest,
     Elo,
+    MeanDiff,
 }
 
 impl From<PowerMetricArg> for MetricKind {
@@ -407,7 +428,18 @@ impl From<PowerMetricArg> for MetricKind {
             PowerMetricArg::Winrate => MetricKind::WinRate,
             PowerMetricArg::SignTest => MetricKind::SignTest,
             PowerMetricArg::Elo => MetricKind::Elo,
+            PowerMetricArg::MeanDiff => MetricKind::MeanDiff,
         }
+    }
+}
+
+/// A label for `AssumeSdOnlyForMeanDiff`'s error message; matches the CLI's `--metric` spelling.
+fn power_metric_arg_label(m: PowerMetricArg) -> &'static str {
+    match m {
+        PowerMetricArg::Winrate => "winrate",
+        PowerMetricArg::SignTest => "sign-test",
+        PowerMetricArg::Elo => "elo",
+        PowerMetricArg::MeanDiff => "mean-diff",
     }
 }
 
@@ -672,6 +704,59 @@ fn resolve_sprt_hypotheses(args: &SprtArgs) -> Result<(f64, f64, SprtVariant), V
     }
 }
 
+/// Resolves `power --metric mean-diff`'s assumed standard deviation from exactly one of
+/// `--assume-sd`/`--pilot` - only ever called once the caller has already confirmed `--metric
+/// mean-diff` (see `run_power`), mirroring `resolve_sprt_hypotheses`'s own shape: a runtime check
+/// rather than fought through clap's declarative attributes, since "exactly one of two optional
+/// flags, required only for one enum value" isn't cleanly expressible there. Returns `(sd, source,
+/// extra_notes)` - `extra_notes` carries pilot-specific caveats (tiny-sample, small-pilot-t-
+/// correction) `power::estimate_trials` has no way to know about, since it never touches a file.
+fn resolve_assume_sd(args: &PowerArgs) -> Result<(f64, &'static str, Vec<String>), VeridictError> {
+    match (args.assume_sd, &args.pilot) {
+        (Some(sd), None) => {
+            if !sd.is_finite() || sd <= 0.0 {
+                return Err(VeridictError::InvalidAssumeSd(sd));
+            }
+            Ok((sd, "assume-sd", Vec::new()))
+        }
+        (None, Some(pilot_path)) => {
+            let format = resolve_format(pilot_path, args.pilot_format);
+            let records = read_records(pilot_path, format)?;
+            let diffs = power::pilot_diffs(records, args.paired_by_id)?;
+            if diffs.len() < 2 {
+                return Err(VeridictError::InsufficientPilotData {
+                    path: pilot_path.display().to_string(),
+                    count: diffs.len(),
+                });
+            }
+            let sd = sample_sd(&diffs);
+            if sd == 0.0 {
+                return Err(VeridictError::ZeroVariancePilotData {
+                    path: pilot_path.display().to_string(),
+                    count: diffs.len(),
+                });
+            }
+            let mut notes = Vec::new();
+            if diffs.len() < 30 {
+                notes.push(format!(
+                    "--pilot '{}' has only {} usable paired diff(s) - below the conventional \
+                     30-observation threshold for the sample standard deviation itself to be a \
+                     reliable estimate; treat assume_sd as a rougher guess than usual. Also, \
+                     normal quantiles (used here) slightly underestimate the required n relative \
+                     to a small-sample t-distribution correction, which isn't applied.",
+                    pilot_path.display(),
+                    diffs.len(),
+                ));
+            }
+            Ok((sd, "pilot", notes))
+        }
+        (None, None) => Err(VeridictError::MeanDiffPowerRequiresSd),
+        (Some(_), Some(_)) => {
+            unreachable!("clap's conflicts_with_all already rejects --assume-sd with --pilot")
+        }
+    }
+}
+
 fn run_matrix(args: MatrixArgs) -> Result<ExitCode, VeridictError> {
     let format = args.format;
     let mut seen_names = std::collections::HashSet::new();
@@ -771,14 +856,33 @@ fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
         (report.to_json_pretty(), report.to_markdown())
     } else {
         // clap's `required_unless_present = "sprt"` on these three guarantees `Some` here.
-        let ci_method: CiMethod = args.ci_method.into();
-        let metric = power::PowerMetric::new(
-            args.metric
-                .expect("clap requires --metric without --sprt")
-                .into(),
-            ci_method,
-        )?;
-        let report = power::estimate_trials(
+        let metric_arg = args.metric.expect("clap requires --metric without --sprt");
+        if metric_arg != PowerMetricArg::MeanDiff
+            && (args.assume_sd.is_some() || args.pilot.is_some())
+        {
+            return Err(VeridictError::AssumeSdOnlyForMeanDiff {
+                metric: power_metric_arg_label(metric_arg),
+            });
+        }
+
+        let (metric, extra_notes) = if metric_arg == PowerMetricArg::MeanDiff {
+            let (assume_sd, sd_source, extra_notes) = resolve_assume_sd(&args)?;
+            (
+                power::PowerMetric::MeanDiff {
+                    assume_sd,
+                    sd_source,
+                },
+                extra_notes,
+            )
+        } else {
+            let ci_method: CiMethod = args.ci_method.into();
+            (
+                power::PowerMetric::new(metric_arg.into(), ci_method)?,
+                Vec::new(),
+            )
+        };
+
+        let mut report = power::estimate_trials(
             metric,
             args.min_effect
                 .expect("clap requires --min-effect without --sprt"),
@@ -788,6 +892,7 @@ fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
             args.target_power,
             args.paired_by_id,
         )?;
+        report.notes.extend(extra_notes);
         (report.to_json_pretty(), report.to_markdown())
     };
 

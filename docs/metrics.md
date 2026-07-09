@@ -322,11 +322,8 @@ has run - there's nothing to measure it from. `power` accepts the flag and adds 
 report's `notes` rather than silently applying an invented correction factor: treat the reported
 number as a conservative (unpaired) upper bound when pairing is planned.
 
-**Why `mean-diff` isn't supported.** No closed-form CI-width-at-n function exists for a bootstrap
-CI without real resampled data (the same reason `estimated_additional_trials` falls back to an
-`O(1/sqrt(n))` approximation for it post-hoc) - but pre-experiment there is no fallback available
-either, since there's no existing sample to approximate a variance from at all. Rejected at the CLI
-flag-parsing level (a distinct `--metric` enum from `compare`'s own), not silently ignored.
+**`mean-diff` is a closed-form calculation, not this search** - see `### power --metric mean-diff`
+below.
 
 **Why the output is a design estimate, not a guarantee.** `estimated_trials` assumes the true
 effect is *exactly* `--assume-effect`. A smaller real effect needs more trials than this number
@@ -388,6 +385,69 @@ same "decisive games only" convention `winrate`/`sign-test` already use). A draw
 needs more real games than `expected_trials_under_h0`/`expected_trials_under_h1` says - use
 `--sprt-variant trinomial`/`pentanomial` for draw-heavy testing, and treat this number as a
 decisive-trials estimate, not a total-games one.
+
+### `power --metric mean-diff`
+
+**A closed-form calculation, not the search above.** `mean-diff` has no closed-form CI-width-at-n
+function without real resampled data (the same reason `estimated_additional_trials` falls back to
+an `O(1/sqrt(n))` approximation for it post-hoc) - but pre-experiment there's no fallback
+available either, since there's no existing sample to approximate a variance from at all. Given an
+assumed standard deviation from the caller (`--assume-sd <f64>`, or estimated from real pilot data
+via `--pilot FILE`), modeling the sample mean of `n` diffs as `Normal(assume_effect,
+assume_sd^2/n)` - the standard pre-experiment assumption, since there's no real data yet to
+bootstrap - makes the power calculation continuous and monotone in `n`, unlike the discrete
+binomial case above: there's an exact closed-form solution, so `power --metric mean-diff` doesn't
+run a search at all.
+
+**The formula:**
+
+```
+z_conf  = inverse_normal_cdf((1 + confidence) / 2)   // two-sided quantile - see below
+z_power = inverse_normal_cdf(target_power)
+n       = ceil( ((z_conf + z_power) * assume_sd / (assume_effect - min_effect))^2 )
+achieved_power = Phi( (assume_effect - min_effect) * sqrt(n) / assume_sd - z_conf )
+```
+
+**`z_conf` must be the two-sided quantile - the one correctness subtlety here, and it's the same
+one that already shaped this project's design twice before.** `compare`'s own CI is built as an
+ordinary *two-sided* `(1-confidence)` interval and then read one-sidedly (only the lower bound
+matters for a pass); `wilson_ci_from_proportion` computes its own `z` the same way
+(`inverse_normal_cdf(1 - alpha/2)`, i.e. exactly `inverse_normal_cdf((1+confidence)/2)` - 1.96 at
+95% confidence, not the one-sided 1.645). Using the one-sided quantile here would compute *fewer*
+trials than actually needed - the optimistic, false-pass-prone direction this project exists to
+avoid. This is the same "a two-sided CI read one-sidedly only carries half its nominal budget in
+that tail" fact that already shaped `power`'s two-effect-value design (above) and
+`--correction`'s `alpha/2` family target (see that section) - verified consistent here by
+construction, not re-derived from scratch, and confirmed independently before implementation.
+
+**This is a normal approximation of a real bootstrap decision rule, not an exact search against
+one - a different kind of estimate from `winrate`/`sign-test`/`elo`'s.** There's no real data
+pre-experiment to bootstrap, so a normal model of the paired differences is the standard
+assumption; `report.method` says `normal_approximation_closed_form`, not
+`exact_binomial_search`, and `report.ci_method` says `"normal"` (a label, not a real `--ci-method`
+choice). For skewed real diffs, the bootstrap CI `compare` actually computes and this normal
+estimate will diverge - `tests/calibration/power_mean_diff_calibration.rs` measures the real gap
+empirically (drawing synthetic normal diffs and running them through the actual bootstrap rule via
+`compare_one`, not a simulated approximation of it): at two tested configs, empirical pass rate
+tracked `target_power` within ~0.004-0.015, no systematic directional bias the way SPRT's ASN
+formula had one.
+
+**`assume_sd` is the standard deviation of the paired *difference* (`candidate - baseline`), not
+either arm's own standard deviation.** The classic paired-design mislabeling risk: using an arm's
+own SD here understates the true variance for anything but a perfectly correlated pair, silently
+corrupting every number downstream. `--pilot FILE` computes this correctly by construction - the
+same `(candidate - baseline)` diffs `compare --metric mean-diff` itself computes, via the same
+`DiffCollector` (including `--paired-by-id` netting), just without the bootstrap step (there's
+nothing to bootstrap-check pre-experiment; only the sample standard deviation of the diffs is
+needed).
+
+**`--pilot FILE`'s caveats.** Fewer than 2 usable diffs, or a pilot with zero variance (every diff
+identical), is rejected as a clear error rather than producing `NaN`/`0` silently. Fewer than 30
+diffs (the same conventional threshold `data_quality.tiny_sample` already uses elsewhere) adds a
+note: the sample standard deviation itself is a rougher estimate at that size, and normal
+quantiles (used here) slightly underestimate the required `n` relative to a small-sample
+`t`-distribution correction, which this round doesn't implement - a documented caveat, not a
+silently wrong number.
 
 ## `pass` / `fail` / `inconclusive`
 

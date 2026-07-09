@@ -166,6 +166,14 @@ Estimate how many trials you'd need, before running a real `compare`:
 veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
 ```
 
+For `--metric mean-diff`, supply an assumed standard deviation directly or estimate one from real
+pilot data:
+
+```bash
+veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --assume-sd 0.15
+veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --pilot examples/pilot_scores.jsonl
+```
+
 Or estimate SPRT's expected sample size under each hypothesis directly:
 
 ```bash
@@ -548,10 +556,49 @@ Two effect values are **both required**, and `--assume-effect` must exceed `--mi
 
 `estimated_trials` is found by an *exact* search (`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >=
 p0]`, not a textbook approximation) against the same real `wilson`/`exact`/`jeffreys` CI functions
-`compare` itself uses (`elo` accepts only `wilson`, same as `compare --metric elo`). `mean-diff`
-isn't supported (no variance to assume pre-experiment - rejected at the flag level, not silently
-ignored). `--paired-by-id` is accepted but doesn't change the number - see the docs section for
-why.
+`compare` itself uses (`elo` accepts only `wilson`, same as `compare --metric elo`).
+`--paired-by-id` is accepted but doesn't change the number - see the docs section for why.
+
+`--metric mean-diff` is a closed-form calculation instead of that search - there's no closed-form
+CI-width-at-n function for a bootstrap CI, so it needs an assumed standard deviation of the paired
+difference from you, either directly (`--assume-sd`) or estimated from real pilot data
+(`--pilot FILE`):
+
+```console
+$ veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --assume-sd 0.15
+{
+  "schema_version": 1,
+  "metric": "mean-diff",
+  "ci_method": "normal",
+  "min_effect": 0.02,
+  "assume_effect": 0.1,
+  "confidence": 0.95,
+  "target_power": 0.8,
+  "estimated_trials": 28,
+  "achieved_power": 0.805703217265413,
+  "method": "normal_approximation_closed_form",
+  "notes": [
+    "This is a normal approximation of compare --metric mean-diff's real bootstrap decision rule, not an exact search against it: there is no real data pre-experiment to bootstrap, so a normal model of the paired differences is the standard assumption. For skewed real diffs the bootstrap CI and this estimate will diverge - treat this as a design estimate for how much data to collect, not a guarantee about what a real run will show.",
+    "assume_sd is the standard deviation of the paired difference (candidate - baseline), not either arm's own standard deviation - using an arm's SD here would understate the true variance for anything but a perfectly correlated pair."
+  ],
+  "assume_sd": 0.15,
+  "sd_source": "assume-sd"
+}
+```
+
+Or estimate that same standard deviation from real pilot data instead of guessing it:
+
+```console
+$ veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --pilot examples/pilot_scores.jsonl
+```
+
+**`assume_sd` is the standard deviation of the paired *difference* (`candidate - baseline`), not
+either arm's own standard deviation** - the classic paired-design mislabeling risk; getting this
+wrong silently corrupts every number downstream. See
+[`docs/metrics.md`](docs/metrics.md)'s `power --metric mean-diff` section for the formula, why
+`z_conf` must be the two-sided confidence quantile (the same correctness point behind `power`'s
+own two-effect-value design and `--correction`'s `alpha/2` family target), and `--pilot`'s
+tiny-sample/small-pilot caveats.
 
 `--sprt` switches to a structurally different question: Wald's SPRT already guarantees its
 `alpha`/`beta` error rates regardless of `n`, so there's no target power to search a sample size

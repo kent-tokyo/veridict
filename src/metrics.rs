@@ -16,7 +16,7 @@ mod mean_diff;
 mod sign_test;
 mod winrate;
 
-pub(crate) use common::OutcomeCollector;
+pub(crate) use common::{DiffCollector, OutcomeCollector};
 use serde::Serialize;
 use std::collections::HashMap;
 

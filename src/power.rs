@@ -43,13 +43,24 @@
 //! bias: `power` is a design aid for choosing how much data to collect, never a substitute for the
 //! real confidence interval `compare` computes from the data that's actually observed.
 //!
-//! **Why `mean-diff` isn't supported here.** No closed-form CI-width-at-n function exists for a
-//! bootstrap CI without real resampled data (same reason `estimate_additional_trials` falls back
-//! to an `O(1/sqrt(n))` approximation for it) - but *unlike* that post-hoc case, there is no
-//! fallback available pre-experiment either, since there's no existing sample to approximate a
-//! variance from. `PowerMetric::new` rejects `MetricKind::MeanDiff` with a real error (not
-//! `unreachable!()`) since it's a `pub` constructor a library caller could reach directly, even
-//! though the CLI's own `PowerMetricArg` already excludes it at the flag-parsing level.
+//! **`mean-diff` is a closed-form calculation, not a search.** No closed-form CI-width-at-n
+//! function exists for a bootstrap CI without real resampled data (same reason
+//! `estimate_additional_trials` falls back to an `O(1/sqrt(n))` approximation for it), and unlike
+//! that post-hoc case there's no fallback available pre-experiment either - so `mean-diff` power
+//! needs an assumed standard deviation of the paired difference from the caller (`--assume-sd`, or
+//! estimated from real pilot data via `--pilot FILE`). Given that, modeling the sample mean of `n`
+//! diffs as `Normal(assume_effect, assume_sd^2/n)` - the standard pre-experiment assumption, since
+//! there's no real data yet to bootstrap - makes the power calculation **continuous and monotone
+//! in `n`**, unlike the binomial case above: there is an exact closed-form solution, and searching
+//! for it the way `estimate_smallest_n` does would import that function's "sawtooth" complexity
+//! for a problem that doesn't have it. See `estimate_trials_mean_diff`'s doc for the formula and
+//! its one real correctness subtlety (the confidence quantile must be two-sided, matching how
+//! `compare`'s own CI is read one-sidedly - the same fact that shaped this module's two-effect-
+//! value design above). `PowerMetric::new`'s flat `(kind, ci_method)` constructor still rejects
+//! `MetricKind::MeanDiff` (mean-diff needs an assumed SD, not a `ci_method`, so that shape
+//! genuinely doesn't fit) - construct `PowerMetric::MeanDiff { assume_sd, sd_source }` directly
+//! instead, the same "carry only what a variant needs, construct it directly when you already
+//! know the shape" pattern `MetricConfig`'s own doc establishes.
 //!
 //! **`--sprt` mode is a structurally different question, not a variant of the search above.**
 //! Wald's SPRT guarantees its `alpha`/`beta` error rates by construction, regardless of `n` - there
@@ -66,12 +77,15 @@
 //! empirically rather than leaving it as an unquantified caveat.
 
 use serde::Serialize;
+use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::error::VeridictError;
+use crate::input::Record;
+use crate::metrics::DiffCollector;
 use crate::sprt::SprtConfig;
 use crate::stats::sprt::{bounds, llr_delta, score_from_elo};
 use crate::stats::{exact, jeffreys, wilson};
-use crate::{CiMethod, MetricKind};
+use crate::{CiMethod, IntoRecordResult, MetricKind};
 
 /// Upper bound on trials the search will ever evaluate. ponytail: this is a safety net against
 /// forever-widening searches when the requested effect gap is tiny relative to
@@ -92,11 +106,23 @@ const LOCAL_SCAN_RADIUS: u64 = 500;
 /// variant reads" idiom `MetricConfig` uses, for the same reason: `Elo` never reads `ci_method`
 /// (always Wilson - see [`PowerMetric::new`]), so a mismatched pairing is a compile-time-adjacent
 /// impossibility rather than a runtime check repeated at every call site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PowerMetric {
-    WinRate { ci_method: CiMethod },
-    SignTest { ci_method: CiMethod },
+    WinRate {
+        ci_method: CiMethod,
+    },
+    SignTest {
+        ci_method: CiMethod,
+    },
     Elo,
+    /// `sd_source` is `"assume-sd"` or `"pilot"` - carried alongside the value so
+    /// `estimate_trials` can report provenance without this module ever touching a file itself
+    /// (file I/O and pilot-SD estimation live in the CLI layer, same split `sprt`'s own
+    /// `resolve_sprt_hypotheses` already established).
+    MeanDiff {
+        assume_sd: f64,
+        sd_source: &'static str,
+    },
 }
 
 impl PowerMetric {
@@ -105,13 +131,19 @@ impl PowerMetric {
             Self::WinRate { .. } => MetricKind::WinRate,
             Self::SignTest { .. } => MetricKind::SignTest,
             Self::Elo => MetricKind::Elo,
+            Self::MeanDiff { .. } => MetricKind::MeanDiff,
         }
     }
 
-    /// Builds a validated `PowerMetric` from flat inputs - mirrors `MetricConfig::new`'s own
-    /// compatibility check, reusing the same `IncompatibleCiMethod` error: `compare --metric elo`
-    /// itself never accepts anything but Wilson, so a `power` estimate using a CI method `compare`
-    /// would refuse to run with would be answering a question `compare` can't actually pose.
+    /// Builds a validated `PowerMetric` from flat `(kind, ci_method)` inputs - mirrors
+    /// `MetricConfig::new`'s own compatibility check, reusing the same `IncompatibleCiMethod`
+    /// error: `compare --metric elo` itself never accepts anything but Wilson, so a `power`
+    /// estimate using a CI method `compare` would refuse to run with would be answering a question
+    /// `compare` can't actually pose. `MetricKind::MeanDiff` doesn't fit this shape at all (it
+    /// needs an assumed standard deviation, not a `ci_method`) - construct
+    /// `PowerMetric::MeanDiff { assume_sd, sd_source }` directly instead, the same "carry only
+    /// what a variant needs, construct it directly when the caller already knows the shape"
+    /// pattern `MetricConfig`'s own doc establishes for its `MeanDiff` variant.
     pub fn new(kind: MetricKind, ci_method: CiMethod) -> Result<Self, VeridictError> {
         match kind {
             MetricKind::WinRate => Ok(Self::WinRate { ci_method }),
@@ -129,10 +161,14 @@ impl PowerMetric {
         }
     }
 
+    /// Only ever actually read for `WinRate`/`SignTest` (the mean-diff branch of
+    /// `estimate_trials` returns before this would be consulted) - `Wilson` here for `Elo`/
+    /// `MeanDiff` is a safe placeholder, not a real choice being made on their behalf, same
+    /// precedent as `MetricConfig::ci_method`.
     fn ci_method(&self) -> CiMethod {
         match self {
             Self::WinRate { ci_method } | Self::SignTest { ci_method } => *ci_method,
-            Self::Elo => CiMethod::Wilson,
+            Self::Elo | Self::MeanDiff { .. } => CiMethod::Wilson,
         }
     }
 }
@@ -153,6 +189,15 @@ pub struct PowerReport {
     pub achieved_power: f64,
     pub method: &'static str,
     pub notes: Vec<String>,
+    /// `mean-diff` only - the assumed standard deviation of the paired difference
+    /// (`candidate - baseline`), whether supplied directly (`--assume-sd`) or estimated from real
+    /// pilot data (`--pilot FILE`). `None`/omitted for every other metric.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assume_sd: Option<f64>,
+    /// `"assume-sd"` or `"pilot"` - which source `assume_sd` came from. `None`/omitted for every
+    /// other metric.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sd_source: Option<&'static str>,
 }
 
 /// `p0`/`p1` in proportion space: `winrate`/`sign-test`'s effect is centered on 0.5 (deviation
@@ -193,6 +238,22 @@ pub fn estimate_trials(
     }
     if !target_power.is_finite() || target_power <= 0.0 || target_power >= 1.0 {
         return Err(VeridictError::InvalidTargetPower(target_power));
+    }
+
+    if let PowerMetric::MeanDiff {
+        assume_sd,
+        sd_source,
+    } = metric
+    {
+        return estimate_trials_mean_diff(
+            assume_sd,
+            sd_source,
+            min_effect,
+            assume_effect,
+            confidence,
+            target_power,
+            paired_by_id,
+        );
     }
 
     let kind = metric.kind();
@@ -245,7 +306,152 @@ pub fn estimate_trials(
         achieved_power,
         method: "exact_binomial_search",
         notes,
+        assume_sd: None,
+        sd_source: None,
     })
+}
+
+/// Closed-form sample-size solution for `mean-diff` under an assumed/estimated standard deviation
+/// of the paired difference - see the module doc for why this is closed-form rather than a search.
+///
+/// Modeling the sample mean of `n` diffs as `Normal(assume_effect, assume_sd^2/n)`, `compare`'s
+/// pass condition (`CI_lower >= min_effect`) has probability (derivation, not re-typed at every
+/// call site):
+///
+/// ```text
+/// z_conf  = inverse_normal_cdf((1 + confidence) / 2)   // TWO-SIDED quantile, see below
+/// z_power = inverse_normal_cdf(target_power)
+/// n       = ceil( ((z_conf + z_power) * assume_sd / (assume_effect - min_effect))^2 )
+/// achieved_power = Phi( (assume_effect - min_effect) * sqrt(n) / assume_sd - z_conf )
+/// ```
+///
+/// **`z_conf` must be the two-sided quantile**, matching how `compare`'s own CI is actually built
+/// (`wilson_ci_from_proportion` computes `z = inverse_normal_cdf(1 - alpha/2)`, i.e. exactly
+/// `inverse_normal_cdf((1+confidence)/2)` - 1.96 at 95% confidence, not the one-sided 1.645). Using
+/// the one-sided quantile would compute *fewer* trials than actually needed - the optimistic,
+/// false-pass-prone direction this project exists to avoid; the same "a two-sided CI read one-
+/// sidedly only carries half its nominal budget in that tail" fact that already shaped `power`'s
+/// two-effect-value design and `--correction`'s `alpha/2` family target elsewhere in this project.
+///
+/// Reuses `wilson::inverse_normal_cdf` (the exact function `estimate_smallest_n`'s own normal-
+/// approximation seed already calls) for both quantiles, and `statrs::distribution::Normal` (the
+/// exact pattern `stats::bootstrap`'s BCa acceleration already uses) for `achieved_power` - no new
+/// normal-CDF approximation gets written for this.
+#[allow(clippy::too_many_arguments)]
+fn estimate_trials_mean_diff(
+    assume_sd: f64,
+    sd_source: &'static str,
+    min_effect: f64,
+    assume_effect: f64,
+    confidence: f64,
+    target_power: f64,
+    paired_by_id: bool,
+) -> Result<PowerReport, VeridictError> {
+    if !assume_sd.is_finite() || assume_sd <= 0.0 {
+        return Err(VeridictError::InvalidAssumeSd(assume_sd));
+    }
+
+    let z_conf = wilson::inverse_normal_cdf((1.0 + confidence) / 2.0);
+    let z_power = wilson::inverse_normal_cdf(target_power);
+    let delta = assume_effect - min_effect; // > 0, guaranteed by estimate_trials's shared checks
+    let n_exact = ((z_conf + z_power) * assume_sd / delta).powi(2);
+    if !n_exact.is_finite() || n_exact > MAX_TRIALS as f64 {
+        return Err(VeridictError::PowerSearchExceededCap {
+            cap: MAX_TRIALS,
+            min_effect,
+            assume_effect,
+            target_power,
+        });
+    }
+    let estimated_trials = n_exact.ceil().max(1.0) as u64;
+
+    let normal = Normal::new(0.0, 1.0).expect("standard normal distribution is always valid");
+    let achieved_power = normal.cdf(delta * (estimated_trials as f64).sqrt() / assume_sd - z_conf);
+
+    let mut notes = vec![
+        "This is a normal approximation of compare --metric mean-diff's real bootstrap decision \
+         rule, not an exact search against it: there is no real data pre-experiment to bootstrap, \
+         so a normal model of the paired differences is the standard assumption. For skewed real \
+         diffs the bootstrap CI and this estimate will diverge - treat this as a design estimate \
+         for how much data to collect, not a guarantee about what a real run will show."
+            .to_string(),
+        "assume_sd is the standard deviation of the paired difference (candidate - baseline), not \
+         either arm's own standard deviation - using an arm's SD here would understate the true \
+         variance for anything but a perfectly correlated pair."
+            .to_string(),
+    ];
+    if paired_by_id {
+        notes.push(match sd_source {
+            "pilot" => "--paired-by-id was applied while estimating assume_sd from --pilot's own \
+                        data (same-id records were netted into one diff before computing the \
+                        sample standard deviation), not re-applied here."
+                .to_string(),
+            _ => "--paired-by-id has no effect here: --assume-sd supplies a raw number with no \
+                  underlying data to pair."
+                .to_string(),
+        });
+    }
+
+    Ok(PowerReport {
+        schema_version: crate::report::REPORT_SCHEMA_VERSION,
+        metric: MetricKind::MeanDiff,
+        ci_method: "normal",
+        min_effect,
+        assume_effect,
+        confidence,
+        target_power,
+        estimated_trials,
+        achieved_power,
+        method: "normal_approximation_closed_form",
+        notes,
+        assume_sd: Some(assume_sd),
+        sd_source: Some(sd_source),
+    })
+}
+
+/// Extracts paired `(candidate - baseline)` diffs from pilot records, for `--pilot FILE`'s sample-
+/// standard-deviation estimation. Mirrors `metrics::mean_diff::MeanDiffAggregator::ingest`'s exact
+/// validation (finite baseline/candidate via the same `InvalidValue` error, `SchemaMismatch` on a
+/// record with neither field) and reuses the same `DiffCollector` (including its `--paired-by-id`
+/// netting and duplicate-id rejection) - deliberately not routed through the full
+/// `MetricAggregator` trait, which also wires status/failure tallying this one-shot, no-bootstrap-
+/// needed use has no need for.
+pub fn pilot_diffs<I>(records: I, paired_by_id: bool) -> Result<Vec<f64>, VeridictError>
+where
+    I: IntoIterator,
+    I::Item: IntoRecordResult,
+{
+    let mut collector = DiffCollector::new(paired_by_id);
+    for item in records {
+        let (line, record): (usize, Record) = item.into_record_result()?;
+        match (record.baseline, record.candidate) {
+            (Some(b), Some(c)) => {
+                if !b.is_finite() {
+                    return Err(VeridictError::InvalidValue {
+                        line,
+                        field: "baseline",
+                        value: b,
+                    });
+                }
+                if !c.is_finite() {
+                    return Err(VeridictError::InvalidValue {
+                        line,
+                        field: "candidate",
+                        value: c,
+                    });
+                }
+                collector.record(line, record.id.as_deref(), c - b)?;
+            }
+            _ => {
+                return Err(VeridictError::SchemaMismatch {
+                    line,
+                    context: "power --pilot",
+                    detail: "record has no baseline/candidate numeric fields".to_string(),
+                });
+            }
+        }
+    }
+    collector.finish()
 }
 
 /// Exact probability that an `n`-trial experiment's `--ci-method` CI lower bound clears `p0`,
@@ -371,14 +577,17 @@ impl PowerReport {
             MetricKind::Elo => "elo",
             MetricKind::MeanDiff => "mean-diff",
         };
+        let method_clause = match (self.assume_sd, self.sd_source) {
+            (Some(sd), Some(source)) => format!("assumed SD **{sd}** (from `--{source}`)"),
+            _ => format!("`--ci-method {}`", self.ci_method),
+        };
         let mut out = String::from("# Veridict Power\n\n");
         out.push_str(&format!(
             "Estimated **{}** trials for **{:.0}%** power to reach a passing `{metric}` verdict \
-             (`--ci-method {}`), assuming the true effect is exactly **{}** against a pass bar \
+             ({method_clause}), assuming the true effect is exactly **{}** against a pass bar \
              of **{}**, at {:.0}% confidence.\n\n",
             self.estimated_trials,
             self.target_power * 100.0,
-            self.ci_method,
             self.assume_effect,
             self.min_effect,
             self.confidence * 100.0,
@@ -596,6 +805,270 @@ mod tests {
         let recomputed =
             power_at_n(report.estimated_trials, p0, p1, CiMethod::Wilson, 0.95).unwrap();
         assert!((recomputed - report.achieved_power).abs() < 1e-9);
+    }
+
+    // --- mean-diff closed-form power ---
+
+    #[test]
+    fn mean_diff_larger_sd_needs_more_trials() {
+        let small_sd = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.05,
+                sd_source: "assume-sd",
+            },
+            0.02,
+            0.10,
+            0.95,
+            0.8,
+            false,
+        )
+        .unwrap();
+        let large_sd = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.25,
+                sd_source: "assume-sd",
+            },
+            0.02,
+            0.10,
+            0.95,
+            0.8,
+            false,
+        )
+        .unwrap();
+        assert!(large_sd.estimated_trials > small_sd.estimated_trials);
+    }
+
+    #[test]
+    fn mean_diff_larger_effect_gap_needs_fewer_trials() {
+        let small_gap = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.15,
+                sd_source: "assume-sd",
+            },
+            0.02,
+            0.05,
+            0.95,
+            0.8,
+            false,
+        )
+        .unwrap();
+        let large_gap = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.15,
+                sd_source: "assume-sd",
+            },
+            0.02,
+            0.30,
+            0.95,
+            0.8,
+            false,
+        )
+        .unwrap();
+        assert!(large_gap.estimated_trials < small_gap.estimated_trials);
+    }
+
+    #[test]
+    fn mean_diff_rejects_non_positive_assume_sd() {
+        for bad_sd in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                estimate_trials(
+                    PowerMetric::MeanDiff {
+                        assume_sd: bad_sd,
+                        sd_source: "assume-sd",
+                    },
+                    0.02,
+                    0.10,
+                    0.95,
+                    0.8,
+                    false,
+                ),
+                Err(VeridictError::InvalidAssumeSd(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn mean_diff_tiny_effect_gap_hits_the_cap_with_a_clear_error() {
+        assert!(matches!(
+            estimate_trials(
+                PowerMetric::MeanDiff {
+                    assume_sd: 1.0,
+                    sd_source: "assume-sd",
+                },
+                0.0001,
+                0.00011,
+                0.95,
+                0.999,
+                false,
+            ),
+            Err(VeridictError::PowerSearchExceededCap { .. })
+        ));
+    }
+
+    // Mirrors verdict.rs's winrate_wilson_search_matches_a_direct_wilson_recompute and
+    // correction.rs's achieved_alpha_self_consistency test: proves estimated_trials is the
+    // smallest n that clears target_power, not just "a plausible-looking number" - n-1 must NOT
+    // clear it. Inputs chosen (and verified) so n_exact lands comfortably non-integer, giving
+    // achieved_power(n-1) real margin below target_power rather than flaking near an integer
+    // boundary.
+    #[test]
+    fn mean_diff_estimated_trials_is_the_smallest_n_that_clears_target_power() {
+        let assume_sd = 0.15;
+        let min_effect = 0.02;
+        let assume_effect = 0.10;
+        let confidence = 0.95;
+        let target_power = 0.8;
+        let report = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd,
+                sd_source: "assume-sd",
+            },
+            min_effect,
+            assume_effect,
+            confidence,
+            target_power,
+            false,
+        )
+        .unwrap();
+
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let z_conf = wilson::inverse_normal_cdf((1.0 + confidence) / 2.0);
+        let delta = assume_effect - min_effect;
+        let achieved_power_at = |n: u64| normal.cdf(delta * (n as f64).sqrt() / assume_sd - z_conf);
+
+        assert!((achieved_power_at(report.estimated_trials) - report.achieved_power).abs() < 1e-9);
+        assert!(report.achieved_power >= target_power);
+        assert!(
+            achieved_power_at(report.estimated_trials - 1) < target_power,
+            "n-1={} should NOT already clear target_power - got achieved_power={}",
+            report.estimated_trials - 1,
+            achieved_power_at(report.estimated_trials - 1)
+        );
+    }
+
+    #[test]
+    fn mean_diff_report_carries_sd_provenance_and_omits_ci_method_semantics() {
+        let report = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.15,
+                sd_source: "pilot",
+            },
+            0.02,
+            0.10,
+            0.95,
+            0.8,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.assume_sd, Some(0.15));
+        assert_eq!(report.sd_source, Some("pilot"));
+        assert_eq!(report.ci_method, "normal");
+        assert_eq!(report.method, "normal_approximation_closed_form");
+    }
+
+    #[test]
+    fn mean_diff_paired_by_id_note_differs_by_sd_source() {
+        let via_assume_sd = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.15,
+                sd_source: "assume-sd",
+            },
+            0.02,
+            0.10,
+            0.95,
+            0.8,
+            true,
+        )
+        .unwrap();
+        let via_pilot = estimate_trials(
+            PowerMetric::MeanDiff {
+                assume_sd: 0.15,
+                sd_source: "pilot",
+            },
+            0.02,
+            0.10,
+            0.95,
+            0.8,
+            true,
+        )
+        .unwrap();
+        assert!(via_assume_sd.notes.iter().any(|n| n.contains("no effect")));
+        assert!(via_pilot.notes.iter().any(|n| n.contains("--pilot")));
+    }
+
+    // --- pilot_diffs ---
+
+    fn pilot_record(id: Option<&str>, baseline: f64, candidate: f64) -> (usize, Record) {
+        (
+            0,
+            Record {
+                id: id.map(str::to_string),
+                baseline: Some(baseline),
+                candidate: Some(candidate),
+                result: None,
+                baseline_status: None,
+                candidate_status: None,
+            },
+        )
+    }
+
+    #[test]
+    fn pilot_diffs_extracts_candidate_minus_baseline() {
+        let records = vec![
+            pilot_record(Some("a"), 1.0, 1.5),
+            pilot_record(Some("b"), 2.0, 1.8),
+            pilot_record(Some("c"), 0.0, 0.3),
+        ];
+        let diffs = pilot_diffs(records, false).unwrap();
+        let mut sorted = diffs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let expected = [-0.2, 0.3, 0.5];
+        for (actual, expected) in sorted.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 1e-9,
+                "{sorted:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pilot_diffs_rejects_a_record_with_neither_baseline_nor_candidate() {
+        let record = (
+            0,
+            Record {
+                id: None,
+                baseline: None,
+                candidate: None,
+                result: Some("candidate_win".to_string()),
+                baseline_status: None,
+                candidate_status: None,
+            },
+        );
+        assert!(matches!(
+            pilot_diffs(vec![record], false),
+            Err(VeridictError::SchemaMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn pilot_diffs_nets_paired_by_id_records() {
+        let records = vec![
+            (0, {
+                let mut r = pilot_record(Some("p1"), 1.0, 1.4).1;
+                r.id = Some("p1".to_string());
+                r
+            }),
+            (1, {
+                let mut r = pilot_record(Some("p1"), 1.0, 1.2).1;
+                r.id = Some("p1".to_string());
+                r
+            }),
+        ];
+        // Two records sharing id "p1" (diffs 0.4 and 0.2) net to a single averaged diff under
+        // --paired-by-id, matching DiffCollector::finish's own (a+b)/2 netting.
+        let diffs = pilot_diffs(records, true).unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert!((diffs[0] - 0.3).abs() < 1e-9);
     }
 
     #[test]

@@ -23,3 +23,6 @@ mod power_calibration;
 
 #[path = "calibration/sprt_asn_calibration.rs"]
 mod sprt_asn_calibration;
+
+#[path = "calibration/power_mean_diff_calibration.rs"]
+mod power_mean_diff_calibration;

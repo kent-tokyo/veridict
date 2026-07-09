@@ -263,6 +263,20 @@ pub fn mean(values: &[f64]) -> f64 {
     values.iter().sum::<f64>() / values.len() as f64
 }
 
+/// Bessel-corrected (`n-1` denominator) sample variance - the standard unbiased estimator, not
+/// the population (`n`-denominator) one. Callers with fewer than 2 values must guard themselves;
+/// this returns `NaN` at `n=1` (0.0/0.0) rather than panicking, since "undefined" is a more
+/// honest result than a fabricated zero.
+pub fn sample_variance(values: &[f64]) -> f64 {
+    let m = mean(values);
+    let sum_sq_dev: f64 = values.iter().map(|v| (v - m).powi(2)).sum();
+    sum_sq_dev / (values.len() as f64 - 1.0)
+}
+
+pub fn sample_sd(values: &[f64]) -> f64 {
+    sample_variance(values).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +573,19 @@ mod tests {
             bootstrap_mean_diff_ci_basic(&SKEWED, 0.95, 10_000, DEFAULT_SEED);
         assert_eq!(basic_lo, 2.0 * effect - perc_hi);
         assert_eq!(basic_hi, 2.0 * effect - perc_lo);
+    }
+
+    #[test]
+    fn sample_variance_matches_a_hand_computed_example() {
+        // [2, 4, 4, 4, 5, 5, 7, 9]: mean=5, Bessel-corrected variance=32/7 (a textbook example).
+        let values = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        assert_close(sample_variance(&values), 32.0 / 7.0, 1e-9);
+        assert_close(sample_sd(&values), (32.0f64 / 7.0).sqrt(), 1e-9);
+    }
+
+    #[test]
+    fn sample_variance_of_identical_values_is_zero() {
+        assert_eq!(sample_variance(&[3.0, 3.0, 3.0]), 0.0);
+        assert_eq!(sample_sd(&[3.0, 3.0, 3.0]), 0.0);
     }
 }

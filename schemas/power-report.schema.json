@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/power-report.schema.json",
   "title": "veridict power report",
-  "description": "JSON output of `veridict power`. Report-only, no input file - a pure calculation from flags. Estimates how many trials --metric winrate/sign-test/elo would need for a target_power probability of reaching a passing verdict, assuming the true effect is exactly assume_effect against a pass bar of min_effect.",
+  "description": "JSON output of `veridict power`. Report-only, a pure calculation from flags - except --metric mean-diff --pilot FILE, which reads real pilot data to estimate a standard deviation. Estimates how many trials compare would need for a target_power probability of reaching a passing verdict, assuming the true effect is exactly assume_effect against a pass bar of min_effect. winrate/sign-test/elo use an exact binomial search; mean-diff uses a closed-form normal approximation given an assumed/estimated standard deviation (assume_sd/sd_source).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,13 +25,12 @@
     },
     "metric": {
       "type": "string",
-      "enum": ["winrate", "sign-test", "elo"],
-      "description": "mean-diff is not supported - rejected at the CLI flag-parsing level (a distinct --metric enum from compare's), and by PowerMetric::new for direct library callers."
+      "enum": ["winrate", "sign-test", "elo", "mean-diff"]
     },
     "ci_method": {
       "type": "string",
-      "enum": ["wilson", "exact", "jeffreys"],
-      "description": "Always wilson for metric elo - the same restriction compare --metric elo itself has."
+      "enum": ["wilson", "exact", "jeffreys", "normal"],
+      "description": "Always wilson for metric elo (the same restriction compare --metric elo itself has); always \"normal\" for mean-diff, signaling the structurally different closed-form-normal-approximation method rather than a real CI-method choice."
     },
     "min_effect": {
       "type": "number",
@@ -63,12 +62,23 @@
       "description": "The real exact power at estimated_trials, always >= target_power - can overshoot the target by a nontrivial margin due to the discrete, non-monotonic ('sawtooth') nature of exact CI methods; see docs/metrics.md's power section."
     },
     "method": {
-      "const": "exact_binomial_search"
+      "type": "string",
+      "enum": ["exact_binomial_search", "normal_approximation_closed_form"]
     },
     "notes": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Always includes the 'assumes the true effect is exactly assume_effect' caveat; adds a --paired-by-id caveat when that flag was set."
+      "description": "Always includes the 'assumes the true effect is exactly assume_effect' caveat; adds a --paired-by-id caveat when that flag was set. For mean-diff, always includes the normal-approximation and assume_sd-is-the-difference's-SD caveats, plus a tiny-pilot caveat when --pilot yielded fewer than 30 diffs."
+    },
+    "assume_sd": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "mean-diff only: the assumed standard deviation of the paired difference (candidate - baseline), from --assume-sd or estimated from --pilot data. Omitted for every other metric."
+    },
+    "sd_source": {
+      "type": "string",
+      "enum": ["assume-sd", "pilot"],
+      "description": "mean-diff only: which source assume_sd came from. Omitted for every other metric."
     }
   }
 }

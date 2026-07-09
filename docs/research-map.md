@@ -75,13 +75,15 @@ flag on the same subcommand rather than a `--metric` value. Wald's ASN is a know
 bias is measured empirically, not just cited, in `tests/calibration/sprt_asn_calibration.rs`
 (about 1-2% at elo0=0/elo1=20/alpha=beta=0.05 - small at this gap, not claimed universal).
 
-**What's still missing:** `compare --metric mean-diff`'s equivalent (would need an assumed
-standard deviation - `--assume-sd`/`--pilot FILE`, no real data exists pre-experiment to estimate
-one from) - deferred as a distinct future `power` extension, not folded into what shipped. Also
-still separate and deferred: budget-constrained allocation across a fixed trial budget for `plan`
-(see the entry below), which neither `plan` nor `power` attempts. Multiple-comparison correction
-for multi-metric `compare` runs (see that entry below) is a related but distinct concern from power
-analysis - it's since shipped for `compare`, though `matrix`/`sprt` versions of it haven't.
+**`compare --metric mean-diff`'s equivalent has since shipped too**, via `--assume-sd`/`--pilot
+FILE` (see `docs/metrics.md`'s `power --metric mean-diff` section) - a closed-form normal
+approximation given an assumed or pilot-estimated standard deviation of the paired difference,
+not a search (mean-diff has no closed-form CI-width-at-n function to search against, unlike
+winrate/sign-test/elo). Still separate and deferred: budget-constrained allocation across a fixed
+trial budget for `plan` (see the entry below), which neither `plan` nor `power` attempts.
+Multiple-comparison correction for multi-metric `compare` runs (see that entry below) is a related
+but distinct concern from power analysis - it's since shipped for `compare`, though `matrix`/`sprt`
+versions of it haven't.
 
 ### Draw-aware `power --metric elo`
 

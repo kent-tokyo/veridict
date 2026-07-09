@@ -12,6 +12,27 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `power --metric mean-diff`, given `--assume-sd <f64>` or `--pilot FILE` (real paired
+  baseline/candidate data to estimate a sample standard deviation from). Unlike
+  winrate/sign-test/elo's exact binomial search, this is a closed-form calculation - mean-diff has
+  no closed-form CI-width-at-n function to search against, so given an assumed/estimated standard
+  deviation of the paired difference, `n = ceil(((z_conf + z_power) * assume_sd / (assume_effect -
+  min_effect))^2)` (`z_conf`/`z_power` via the existing `inverse_normal_cdf`, `achieved_power` via
+  `statrs::distribution::Normal`, the same pattern `stats::bootstrap`'s BCa already uses). `z_conf`
+  is deliberately the *two-sided* confidence quantile, matching how `compare`'s own CI is built and
+  read one-sidedly - the same correctness point that already shaped `power`'s two-effect-value
+  design and `--correction`'s `alpha/2` family target, verified consistent here rather than
+  re-derived. This is a normal approximation of the real bootstrap decision rule, not an exact
+  search against it - `tests/calibration/power_mean_diff_calibration.rs` measures the real gap
+  empirically. `--pilot`'s standard deviation is estimated via the same `DiffCollector`
+  `compare --metric mean-diff` itself uses (including `--paired-by-id` netting), new
+  `stats::bootstrap::sample_variance`/`sample_sd` helpers, and a clear error rather than a silent
+  `NaN`/`0` for too-small or zero-variance pilot data. New `PowerReport` fields
+  `assume_sd`/`sd_source`, omitted (not `null`) for every other metric - existing
+  winrate/sign-test/elo/`--sprt` output is byte-identical.
+
 ## [0.9.0] - 2026-07-10
 
 Purely additive - no breaking changes since `0.8.0`.

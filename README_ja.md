@@ -155,6 +155,14 @@ veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
 veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
 ```
 
+`--metric mean-diff` の場合は、想定標準偏差を直接指定するか、実際のパイロットデータから
+推定します:
+
+```bash
+veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --assume-sd 0.15
+veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --pilot examples/pilot_scores.jsonl
+```
+
 または、各仮説の下でのSPRTの期待サンプルサイズを直接見積もります:
 
 ```bash
@@ -377,7 +385,48 @@ $ veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 
 * **`--min-effect`** - 合格ライン。`compare --min-effect`/`--pass-above` と全く同じ意味です。
 * **`--assume-effect`** - 実際に検出力を計算する対象の真の効果。真の効果を合格ラインと等しく設定して検出力を評価すると、その境界そのものにおけるCIの被覆確率の裏返し(`≈ 1 - confidence`)しか得られません - 横ばいで、トライアルをどれだけ追加しても `--target-power` に近づいていきません。理由(ルールだけでなく)は [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power` セクションを参照してください。
 
-`estimated_trials` は*厳密な*探索(`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >= p0]`、教科書的な近似ではありません)により、`compare` 自身が使うのと同じ実際の `wilson`/`exact`/`jeffreys` CI関数に対して求められます(`elo` は `wilson` のみを受け付けます。`compare --metric elo` と同じです)。`mean-diff` はサポートされません(実験前には仮定すべき分散が存在しないため - フラグレベルで拒否され、黙って無視されることはありません)。`--paired-by-id` は受け付けられますが数値は変わりません - 理由はdocsセクションを参照してください。
+`estimated_trials` は*厳密な*探索(`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >= p0]`、教科書的な近似ではありません)により、`compare` 自身が使うのと同じ実際の `wilson`/`exact`/`jeffreys` CI関数に対して求められます(`elo` は `wilson` のみを受け付けます。`compare --metric elo` と同じです)。`--paired-by-id` は受け付けられますが数値は変わりません - 理由はdocsセクションを参照してください。
+
+`--metric mean-diff` はその探索の代わりに閉じた形の計算です - ブートストラップ信頼区間には
+「仮想nでのCI幅」を求める閉形式の関数が存在しないため、想定される差分の標準偏差をあなたから
+与える必要があります。直接指定する(`--assume-sd`)か、実際のパイロットデータから推定します
+(`--pilot FILE`):
+
+```console
+$ veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --assume-sd 0.15
+{
+  "schema_version": 1,
+  "metric": "mean-diff",
+  "ci_method": "normal",
+  "min_effect": 0.02,
+  "assume_effect": 0.1,
+  "confidence": 0.95,
+  "target_power": 0.8,
+  "estimated_trials": 28,
+  "achieved_power": 0.805703217265413,
+  "method": "normal_approximation_closed_form",
+  "notes": [
+    "This is a normal approximation of compare --metric mean-diff's real bootstrap decision rule, not an exact search against it: there is no real data pre-experiment to bootstrap, so a normal model of the paired differences is the standard assumption. For skewed real diffs the bootstrap CI and this estimate will diverge - treat this as a design estimate for how much data to collect, not a guarantee about what a real run will show.",
+    "assume_sd is the standard deviation of the paired difference (candidate - baseline), not either arm's own standard deviation - using an arm's SD here would understate the true variance for anything but a perfectly correlated pair."
+  ],
+  "assume_sd": 0.15,
+  "sd_source": "assume-sd"
+}
+```
+
+同じ標準偏差を、推測ではなく実際のパイロットデータから推定することもできます:
+
+```console
+$ veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --pilot examples/pilot_scores.jsonl
+```
+
+**`assume_sd` はペアの*差分*(`candidate - baseline`)の標準偏差であり、どちらか一方の腕自身の
+標準偏差ではありません** - ペアデザインでよくある典型的なラベル付けミスです。これを間違えると
+下流のすべての数値が静かに壊れます。計算式、`z_conf` がなぜ両側の信頼水準分位点でなければ
+ならないか(`power` 自身の2つの効果値を要求する設計や `--correction` の `alpha/2` という
+ファミリー目標を形作ったのと同じ正確性のポイントです)、そして `--pilot` の小サンプルに関する
+注意点は [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power --metric mean-diff` セクションを
+参照してください。
 
 `--sprt` は構造的に異なる問いに切り替わります: Waldの SPRT はその構成上、`n` に関わらず既に
 `alpha`/`beta` のエラー率を保証しているため、目標検出力を探索して求めるべきサンプルサイズという

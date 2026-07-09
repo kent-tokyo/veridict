@@ -62,9 +62,10 @@ pub enum VeridictError {
     },
 
     #[error(
-        "power estimation for metric {metric} isn't supported yet; only winrate/sign-test/elo \
-         have a closed-form CI to search a hypothetical n against - mean-diff would need a real \
-         or assumed variance, see docs/metrics.md's power section"
+        "power estimation for metric {metric} isn't supported via this flat (kind, ci_method) \
+         constructor; winrate/sign-test/elo take a ci_method here, but mean-diff needs an assumed \
+         standard deviation instead - construct PowerMetric::MeanDiff {{ assume_sd, sd_source }} \
+         directly (see docs/metrics.md's power section)"
     )]
     UnsupportedPowerMetric { metric: &'static str },
 
@@ -91,6 +92,35 @@ pub enum VeridictError {
         assume_effect: f64,
         target_power: f64,
     },
+
+    #[error("invalid --assume-sd {0}: must be finite and greater than 0")]
+    InvalidAssumeSd(f64),
+
+    #[error(
+        "--pilot '{path}' produced only {count} usable paired diff(s); at least 2 are needed to \
+         estimate a standard deviation"
+    )]
+    InsufficientPilotData { path: String, count: usize },
+
+    #[error(
+        "--pilot '{path}' data has zero variance ({count} identical paired diff(s)) - a sample \
+         standard deviation of 0 isn't a usable power-analysis input; pass --assume-sd directly \
+         with a real assumed value instead"
+    )]
+    ZeroVariancePilotData { path: String, count: usize },
+
+    #[error(
+        "--metric mean-diff requires exactly one of --assume-sd or --pilot FILE (there's no real \
+         data pre-experiment to estimate a standard deviation from otherwise) - see \
+         docs/metrics.md's power section"
+    )]
+    MeanDiffPowerRequiresSd,
+
+    #[error(
+        "--assume-sd/--pilot are only used with --metric mean-diff (got {metric}); the other \
+         metrics' power search doesn't need an assumed standard deviation"
+    )]
+    AssumeSdOnlyForMeanDiff { metric: &'static str },
 
     #[error(
         "line {line}: invalid numeric value in field '{field}': {value} (NaN/Infinity not allowed)"
