@@ -1,0 +1,84 @@
+{
+  "reports": [
+    {
+      "baseline_count": 38,
+      "candidate_count": 62,
+      "ci_high": 0.20902400754104664,
+      "ci_low": 0.022097552875490645,
+      "confidence": 0.95,
+      "crashes": 0,
+      "data_quality": {
+        "draw_heavy": false,
+        "effect_within_noise_floor": false,
+        "high_failure_rate": false,
+        "low_id_diversity": false,
+        "tiny_sample": false
+      },
+      "effect": 0.12,
+      "estimated_additional_trials": null,
+      "fail_below": -0.02,
+      "failure_breakdown": {
+        "baseline": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        },
+        "candidate": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        }
+      },
+      "invalid": 0,
+      "metric": "winrate",
+      "paired_count": 100,
+      "pass_above": 0.02,
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200",
+      "schema_version": 1,
+      "timeouts": 0,
+      "verdict": "pass",
+      "warnings": []
+    },
+    {
+      "baseline_count": 38,
+      "candidate_count": 62,
+      "ci_high": 154.7215129936337,
+      "ci_low": 15.364961311521332,
+      "confidence": 0.95,
+      "crashes": 0,
+      "data_quality": {
+        "draw_heavy": false,
+        "effect_within_noise_floor": false,
+        "high_failure_rate": false,
+        "low_id_diversity": false,
+        "tiny_sample": false
+      },
+      "effect": 85.04323715257746,
+      "estimated_additional_trials": null,
+      "fail_below": -0.02,
+      "failure_breakdown": {
+        "baseline": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        },
+        "candidate": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        }
+      },
+      "invalid": 0,
+      "metric": "elo",
+      "paired_count": 100,
+      "pass_above": 0.02,
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200",
+      "schema_version": 1,
+      "timeouts": 0,
+      "verdict": "pass",
+      "warnings": []
+    }
+  ],
+  "schema_version": 1,
+  "verdict": "pass"
+}

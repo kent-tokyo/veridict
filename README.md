@@ -95,6 +95,13 @@ is the strictest of the individual ones (any `fail` wins, then any
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
+Guard against a lucky pass across that metric family (see [Multiple-comparison
+correction](#multiple-comparison-correction)):
+
+```bash
+veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --correction holm
+```
+
 Exact binomial CI on a small sample, BCa bootstrap on a skewed one:
 
 ```bash
@@ -275,6 +282,54 @@ error, not an arbitrary numeric penalty for a failed numeric trial.
 Requesting several `--metric` flags together scans the input once, feeding
 every record to every requested metric, rather than one full pass per
 metric.
+
+## Multiple-comparison correction
+
+Running several `--metric` flags together means several independent chances for *something* to
+clear its bar by luck alone - `--correction bonferroni`/`holm` keeps that combined risk at or
+below what a single, uncorrected metric already has today (see
+[`docs/metrics.md`](docs/metrics.md)'s `--correction` section for the full reasoning). Default is
+`none` - today's existing behavior, unchanged, unless you opt in.
+
+```console
+$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
+{
+  "schema_version": 1,
+  "verdict": "inconclusive",
+  "reports": [
+    {
+      "verdict": "inconclusive",
+      "metric": "winrate",
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Bonferroni correction (family_size=2): achieved significance 0.045328 exceeds the corrected threshold 0.025000 - downgraded from pass to inconclusive.",
+      "correction_method": "bonferroni",
+      "family_size": 2,
+      "achieved_alpha": 0.045327562117809694,
+      "adjusted_alpha_threshold": 0.025000000000000022,
+      "unadjusted_verdict": "pass"
+      // ...
+    },
+    {
+      "verdict": "pass",
+      "metric": "elo",
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Bonferroni correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "correction_method": "bonferroni",
+      "family_size": 2,
+      "achieved_alpha": 0.016420872210740903,
+      "adjusted_alpha_threshold": 0.025000000000000022,
+      "unadjusted_verdict": "pass"
+      // ...
+    }
+  ]
+}
+```
+
+Without `--correction`, both metrics pass on this same input and the overall verdict is `pass`.
+`winrate`'s evidence is real but comparatively weak; split two ways it no longer clears its
+corrected bar, so the overall verdict drops to `inconclusive` - exactly the "false pass is worse
+than an inconclusive result" bias this project is built around, now applied across a metric
+family instead of just within one metric. `--correction holm` is uniformly more powerful than
+`bonferroni` for the same guarantee (it would keep both metrics passing here); either can only
+downgrade an unadjusted pass to inconclusive, never invent a fail.
 
 ## Report extras
 

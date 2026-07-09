@@ -79,8 +79,9 @@ bias is measured empirically, not just cited, in `tests/calibration/sprt_asn_cal
 standard deviation - `--assume-sd`/`--pilot FILE`, no real data exists pre-experiment to estimate
 one from) - deferred as a distinct future `power` extension, not folded into what shipped. Also
 still separate and deferred: budget-constrained allocation across a fixed trial budget for `plan`
-(see the entry below), which neither `plan` nor `power` attempts, and multiple-comparison
-correction for multi-metric `compare` runs (see that entry below).
+(see the entry below), which neither `plan` nor `power` attempts. Multiple-comparison correction
+for multi-metric `compare` runs (see that entry below) is a related but distinct concern from power
+analysis - it's since shipped for `compare`, though `matrix`/`sprt` versions of it haven't.
 
 ### Draw-aware `power --metric elo`
 
@@ -127,10 +128,64 @@ fastest to identify the single best candidate? something else?).
 independent verdict at the stated confidence level - running several tests without correction
 (e.g. Bonferroni/Holm) inflates the overall false-positive rate across the combined result.
 
-**Why not yet:** same as power analysis - a real idea, not yet a concrete design, and it interacts
-with `verdict::aggregate`'s existing "any fail sinks the whole run" logic in a way that needs
-thinking through (correction changes *which* individual verdicts are significant, not how they
-combine).
+**Now covered, for `compare`'s multi-metric family.** `--correction bonferroni`/`holm` (see
+`docs/metrics.md`'s `--correction` section) keeps the family's one-sided false-pass rate at or
+below what a single, uncorrected metric already has today (`alpha/2` at the default 95%
+confidence) - not the nominal `alpha` itself, which would let a "corrected" family tolerate a
+*higher* false-pass rate than a single uncorrected metric already does. Both share one
+`achieved_alpha` binary search (against the same real Wilson/Clopper-Pearson/Jeffreys CI functions
+`compare` already uses) via the standard CI-test duality; Bonferroni applies a uniform
+`alpha/family_size` budget, Holm step-down sorts by achieved significance and stops rejecting at
+the first failure (Holm 1979). Correction only ever downgrades an unadjusted `pass` to
+`inconclusive` (widening a CI can't newly satisfy the `fail` condition for a report that already
+passed) - `verdict::aggregate`'s "any fail sinks the whole run, else any inconclusive, else pass"
+logic itself is unchanged; correction only ever changes *which* individual verdicts feed into it,
+never how they combine. `mean-diff` can't be individually corrected (no closed-form CI at a
+hypothetical confidence for a bootstrap interval) but still counts toward `family_size`.
+
+**Still not yet:** `matrix`'s all-pairs correction (see the new "matrix verdict semantics" entry
+below - it needs its own verdict concept designed first, not a mechanical extension of what
+shipped for `compare`) and `sprt`'s own multiplicity question (running several simultaneous SPRTs
+- a separate, harder, unstarted question). Also still deferred: Benjamini-Hochberg/FDR (a
+different, less conservative family-error target than FWER), finer-grained correction "families"
+(e.g. correcting across candidates in a broader campaign, not just across metrics within one
+`compare` run), and sequential/repeated-looks warnings (checking an accumulating result multiple
+times before it's final is itself a multiplicity risk this round doesn't address).
+
+### Matrix verdict semantics
+
+**What it is:** `matrix` (and `plan`, which shares its input) is entirely report-only today - no
+`Verdict`/`Thresholds`/`decide()` concept exists anywhere in the module (`Command::Matrix`'s own
+doc says "no single pass/fail verdict applies to a whole matrix"). Extending
+multiple-comparison correction to matrix's all-pairs case - the natural next step after
+`compare`'s multi-metric correction above - needs a real verdict concept for matrix designed from
+scratch first, not a mechanical reuse of `compare`'s. Open questions, not yet answered:
+
+- Does matrix gain a per-cell pass/fail verdict, a whole-matrix verdict, or does it stay
+  report-only forever (with correction, if it ever exists, applied only to some derived summary
+  rather than to individual cells)?
+- If cells get a pass bar, what does it look like - a `--min-elo`-style symmetric threshold per
+  pair, or an asymmetric `--pass-above`/`--fail-below` pair like `compare`'s?
+- Every pairwise comparison has a direction (row beats column, or vice versa) - does a per-cell
+  verdict need to be direction-aware in a way `compare`'s single candidate-vs-baseline verdict
+  never had to be?
+- Does the "all-pairs" correction family mean every cell in the matrix, every cell touching a
+  given candidate, or something else - and does that choice interact with `plan`'s own
+  most-uncertain-first ranking?
+- How do disconnected or fragile cells (see `matrix`'s general-graph mode and Bradley-Terry
+  convergence handling) participate in a family-wise correction - excluded, included with a
+  wider default uncertainty, or something else?
+- Should correction here reuse `compare`'s `achieved_alpha`/Bonferroni/Holm machinery as-is, or
+  does matrix's fundamentally different shape (an `n`-by-`n` grid of comparisons instead of one
+  candidate vs. one baseline) call for a different construction entirely?
+
+**Why not yet:** a genuinely separate design question from `compare`'s multi-metric correction,
+not a follow-on implementation task - resolving the above needs a real design pass (a design memo
+or a dedicated `docs/matrix-verdict-design.md`), not a `/plan` invocation that assumes the answers.
+
+**What would change this:** someone doing that design pass, or a concrete workflow that makes one
+of the above questions no longer open (e.g. a real request specifically for a per-cell pass bar,
+which would settle the first two questions at once).
 
 ### `--failure-policy` for `matrix`
 

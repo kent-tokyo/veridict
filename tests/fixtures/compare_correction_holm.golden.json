@@ -1,0 +1,94 @@
+{
+  "reports": [
+    {
+      "achieved_alpha": 0.045327562117809694,
+      "adjusted_alpha_threshold": 0.05000000000000005,
+      "baseline_count": 38,
+      "candidate_count": 62,
+      "ci_high": 0.20902400754104664,
+      "ci_low": 0.022097552875490645,
+      "confidence": 0.95,
+      "correction_method": "holm",
+      "crashes": 0,
+      "data_quality": {
+        "draw_heavy": false,
+        "effect_within_noise_floor": false,
+        "high_failure_rate": false,
+        "low_id_diversity": false,
+        "tiny_sample": false
+      },
+      "effect": 0.12,
+      "estimated_additional_trials": null,
+      "fail_below": -0.02,
+      "failure_breakdown": {
+        "baseline": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        },
+        "candidate": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        }
+      },
+      "family_size": 2,
+      "invalid": 0,
+      "metric": "winrate",
+      "paired_count": 100,
+      "pass_above": 0.02,
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.045328 <= the corrected threshold 0.050000.",
+      "schema_version": 1,
+      "timeouts": 0,
+      "unadjusted_verdict": "pass",
+      "verdict": "pass",
+      "warnings": []
+    },
+    {
+      "achieved_alpha": 0.016420872210740903,
+      "adjusted_alpha_threshold": 0.025000000000000026,
+      "baseline_count": 38,
+      "candidate_count": 62,
+      "ci_high": 154.7215129936337,
+      "ci_low": 15.364961311521332,
+      "confidence": 0.95,
+      "correction_method": "holm",
+      "crashes": 0,
+      "data_quality": {
+        "draw_heavy": false,
+        "effect_within_noise_floor": false,
+        "high_failure_rate": false,
+        "low_id_diversity": false,
+        "tiny_sample": false
+      },
+      "effect": 85.04323715257746,
+      "estimated_additional_trials": null,
+      "fail_below": -0.02,
+      "failure_breakdown": {
+        "baseline": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        },
+        "candidate": {
+          "crash": 0,
+          "invalid": 0,
+          "timeout": 0
+        }
+      },
+      "family_size": 2,
+      "invalid": 0,
+      "metric": "elo",
+      "paired_count": 100,
+      "pass_above": 0.02,
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "schema_version": 1,
+      "timeouts": 0,
+      "unadjusted_verdict": "pass",
+      "verdict": "pass",
+      "warnings": []
+    }
+  ],
+  "schema_version": 1,
+  "verdict": "pass"
+}

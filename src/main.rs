@@ -7,9 +7,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use veridict::correction::Correction;
 use veridict::sprt::{SprtConfig, SprtVariant};
 use veridict::stats::bootstrap::DEFAULT_SEED;
-use veridict::verdict::Thresholds;
+use veridict::verdict::{self, Thresholds};
 use veridict::{
     BootstrapMethod, CiMethod, FailurePolicy, MetricConfig, MetricKind, Verdict, VeridictError,
     input, matrix, power,
@@ -117,6 +118,15 @@ struct CompareArgs {
     /// on the same record.
     #[arg(long, value_enum, default_value = "report-only")]
     failure_policy: FailurePolicyArg,
+
+    /// Multiple-comparison correction across this run's metric family (relevant whenever more
+    /// than one --metric is given; a single-metric run is a harmless no-op). `none` (default):
+    /// today's existing behavior, unchanged. `bonferroni`: uniform per-metric significance
+    /// alpha/family_size. `holm`: step-down, uniformly more powerful than Bonferroni for the same
+    /// family-wise guarantee. Either can only downgrade an unadjusted pass to inconclusive, never
+    /// invent a fail - see docs/metrics.md's --correction section.
+    #[arg(long, value_enum, default_value = "none")]
+    correction: CorrectionArg,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -427,6 +437,23 @@ enum FormatArg {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum CorrectionArg {
+    None,
+    Bonferroni,
+    Holm,
+}
+
+impl From<CorrectionArg> for Correction {
+    fn from(c: CorrectionArg) -> Self {
+        match c {
+            CorrectionArg::None => Correction::None,
+            CorrectionArg::Bonferroni => Correction::Bonferroni,
+            CorrectionArg::Holm => Correction::Holm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum CiMethodArg {
     Wilson,
     Exact,
@@ -523,8 +550,9 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
         .map(|m| MetricConfig::new(m.into(), ci_method, bootstrap_method, failure_policy))
         .collect::<Result<_, _>>()?;
 
+    let correction: Correction = args.correction.into();
     let (verdict, json, markdown) = if let [only] = metrics[..] {
-        let report = veridict::compare_one(
+        let mut report = veridict::compare_one(
             records,
             only,
             args.confidence,
@@ -533,13 +561,19 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             seed,
             args.paired_by_id,
         )?;
+        veridict::correction::apply_correction(
+            std::slice::from_mut(&mut report),
+            &metrics,
+            correction,
+            args.confidence,
+        );
         (
             report.verdict,
             report.to_json_pretty(),
             report.to_markdown(),
         )
     } else {
-        let multi = veridict::compare_many(
+        let mut multi = veridict::compare_many(
             records,
             &metrics,
             args.confidence,
@@ -548,6 +582,13 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             seed,
             args.paired_by_id,
         )?;
+        veridict::correction::apply_correction(
+            &mut multi.reports,
+            &metrics,
+            correction,
+            args.confidence,
+        );
+        multi.verdict = verdict::aggregate(multi.reports.iter().map(|r| r.verdict));
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };
 

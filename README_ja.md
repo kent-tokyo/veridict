@@ -89,6 +89,12 @@ cat results.jsonl | veridict compare - --metric winrate
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
+そのメトリクスの組に対して、偶然のpassを防ぐ([多重比較補正](#多重比較補正)を参照):
+
+```bash
+veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --correction holm
+```
+
 小さいサンプルには正確二項信頼区間、歪んだ分布にはBCaブートストラップ:
 
 ```bash
@@ -218,6 +224,54 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 `exclude`/`loss` は勝敗ベースのメトリクス(`winrate`/`elo`)にのみ適用されます。`--metric mean-diff`/`--metric sign-test` と組み合わせるのは設定エラーです - 失敗した数値トライアルに恣意的なペナルティを課す原理的な方法がないためです。
 
 複数の `--metric` を同時に指定した場合も、入力全体のスキャンは1回だけです(メトリクスの数だけスキャンを繰り返すのではなく、1回のスキャンで全メトリクスに各レコードを渡します)。
+
+## 多重比較補正
+
+複数の `--metric` を同時に実行するということは、*何か1つ*が偶然しきい値を超えてしまう独立した
+チャンスが複数あるということです - `--correction bonferroni`/`holm` は、その組み合わさったリスク
+を、補正なしの単一メトリクスが今日すでに持っているリスク以下に保ちます(詳しい理由は
+[`docs/metrics_ja.md`](docs/metrics_ja.md)の `--correction` セクションを参照)。デフォルトは
+`none` - オプトインしない限り、今日と全く同じ挙動のままです。
+
+```console
+$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
+{
+  "schema_version": 1,
+  "verdict": "inconclusive",
+  "reports": [
+    {
+      "verdict": "inconclusive",
+      "metric": "winrate",
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Bonferroni correction (family_size=2): achieved significance 0.045328 exceeds the corrected threshold 0.025000 - downgraded from pass to inconclusive.",
+      "correction_method": "bonferroni",
+      "family_size": 2,
+      "achieved_alpha": 0.045327562117809694,
+      "adjusted_alpha_threshold": 0.025000000000000022,
+      "unadjusted_verdict": "pass"
+      // ...
+    },
+    {
+      "verdict": "pass",
+      "metric": "elo",
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Bonferroni correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "correction_method": "bonferroni",
+      "family_size": 2,
+      "achieved_alpha": 0.016420872210740903,
+      "adjusted_alpha_threshold": 0.025000000000000022,
+      "unadjusted_verdict": "pass"
+      // ...
+    }
+  ]
+}
+```
+
+`--correction` なしでは、この同じ入力に対して両方のメトリクスがpassし、全体の判定も `pass` に
+なります。`winrate` の証拠は本物ですが相対的に弱く、2つに分けるとその補正後のしきい値をもう超え
+られなくなるため、全体の判定は `inconclusive` に下がります - これはまさに本プロジェクトの土台と
+なっている「false passはinconclusiveより悪い」という方針を、単一メトリクスの中だけでなくメトリクス
+の組全体に適用したものです。`--correction holm` は同じ保証のもとで `bonferroni` より一様に検出力
+が高く(この例では両方のメトリクスがpassしたままになります)、どちらも補正前のpassを
+inconclusiveに格下げすることしかできず、failを新たに作り出すことはありません。
 
 ## レポートの追加情報
 

@@ -1498,3 +1498,215 @@ fn low_id_diversity_is_silent_when_every_id_appears_exactly_twice() {
         .stdout(predicate::str::contains("\"low_id_diversity\": false"))
         .stdout(predicate::str::contains("low id diversity").not());
 }
+
+// --- --correction ---
+// 62 candidate wins / 38 baseline wins out of 100 is a real, verified marginal pass at the
+// default 95% confidence for --min-effect 0.02 (ci_low ~= 0.0221, just past the 0.02 pass bar) -
+// weak enough that a family of 2 metrics downgrades it under Bonferroni, but not under Holm
+// (uniformly more powerful for the same guarantee). Numbers checked against a real run before
+// writing these tests, not hand-derived.
+
+fn marginal_winrate_stdin() -> String {
+    let mut stdin = String::new();
+    for _ in 0..62 {
+        stdin.push_str("{\"result\":\"candidate_win\"}\n");
+    }
+    for _ in 0..38 {
+        stdin.push_str("{\"result\":\"baseline_win\"}\n");
+    }
+    stdin
+}
+
+#[test]
+fn correction_none_is_the_default_and_produces_no_extra_json_keys() {
+    // The concrete proof of "no behavior change when disabled": an exact key-set check, not just
+    // "still passes" - correction_method/family_size/achieved_alpha/adjusted_alpha_threshold/
+    // unadjusted_verdict must be entirely absent, not present as null.
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let keys: Vec<&str> = json
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for field in [
+        "correction_method",
+        "family_size",
+        "achieved_alpha",
+        "adjusted_alpha_threshold",
+        "unadjusted_verdict",
+    ] {
+        assert!(!keys.contains(&field), "unexpected key {field} in {keys:?}");
+    }
+}
+
+#[test]
+fn correction_explicit_none_matches_the_default() {
+    let stdin = marginal_winrate_stdin();
+    let default_output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+        ])
+        .write_stdin(stdin.clone())
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    let explicit_none_output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "none",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(default_output, explicit_none_output);
+}
+
+#[test]
+fn correction_bonferroni_downgrades_a_marginal_pass_in_a_two_metric_family() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "bonferroni",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains(
+            "\"correction_method\": \"bonferroni\"",
+        ))
+        .stdout(predicate::str::contains("\"family_size\": 2"))
+        .stdout(predicate::str::contains("\"unadjusted_verdict\": \"pass\""));
+}
+
+#[test]
+fn correction_holm_is_uniformly_more_powerful_than_bonferroni_on_the_same_family() {
+    // Same input, same family - Holm keeps the overall verdict at pass where Bonferroni (above)
+    // downgrades it to inconclusive, the concrete behavioral proof of Holm's higher power.
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "holm",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
+        .stdout(predicate::str::contains("\"correction_method\": \"holm\""));
+}
+
+#[test]
+fn correction_on_a_single_metric_run_is_a_no_op() {
+    // family_size=1 degenerates both corrections to the report's own existing pass condition.
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "holm",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
+        .stdout(predicate::str::contains("\"family_size\": 1"));
+}
+
+#[test]
+fn correction_downgrades_the_multi_report_overall_verdict_too() {
+    // MultiReport.verdict must be re-aggregated post-correction, not just each individual
+    // report's own verdict - it's the field verdict::aggregate/the exit code actually act on.
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "bonferroni",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["verdict"], "inconclusive");
+    let reports = json["reports"].as_array().unwrap();
+    assert_eq!(reports[0]["metric"], "winrate");
+    assert_eq!(reports[0]["verdict"], "inconclusive");
+    assert_eq!(reports[1]["metric"], "elo");
+    assert_eq!(reports[1]["verdict"], "pass");
+}
+
+#[test]
+fn correction_rejects_an_unknown_method() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--correction",
+            "sidak",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value"));
+}

@@ -12,6 +12,27 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- `compare --correction none|bonferroni|holm`: multiple-comparison correction across a
+  multi-`--metric` family, controlling the family's one-sided false-pass rate at or below what a
+  single, uncorrected metric already has today (`alpha/2` at the default 95% confidence) - not the
+  nominal `alpha` itself, which would let a "corrected" family tolerate a *higher* false-pass rate
+  than a single uncorrected metric already does (see `docs/metrics.md`'s `--correction` section).
+  Default `none` - today's existing behavior, byte-identical, unless opted into. Bonferroni applies
+  a uniform `alpha/family_size` significance budget; Holm (recommended) step-down sorts by achieved
+  significance and stops rejecting at the first failure, uniformly more powerful than Bonferroni
+  for the same guarantee. Both share one `achieved_alpha` binary search (via the standard CI-test
+  duality, against the same real Wilson/Clopper-Pearson/Jeffreys functions `compare` already uses)
+  rather than separate math. Correction can only downgrade an unadjusted `pass` to `inconclusive`,
+  never invent a `fail` - a direct consequence of widening a CI, not a special case. `mean-diff`
+  can't be individually corrected (no closed-form CI at a hypothetical confidence for a bootstrap
+  interval) but still counts toward `family_size`. New `Report` fields, all omitted (not `null`)
+  unless `--correction` is active: `correction_method`, `family_size`, `achieved_alpha`,
+  `adjusted_alpha_threshold`, `unadjusted_verdict` (`verdict` itself becomes the adjusted value).
+  `matrix`'s all-pairs correction is out of scope for this round - see `docs/research-map.md`'s new
+  "matrix verdict semantics" entry for the open design questions.
+
 ## [0.8.0] - 2026-07-09
 
 Purely additive - no breaking changes since `0.7.0`.

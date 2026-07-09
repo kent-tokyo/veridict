@@ -64,7 +64,31 @@
       "items": { "type": "string" },
       "description": "Human-readable data-quality flags; never affects verdict. Structured counterpart is data_quality."
     },
-    "data_quality": { "$ref": "#/$defs/data_quality" }
+    "data_quality": { "$ref": "#/$defs/data_quality" },
+    "correction_method": {
+      "type": "string",
+      "enum": ["bonferroni", "holm"],
+      "description": "Present only when `compare --correction bonferroni|holm` was requested for this run; omitted entirely (not null) otherwise, so a default run's JSON is byte-identical to before this field existed."
+    },
+    "family_size": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Number of --metric flags in this run's family; present only alongside correction_method. mean-diff counts toward this even though it can't be individually corrected (see achieved_alpha)."
+    },
+    "achieved_alpha": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Smallest one-sided significance at which this report's own CI would still pass, in the same units as (1 - confidence). Present only for a report whose unadjusted verdict was pass and whose metric has a closed-form CI (not mean-diff)."
+    },
+    "adjusted_alpha_threshold": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "The corrected significance threshold achieved_alpha was actually compared against (alpha/family_size for bonferroni; alpha/(family_size-rank+1) for holm). Present exactly when achieved_alpha is."
+    },
+    "unadjusted_verdict": {
+      "$ref": "#/$defs/verdict",
+      "description": "This report's verdict before correction was applied. Present only alongside correction_method; verdict above already reflects the adjusted value."
+    }
   },
   "$defs": {
     "verdict": {

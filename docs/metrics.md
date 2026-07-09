@@ -400,6 +400,83 @@ threshold to use, and the "false pass is worse than inconclusive" bias behind pi
 pessimistic/optimistic bound rather than the point estimate, are veridict's own design decisions,
 not a theorem.
 
+## `--correction`
+
+**Why this exists.** `compare --metric elo --metric winrate --metric sign-test` runs several
+metrics against the same candidate in one call; `verdict::aggregate` combines them (any `fail`
+sinks the run, else any `inconclusive` holds it back, else `pass`). But each metric's own
+pass/fail decision is made independently at the stated `--confidence` - run enough metrics (or,
+across a broader campaign, enough candidates) and the chance that *something* clears its bar by
+luck alone climbs. That directly undermines this project's own "a false pass is worse than an
+inconclusive result" bias (see above): an uncorrected multi-metric family is more likely to
+produce a lucky pass than any single metric run alone would be. `--correction none` (the default)
+is exactly today's existing behavior, unchanged - correction is opt-in.
+
+**The family-error target: no worse than today's own single-metric baseline.** `compare`'s pass
+rule already reads a *two-sided* `(1-confidence)` CI's *lower* bound as a one-sided pass signal -
+a two-sided interval splits its error budget evenly between both tails, so a single, uncorrected
+metric today already has a one-sided false-pass rate of `alpha/2` (e.g. 0.025 at the default 95%
+confidence), not the nominal `alpha`. The natural, and only defensible, correction target is
+therefore "running `m` metrics together is no more dangerous than running one" - keep the
+*family's* one-sided false-pass rate at that same `alpha/2`, not the nominal `alpha` itself (which
+would let a "corrected" multi-metric family tolerate a *higher* false-pass rate than a single
+uncorrected metric already has today). This falls straight out of standard textbook Bonferroni
+simultaneous confidence intervals (Dunn 1961; Miller, *Simultaneous Statistical Inference*, 1966):
+recompute each test's ordinary, symmetric, two-sided CI at confidence `1 - alpha/m` (the same
+`alpha = 1-confidence` the tool already uses, split across the family - no extra factor of
+anything) and re-run the same pass/fail rule against it.
+
+**`--correction bonferroni`**: a uniform significance budget `alpha/family_size` for every metric
+in the run, regardless of how strong or weak each one's own evidence is.
+
+**`--correction holm`** (recommended over Bonferroni): sorts metrics by their own achieved
+significance ascending and steps down, comparing the `k`-th (1-based) most significant result to
+`alpha/(family_size-k+1)`, stopping at the first failure. Uniformly more powerful than Bonferroni
+for the same family-wise guarantee - it never rejects fewer true passes than Bonferroni would, and
+often rejects strictly more (Holm 1979). A report past an early failure in the ordered sequence is
+held back regardless of its own significance, because that sequential stop is what gives Holm its
+guarantee, not independent per-metric comparisons.
+
+**Correction can only downgrade a pass, never invent a fail.** Widening a CI (lower confidence
+budget per test) only ever pushes its lower bound down and its upper bound up. For a report that
+already passed (`ci_low >= pass_above`, which by construction means `ci_low > fail_below` too,
+since `pass_above > fail_below`), a wider `ci_high` can never newly satisfy `ci_high <= fail_below`.
+So correction only ever moves an unadjusted `pass` to `inconclusive` - it never fails a metric that
+wasn't already failing, and never touches a metric whose unadjusted verdict was already `fail` or
+`inconclusive`. That asymmetry falls straight out of the math above; it isn't a special case.
+
+**`mean-diff` counts toward `family_size` but keeps its own, unadjusted verdict.** There is no
+closed-form CI-at-a-hypothetical-confidence function for a bootstrap CI without real resampled data
+(same reason `estimated_additional_trials`/`power` both special-case it) - a mean-diff report's own
+pass/fail is left as computed. It still counts toward `family_size`, though: excluding it would
+under-count the real multiplicity risk the *other* metrics in the same run are actually exposed to
+- the conservative choice.
+
+**Report fields** (all omitted, not present as `null`, unless `--correction` is something other
+than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
+`achieved_alpha` (the smallest one-sided significance at which this report's own CI would still
+pass - `null`/omitted for `mean-diff`), `adjusted_alpha_threshold` (the corrected threshold
+`achieved_alpha` was actually compared against), and `unadjusted_verdict` (the verdict before
+correction - `verdict` itself becomes the *adjusted* value, since that's the field the exit code
+and `verdict::aggregate` actually act on).
+
+**A single-metric run degenerates to a no-op.** With `family_size=1`, both Bonferroni's and Holm's
+threshold reduce to `alpha/1 = alpha` - exactly the report's own existing, uncorrected pass
+condition. `--correction` is accepted and reported on a single-`--metric` run for uniformity, but
+never changes its verdict.
+
+**`estimated_additional_trials` stays `null` on a correction-downgraded report.** It's computed
+once, before correction runs, from the *unadjusted* verdict - a report downgraded from `pass` to
+`inconclusive` by correction still shows `null` there, same as any other `pass`. A consumer that
+assumes "inconclusive always has a trials estimate" will see `null` for this new reason too; the
+number correction's `inconclusive` would actually need (more trials at the *corrected* confidence,
+not the original one) isn't computed this round.
+
+**Out of scope for now**: `matrix`'s all-pairs correction (matrix has no verdict concept to correct
+at all today - see `docs/research-map.md`'s "matrix verdict semantics" entry), `sprt`'s own
+multiplicity question (running several simultaneous SPRTs), and Benjamini-Hochberg/FDR-style
+correction (a different, less conservative family-error target than FWER).
+
 ## `estimated_additional_trials`
 
 **Mixed: exact for three metrics, a heuristic for one.** This is a rough estimate of how many

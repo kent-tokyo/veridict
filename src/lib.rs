@@ -3,6 +3,7 @@
 //! enough detail to explain why. No stdout/stderr side effects; that is the
 //! CLI's job (see `main.rs`).
 
+pub mod correction;
 pub mod error;
 pub mod input;
 pub mod matrix;
@@ -379,6 +380,11 @@ fn build_report(
         estimated_additional_trials,
         warnings,
         data_quality,
+        correction_method: None,
+        family_size: None,
+        achieved_alpha: None,
+        adjusted_alpha_threshold: None,
+        unadjusted_verdict: None,
     }
 }
 

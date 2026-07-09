@@ -55,6 +55,22 @@ pub struct Report {
     /// replacement - `REPORT_SCHEMA_VERSION`'s policy is to stay at `1`
     /// until a field is removed/renamed, and this is a pure addition).
     pub data_quality: DataQuality,
+    /// Multiple-comparison correction fields (see `correction` module) - all
+    /// `None`/omitted unless `compare --correction bonferroni|holm` was
+    /// requested, so a default run's JSON is byte-identical to before this
+    /// existed. `verdict` above already reflects the *adjusted* value once
+    /// correction is active; `unadjusted_verdict` keeps the pre-correction
+    /// value visible alongside it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correction_method: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub achieved_alpha: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjusted_alpha_threshold: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unadjusted_verdict: Option<crate::Verdict>,
 }
 
 /// Machine-checkable data-quality flags, computed together with `warnings`'
@@ -233,6 +249,11 @@ mod tests {
             estimated_additional_trials: None,
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
+            correction_method: None,
+            family_size: None,
+            achieved_alpha: None,
+            adjusted_alpha_threshold: None,
+            unadjusted_verdict: None,
         }
     }
 
