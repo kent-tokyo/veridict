@@ -10,7 +10,9 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
-## [Unreleased]
+## [0.10.0] - 2026-07-10
+
+Purely additive - no breaking changes since `0.9.0`.
 
 ### Added
 
