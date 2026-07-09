@@ -52,29 +52,35 @@ normalized Elo exists to solve.
 needed *before* running an experiment (the inverse of what `estimated_additional_trials` already
 does reactively after an inconclusive result).
 
-**Now covered, for `matrix`/tournament comparisons and for plain `compare` runs.** `veridict plan`
-(see `docs/metrics.md`'s `plan` section) does this for the `matrix`/tournament-comparison case -
-given `--min-elo`, it estimates additional trials needed per pair, ranked most-uncertain first.
-`veridict power` (see `docs/metrics.md`'s `power` section) does the equivalent for a plain two-way
-`compare --metric winrate/sign-test/elo` run: given `--min-effect` (the pass bar) and
+**Now covered, for `matrix`/tournament comparisons, plain `compare` runs, and `sprt`.** `veridict
+plan` (see `docs/metrics.md`'s `plan` section) does this for the `matrix`/tournament-comparison
+case - given `--min-elo`, it estimates additional trials needed per pair, ranked most-uncertain
+first. `veridict power` (see `docs/metrics.md`'s `power` section) does the equivalent for a plain
+two-way `compare --metric winrate/sign-test/elo` run: given `--min-effect` (the pass bar) and
 `--assume-effect` (the true effect being powered for - must exceed `--min-effect`, since power
 evaluated with the two equal is undefined-in-practice, see that section), it estimates trials
 needed for a target power, computed exactly against the real Wilson/Clopper-Pearson/Jeffreys CI
-functions this project already ships, not a textbook approximation.
+functions this project already ships, not a textbook approximation. `veridict power --sprt` (see
+`docs/metrics.md`'s `power --sprt` section) covers `sprt` itself: given `--elo0`/`--elo1`/
+`--alpha`/`--beta` (the same inputs `sprt` takes), it reports the *expected* number of trials to a
+decision under each hypothesis via Wald's classical Average Sample Number (ASN) approximation -
+`E[N|H] ≈ [alpha'(H)*ln(A) + (1-alpha'(H))*ln(B)] / E[Z|H]`, where `alpha'(H)` is the probability
+of stopping at the *upper* boundary `ln(A) = ln((1-beta)/alpha)` under hypothesis `H` - source:
+Wald (1947), *Sequential Analysis*; this pairing was backwards in an earlier draft of this
+project's own proposal, which would have produced a negative expected sample size under H1,
+corrected before implementation. Structurally different from the CI-crossing-probability mode (no
+`--target-power` - alpha/beta already fix the guaranteed error rates), so it's a separate `--sprt`
+flag on the same subcommand rather than a `--metric` value. Wald's ASN is a known approximation
+(ignores "overshoot" - the LLR's real excess past a boundary at the moment of stopping); the real
+bias is measured empirically, not just cited, in `tests/calibration/sprt_asn_calibration.rs`
+(about 1-2% at elo0=0/elo1=20/alpha=beta=0.05 - small at this gap, not claimed universal).
 
 **What's still missing:** `compare --metric mean-diff`'s equivalent (would need an assumed
 standard deviation - `--assume-sd`/`--pilot FILE`, no real data exists pre-experiment to estimate
-one from) and `sprt`'s own expected-sample-size (Wald's classical Average Sample Number
-approximation - `E[N|H] ≈ [alpha'(H)*ln(A) + (1-alpha'(H))*ln(B)] / E[Z|H]`, where `alpha'(H)` is
-the probability of stopping at the *upper* boundary `ln(A) = ln((1-beta)/alpha)` under hypothesis
-`H` - source: Wald (1947), *Sequential Analysis*; note this pairing, since an earlier draft of this
-project's own proposal had it backwards, which would produce a negative expected sample size under
-H1). Both are a structurally different output shape from `power`'s CI-crossing-probability
-framing (no `--target-power` for the SPRT case - alpha/beta already fix the guaranteed error
-rates, `power` there would only report an expected trial count, not search for one), and are
-deferred as a distinct future `power` extension, not folded into what shipped. Also still separate
-and deferred: budget-constrained allocation across a fixed trial budget for `plan` (see the entry
-below), which neither `plan` nor `power` attempts.
+one from) - deferred as a distinct future `power` extension, not folded into what shipped. Also
+still separate and deferred: budget-constrained allocation across a fixed trial budget for `plan`
+(see the entry below), which neither `plan` nor `power` attempts, and multiple-comparison
+correction for multi-metric `compare` runs (see that entry below).
 
 ### Draw-aware `power --metric elo`
 

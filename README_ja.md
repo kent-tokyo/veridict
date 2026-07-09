@@ -149,6 +149,12 @@ veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
 veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
 ```
 
+または、各仮説の下でのSPRTの期待サンプルサイズを直接見積もります:
+
+```bash
+veridict power --sprt --elo0 0 --elo1 20
+```
+
 ### 終了コード
 
 | コード | 意味 |
@@ -318,6 +324,39 @@ $ veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 
 * **`--assume-effect`** - 実際に検出力を計算する対象の真の効果。真の効果を合格ラインと等しく設定して検出力を評価すると、その境界そのものにおけるCIの被覆確率の裏返し(`≈ 1 - confidence`)しか得られません - 横ばいで、トライアルをどれだけ追加しても `--target-power` に近づいていきません。理由(ルールだけでなく)は [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power` セクションを参照してください。
 
 `estimated_trials` は*厳密な*探索(`sum Binomial_pmf(n, p1, k) * [CI_lower(k,n) >= p0]`、教科書的な近似ではありません)により、`compare` 自身が使うのと同じ実際の `wilson`/`exact`/`jeffreys` CI関数に対して求められます(`elo` は `wilson` のみを受け付けます。`compare --metric elo` と同じです)。`mean-diff` はサポートされません(実験前には仮定すべき分散が存在しないため - フラグレベルで拒否され、黙って無視されることはありません)。`--paired-by-id` は受け付けられますが数値は変わりません - 理由はdocsセクションを参照してください。
+
+`--sprt` は構造的に異なる問いに切り替わります: Waldの SPRT はその構成上、`n` に関わらず既に
+`alpha`/`beta` のエラー率を保証しているため、目標検出力を探索して求めるべきサンプルサイズという
+ものが存在しません。代わりに、`sprt` 自身が受け取るのと同じ `--elo0`/`--elo1`/`--alpha`/`--beta`
+が与えられたときの、各仮説の下での*期待*トライアル数(Waldの用語で「平均サンプル数」)を報告します:
+
+```console
+$ veridict power --sprt --elo0 0 --elo1 20
+{
+  "schema_version": 1,
+  "elo0": 0.0,
+  "elo1": 20.0,
+  "alpha": 0.05,
+  "beta": 0.05,
+  "expected_trials_under_h0": 1601,
+  "expected_trials_under_h1": 1603,
+  "method": "wald_asn_approximation",
+  "notes": [
+    "expected_trials_under_h0/h1 are the two endpoint cases (the true strength sitting exactly at elo0 or elo1) - a real candidate whose true strength lies between elo0 and elo1, the common case since you're running SPRT precisely because that strength is unknown, needs substantially more trials than either endpoint: a Wald SPRT's expected sample size peaks near the midpoint between the two hypotheses, not at either one. Budget above these two numbers, not at them, when the candidate's true strength is genuinely uncertain.",
+    "Wald's classical Average Sample Number approximation - ignores \"overshoot\" (the LLR's excess past a boundary at the moment of stopping), so a real run typically needs somewhat more trials than this number in practice.",
+    "Counts decisive trials only (same as --sprt-variant wald itself) - a draw-heavy testcase needs more real games than this number, since draws don't move the LLR at all. Use --sprt-variant trinomial/pentanomial for draw-heavy testing."
+  ]
+}
+```
+
+**この2つの数値は楽観的な両端であり、最悪ケースではありません。** 期待サンプルサイズが最大になる
+のは、候補の真の実力が `elo0` と `elo1` の*間*にある場合です - これは実測された効果です(同じ
+elo0/elo1/alpha/betaでどちらの端点よりも約1.6倍、`tests/calibration/sprt_asn_calibration.rs`
+参照)。下記のオーバーシュートに関する注意点のような小さな補正ではありません。候補の真の実力が
+本当に不確かな場合は、これらの数値より上で予算を組んでください。
+
+計算式・出典・*測定済みの*オーバーシュートバイアス(単なる引用ではなく)については
+[`docs/metrics_ja.md`](docs/metrics_ja.md) の `power --sprt` セクションを参照してください。
 
 ## ペアテストケース(paired testcases)
 

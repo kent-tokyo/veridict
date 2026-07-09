@@ -300,39 +300,80 @@ struct PlanArgs {
 
 #[derive(clap::Args)]
 struct PowerArgs {
-    #[arg(long, value_enum)]
-    metric: PowerMetricArg,
+    #[arg(
+        long,
+        value_enum,
+        required_unless_present = "sprt",
+        conflicts_with = "sprt"
+    )]
+    metric: Option<PowerMetricArg>,
 
     /// The pass bar - identical meaning to `compare --min-effect`/`--pass-above` (the CI lower
     /// bound a real run must clear to pass).
-    #[arg(long, allow_hyphen_values = true)]
-    min_effect: f64,
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required_unless_present = "sprt",
+        conflicts_with = "sprt"
+    )]
+    min_effect: Option<f64>,
 
     /// The true effect being powered for - must be strictly greater than --min-effect. Evaluating
     /// power with the true effect equal to the pass bar only recovers the interval's own
     /// miscoverage at that boundary (~1-confidence), not a number that climbs toward
     /// --target-power with more trials - see `docs/metrics.md`'s `power` section.
-    #[arg(long, allow_hyphen_values = true)]
-    assume_effect: f64,
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        required_unless_present = "sprt",
+        conflicts_with = "sprt"
+    )]
+    assume_effect: Option<f64>,
 
-    #[arg(long, default_value_t = 0.95)]
+    #[arg(long, default_value_t = 0.95, conflicts_with = "sprt")]
     confidence: f64,
 
     /// Target probability of reaching a passing verdict, assuming the true effect is exactly
     /// --assume-effect.
-    #[arg(long, default_value_t = 0.80)]
+    #[arg(long, default_value_t = 0.80, conflicts_with = "sprt")]
     target_power: f64,
 
     /// Confidence interval method - same meaning as `compare --ci-method`; `exact`/`jeffreys` are
     /// only valid for winrate/sign-test, same restriction as `compare`.
-    #[arg(long, value_enum, default_value = "wilson")]
+    #[arg(long, value_enum, default_value = "wilson", conflicts_with = "sprt")]
     ci_method: CiMethodArg,
 
     /// Accepted but does not change the estimate - see `docs/metrics.md`'s `power` section for
     /// why the actual variance reduction from pairing can't be predicted without real data. Adds
     /// a caveat to the report's `notes` instead.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "sprt")]
     paired_by_id: bool,
+
+    /// Estimate SPRT's expected sample size (Wald's ASN approximation) instead of a
+    /// CI-crossing-probability search. Requires --elo0/--elo1; mutually exclusive with
+    /// --metric/--min-effect/--assume-effect/--confidence/--target-power/--ci-method/
+    /// --paired-by-id, since Wald's alpha/beta already fix the guaranteed error rates - there's no
+    /// target power to search a sample size for.
+    #[arg(long, requires_all = ["elo0", "elo1"])]
+    sprt: bool,
+
+    /// H0 for --sprt: the candidate is at most this many logistic-Elo points stronger. Same
+    /// meaning as `veridict sprt --elo0`.
+    #[arg(long, allow_hyphen_values = true, requires = "sprt")]
+    elo0: Option<f64>,
+
+    /// H1 for --sprt: the candidate is at least this many logistic-Elo points stronger. Same
+    /// meaning as `veridict sprt --elo1`.
+    #[arg(long, allow_hyphen_values = true, requires = "sprt")]
+    elo1: Option<f64>,
+
+    /// False-positive rate for --sprt. Same meaning and default as `veridict sprt --alpha`.
+    #[arg(long, default_value_t = 0.05)]
+    alpha: f64,
+
+    /// False-negative rate for --sprt. Same meaning and default as `veridict sprt --beta`.
+    #[arg(long, default_value_t = 0.05)]
+    beta: f64,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -678,18 +719,36 @@ fn run_plan(args: PlanArgs) -> Result<ExitCode, VeridictError> {
 }
 
 fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
-    let ci_method: CiMethod = args.ci_method.into();
-    let metric = power::PowerMetric::new(args.metric.into(), ci_method)?;
-    let report = power::estimate_trials(
-        metric,
-        args.min_effect,
-        args.assume_effect,
-        args.confidence,
-        args.target_power,
-        args.paired_by_id,
-    )?;
-    let json = report.to_json_pretty();
-    let markdown = report.to_markdown();
+    let (json, markdown) = if args.sprt {
+        // clap's `requires_all = ["elo0", "elo1"]` on --sprt guarantees both are `Some` here.
+        let report = power::estimate_sprt_expected_trials(
+            args.elo0.expect("clap requires elo0 with --sprt"),
+            args.elo1.expect("clap requires elo1 with --sprt"),
+            args.alpha,
+            args.beta,
+        )?;
+        (report.to_json_pretty(), report.to_markdown())
+    } else {
+        // clap's `required_unless_present = "sprt"` on these three guarantees `Some` here.
+        let ci_method: CiMethod = args.ci_method.into();
+        let metric = power::PowerMetric::new(
+            args.metric
+                .expect("clap requires --metric without --sprt")
+                .into(),
+            ci_method,
+        )?;
+        let report = power::estimate_trials(
+            metric,
+            args.min_effect
+                .expect("clap requires --min-effect without --sprt"),
+            args.assume_effect
+                .expect("clap requires --assume-effect without --sprt"),
+            args.confidence,
+            args.target_power,
+            args.paired_by_id,
+        )?;
+        (report.to_json_pretty(), report.to_markdown())
+    };
 
     println!("{json}");
     write_reports(&json, &markdown, &args.report_json, &args.report_md)?;

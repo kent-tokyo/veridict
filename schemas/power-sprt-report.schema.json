@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/power-sprt-report.schema.json",
+  "title": "veridict power --sprt report",
+  "description": "JSON output of `veridict power --sprt`. Estimates the expected number of decisive trials to a Wald SPRT decision under each hypothesis (Wald's classical Average Sample Number approximation), given elo0/elo1/alpha/beta - the same inputs `veridict sprt --sprt-variant wald` itself takes. Structurally distinct from power-report.schema.json (the CI-crossing-probability mode): Wald's alpha/beta already fix the guaranteed error rates, so there is no target_power to search a sample size for.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "elo0",
+    "elo1",
+    "alpha",
+    "beta",
+    "expected_trials_under_h0",
+    "expected_trials_under_h1",
+    "method",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+    },
+    "elo0": {
+      "type": "number",
+      "description": "H0: the candidate is at most this many logistic-Elo points stronger. Same meaning as `veridict sprt --elo0`."
+    },
+    "elo1": {
+      "type": "number",
+      "description": "H1: the candidate is at least this many logistic-Elo points stronger. Must be strictly greater than elo0."
+    },
+    "alpha": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "False-positive rate: probability of accepting H1 when H0 is true."
+    },
+    "beta": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "False-negative rate: probability of accepting H0 when H1 is true."
+    },
+    "expected_trials_under_h0": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wald's ASN approximation for the expected number of decisive trials to a decision, assuming the true model sits exactly at H0."
+    },
+    "expected_trials_under_h1": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wald's ASN approximation for the expected number of decisive trials to a decision, assuming the true model sits exactly at H1."
+    },
+    "method": {
+      "const": "wald_asn_approximation"
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Always includes the overshoot-approximation caveat (a real run typically needs somewhat more trials than this number - measured empirically in tests/calibration/sprt_asn_calibration.rs) and the decisive-trials-only/draws caveat."
+    }
+  }
+}

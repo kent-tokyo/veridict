@@ -707,6 +707,71 @@ fn power_report_md_flag_writes_markdown_file() {
 }
 
 #[test]
+fn power_sprt_produces_valid_json_and_exits_zero() {
+    veridict()
+        .args(["power", "--sprt", "--elo0", "0", "--elo1", "20"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains(
+            "\"method\": \"wald_asn_approximation\"",
+        ))
+        .stdout(predicate::str::contains("expected_trials_under_h0"))
+        .stdout(predicate::str::contains("expected_trials_under_h1"));
+}
+
+#[test]
+fn power_sprt_rejects_elo0_greater_than_elo1_via_reused_sprt_config_validation() {
+    veridict()
+        .args(["power", "--sprt", "--elo0", "20", "--elo1", "0"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("elo0"))
+        .stderr(predicate::str::contains("elo1"));
+}
+
+#[test]
+fn power_sprt_conflicts_with_metric() {
+    veridict()
+        .args([
+            "power", "--sprt", "--elo0", "0", "--elo1", "20", "--metric", "elo",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn power_sprt_requires_elo1_alongside_elo0() {
+    veridict()
+        .args(["power", "--sprt", "--elo0", "0"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn power_sprt_report_md_flag_writes_markdown_file() {
+    let dir = std::env::temp_dir();
+    let md = dir.join("veridict_cli_test_power_sprt_md_report.md");
+    veridict()
+        .args([
+            "power",
+            "--sprt",
+            "--elo0",
+            "0",
+            "--elo1",
+            "20",
+            "--report-md",
+            md.to_str().unwrap(),
+        ])
+        .assert()
+        .code(0);
+    let contents = std::fs::read_to_string(&md).unwrap();
+    assert!(contents.contains("# Veridict Power (SPRT)"));
+    std::fs::remove_file(&md).ok();
+}
+
+#[test]
 fn power_paired_by_id_adds_a_note_without_changing_the_flag_free_json_shape() {
     let output = veridict()
         .args([

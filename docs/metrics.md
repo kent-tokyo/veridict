@@ -336,6 +336,59 @@ Consistent with this project's "a false pass is worse than an inconclusive resul
 a design aid for choosing how much data to collect, never a substitute for the real confidence
 interval `compare` computes from whatever data is actually observed.
 
+### `power --sprt`
+
+**A structurally different question, not a variant of the search above.** Wald's SPRT guarantees
+its `alpha`/`beta` error rates by construction, regardless of `n` - there's no "target power" to
+search a sample size for. What's useful instead is the *expected* number of trials to a decision
+(Wald's own term: "Average Sample Number", ASN) under each hypothesis, given `--elo0`/`--elo1`/
+`--alpha`/`--beta` - the same inputs `veridict sprt --sprt-variant wald` itself takes
+(`SprtConfig::new` is reused directly for validation, so a bad `elo0 >= elo1` etc. here produces
+the exact same error `sprt` itself would).
+
+**The formula** (Wald's classical approximation - source: Wald (1947), *Sequential Analysis*):
+
+```
+E[N | H] ≈ [alpha'(H) * ln(A) + (1 - alpha'(H)) * ln(B)] / E[Z | H]
+```
+
+`ln(A)`/`ln(B)` are the same stopping boundaries `stats::sprt::bounds` computes for `sprt::run`'s
+real Wald loop - reused directly, not re-derived. `alpha'(H)` is the probability of stopping at the
+*upper* boundary under hypothesis `H`: `alpha` under H0, `1 - beta` under H1 (this pairing was
+backwards in an earlier draft of this feature's own proposal - it would produce a negative expected
+sample size under H1; corrected here and cited in `docs/research-map.md`). `E[Z | H]` is the
+expected per-trial log-likelihood-ratio increment under `H`, computed via `stats::sprt::llr_delta`
+- the same function that accumulates the real LLR in `sprt::run` itself.
+
+**`expected_trials_under_h0`/`expected_trials_under_h1` are the two optimistic endpoints, not the
+expected sample size for an unknown candidate.** A Wald SPRT's expected sample size is unimodal in
+the true strength and *peaks between the two hypotheses*, not at either one - so a candidate whose
+true strength lies somewhere between `elo0` and `elo1` (the common case: that uncertainty is
+precisely why SPRT is being run) needs substantially more trials than either endpoint reports. This
+isn't a small correction like the overshoot bias below - `tests/calibration/sprt_asn_calibration.rs`
+measures the gap directly: at elo0=0/elo1=20/alpha=beta=0.05, the empirical mean at the midpoint
+(true strength = 10 Elo) ran about 1.6x either endpoint's number. Budget above
+`expected_trials_under_h0`/`expected_trials_under_h1`, not at them, whenever the candidate's true
+strength is genuinely uncertain - which is the normal case, not an edge case.
+
+**A known, honest approximation, quantified rather than just cited.** Wald's ASN formula ignores
+"overshoot" - the LLR's real excess past a boundary at the moment a discrete process actually
+crosses it, versus landing exactly on the boundary the formula assumes. A real run typically needs
+somewhat more trials than this number in practice. `tests/calibration/sprt_asn_calibration.rs`
+measures this empirically via Monte Carlo rather than leaving it as an unquantified caveat: at
+elo0=0/elo1=20/alpha=beta=0.05, the real simulated mean ran about 1-2% higher than the formula's
+prediction (both under H0 and under H1) - small at this elo gap, not claimed to hold at every
+elo0/elo1/alpha/beta combination. This is the same underlying gap already listed in
+`docs/research-map.md`'s deferred "Siegmund discrete-time bound correction" entry, now actually
+surfaced by name in this context rather than left purely theoretical.
+
+**Also not modeled: draws.** Like `power --metric elo`'s own draws gap (above), this counts
+*decisive* trials only, matching `--sprt-variant wald` itself (draws don't move the LLR at all,
+same "decisive games only" convention `winrate`/`sign-test` already use). A draw-heavy testcase
+needs more real games than `expected_trials_under_h0`/`expected_trials_under_h1` says - use
+`--sprt-variant trinomial`/`pentanomial` for draw-heavy testing, and treat this number as a
+decisive-trials estimate, not a total-games one.
+
 ## `pass` / `fail` / `inconclusive`
 
 **Not a citation-backed result - this project's own conservative design choice.** The gate

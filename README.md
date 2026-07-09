@@ -159,6 +159,12 @@ Estimate how many trials you'd need, before running a real `compare`:
 veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
 ```
 
+Or estimate SPRT's expected sample size under each hypothesis directly:
+
+```bash
+veridict power --sprt --elo0 0 --elo1 20
+```
+
 ### Exit codes
 
 | Code | Meaning |
@@ -491,6 +497,40 @@ p0]`, not a textbook approximation) against the same real `wilson`/`exact`/`jeff
 isn't supported (no variance to assume pre-experiment - rejected at the flag level, not silently
 ignored). `--paired-by-id` is accepted but doesn't change the number - see the docs section for
 why.
+
+`--sprt` switches to a structurally different question: Wald's SPRT already guarantees its
+`alpha`/`beta` error rates regardless of `n`, so there's no target power to search a sample size
+for. Instead, this reports the *expected* number of trials to a decision (Wald's own "Average
+Sample Number") under each hypothesis, given the same `--elo0`/`--elo1`/`--alpha`/`--beta` `sprt`
+itself takes:
+
+```console
+$ veridict power --sprt --elo0 0 --elo1 20
+{
+  "schema_version": 1,
+  "elo0": 0.0,
+  "elo1": 20.0,
+  "alpha": 0.05,
+  "beta": 0.05,
+  "expected_trials_under_h0": 1601,
+  "expected_trials_under_h1": 1603,
+  "method": "wald_asn_approximation",
+  "notes": [
+    "expected_trials_under_h0/h1 are the two endpoint cases (the true strength sitting exactly at elo0 or elo1) - a real candidate whose true strength lies between elo0 and elo1, the common case since you're running SPRT precisely because that strength is unknown, needs substantially more trials than either endpoint: a Wald SPRT's expected sample size peaks near the midpoint between the two hypotheses, not at either one. Budget above these two numbers, not at them, when the candidate's true strength is genuinely uncertain.",
+    "Wald's classical Average Sample Number approximation - ignores \"overshoot\" (the LLR's excess past a boundary at the moment of stopping), so a real run typically needs somewhat more trials than this number in practice.",
+    "Counts decisive trials only (same as --sprt-variant wald itself) - a draw-heavy testcase needs more real games than this number, since draws don't move the LLR at all. Use --sprt-variant trinomial/pentanomial for draw-heavy testing."
+  ]
+}
+```
+
+**These two numbers are the optimistic endpoints, not the worst case.** Expected sample size is
+highest when the candidate's true strength lies *between* `elo0` and `elo1` - a real, measured
+effect (about 1.6x either endpoint at this same elo0/elo1/alpha/beta, see
+`tests/calibration/sprt_asn_calibration.rs`), not a small correction like the overshoot caveat
+below it. Budget above these numbers when the candidate's true strength is genuinely uncertain.
+
+See [`docs/metrics.md`](docs/metrics.md)'s `power --sprt` section for the formula, its citation,
+and the *measured* overshoot bias (not just a cited caveat).
 
 ## Paired testcases
 

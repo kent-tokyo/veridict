@@ -20,3 +20,6 @@ mod verdict_false_pass_rate;
 
 #[path = "calibration/power_calibration.rs"]
 mod power_calibration;
+
+#[path = "calibration/sprt_asn_calibration.rs"]
+mod sprt_asn_calibration;

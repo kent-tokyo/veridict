@@ -50,11 +50,26 @@
 //! variance from. `PowerMetric::new` rejects `MetricKind::MeanDiff` with a real error (not
 //! `unreachable!()`) since it's a `pub` constructor a library caller could reach directly, even
 //! though the CLI's own `PowerMetricArg` already excludes it at the flag-parsing level.
+//!
+//! **`--sprt` mode is a structurally different question, not a variant of the search above.**
+//! Wald's SPRT guarantees its `alpha`/`beta` error rates by construction, regardless of `n` - there
+//! is no "target power" to search a sample size for the way the CI-crossing mode above does. What's
+//! useful instead is the *expected* number of trials to a decision (Wald's own "Average Sample
+//! Number") under each hypothesis, via the classical ASN approximation:
+//! `E[N|H] ≈ [alpha'(H)*ln(A) + (1-alpha'(H))*ln(B)] / E[Z|H]`, where `alpha'(H)` is the
+//! probability of stopping at the *upper* boundary `ln(A)` under hypothesis `H` (source: Wald
+//! (1947), *Sequential Analysis*) - reusing `stats::sprt::{bounds, score_from_elo, llr_delta}`
+//! directly, the exact same functions `sprt::run`'s own Wald loop uses for its real stopping
+//! boundaries, not re-derived math. This is a known *approximation*: it ignores "overshoot" (the
+//! LLR's excess past a boundary at the moment of stopping), so the true expected sample size runs
+//! somewhat higher in practice - `tests/calibration/sprt_asn_calibration.rs` measures the real bias
+//! empirically rather than leaving it as an unquantified caveat.
 
 use serde::Serialize;
 
 use crate::error::VeridictError;
-use crate::stats::sprt::score_from_elo;
+use crate::sprt::SprtConfig;
+use crate::stats::sprt::{bounds, llr_delta, score_from_elo};
 use crate::stats::{exact, jeffreys, wilson};
 use crate::{CiMethod, MetricKind};
 
@@ -382,6 +397,109 @@ impl PowerReport {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct SprtPowerReport {
+    pub schema_version: u32,
+    pub elo0: f64,
+    pub elo1: f64,
+    pub alpha: f64,
+    pub beta: f64,
+    pub expected_trials_under_h0: u64,
+    pub expected_trials_under_h1: u64,
+    pub method: &'static str,
+    pub notes: Vec<String>,
+}
+
+/// Wald's classical ASN approximation - see the module doc's `--sprt` section for the formula and
+/// its overshoot caveat. `SprtConfig::new` is reused verbatim for validation (not re-derived) so a
+/// bad `elo0`/`elo1`/`alpha`/`beta` here produces the exact same error `veridict sprt` itself
+/// would for the same inputs.
+pub fn estimate_sprt_expected_trials(
+    elo0: f64,
+    elo1: f64,
+    alpha: f64,
+    beta: f64,
+) -> Result<SprtPowerReport, VeridictError> {
+    let config = SprtConfig::new(elo0, elo1, alpha, beta)?;
+    let b = bounds(config.alpha, config.beta);
+    let p0 = score_from_elo(config.elo0);
+    let p1 = score_from_elo(config.elo1);
+
+    let expected_trials = |true_p: f64, alpha_prime: f64| -> Result<u64, VeridictError> {
+        let e_z = true_p * llr_delta(true, p0, p1) + (1.0 - true_p) * llr_delta(false, p0, p1);
+        let e_n = (alpha_prime * b.upper + (1.0 - alpha_prime) * b.lower) / e_z;
+        if !e_n.is_finite() || e_n < 0.0 {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "SPRT ASN computation produced a non-physical expected sample size ({e_n}) for \
+                 elo0={elo0}, elo1={elo1}, alpha={alpha}, beta={beta} - this shouldn't happen for \
+                 valid elo0 < elo1, please report this as a bug"
+            )));
+        }
+        Ok(e_n.ceil() as u64)
+    };
+
+    let expected_trials_under_h0 = expected_trials(p0, config.alpha)?;
+    let expected_trials_under_h1 = expected_trials(p1, 1.0 - config.beta)?;
+
+    Ok(SprtPowerReport {
+        schema_version: crate::report::REPORT_SCHEMA_VERSION,
+        elo0: config.elo0,
+        elo1: config.elo1,
+        alpha: config.alpha,
+        beta: config.beta,
+        expected_trials_under_h0,
+        expected_trials_under_h1,
+        method: "wald_asn_approximation",
+        notes: vec![
+            "expected_trials_under_h0/h1 are the two endpoint cases (the true strength sitting \
+             exactly at elo0 or elo1) - a real candidate whose true strength lies between elo0 \
+             and elo1, the common case since you're running SPRT precisely because that strength \
+             is unknown, needs substantially more trials than either endpoint: a Wald SPRT's \
+             expected sample size peaks near the midpoint between the two hypotheses, not at \
+             either one. Budget above these two numbers, not at them, when the candidate's true \
+             strength is genuinely uncertain."
+                .to_string(),
+            "Wald's classical Average Sample Number approximation - ignores \"overshoot\" (the \
+             LLR's excess past a boundary at the moment of stopping), so a real run typically \
+             needs somewhat more trials than this number in practice."
+                .to_string(),
+            "Counts decisive trials only (same as --sprt-variant wald itself) - a draw-heavy \
+             testcase needs more real games than this number, since draws don't move the LLR at \
+             all. Use --sprt-variant trinomial/pentanomial for draw-heavy testing."
+                .to_string(),
+        ],
+    })
+}
+
+impl SprtPowerReport {
+    pub fn to_json_pretty(&self) -> String {
+        serde_json::to_string_pretty(self).expect(
+            "SprtPowerReport contains only finite fields and strings; serialization cannot fail",
+        )
+    }
+
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::from("# Veridict Power (SPRT)\n\n");
+        out.push_str(&format!(
+            "Wald SPRT with elo0={}, elo1={}, alpha={}, beta={}: expected **{}** trials under H0, \
+             expected **{}** trials under H1 (Wald's ASN approximation).\n\n",
+            self.elo0,
+            self.elo1,
+            self.alpha,
+            self.beta,
+            self.expected_trials_under_h0,
+            self.expected_trials_under_h1,
+        ));
+        if !self.notes.is_empty() {
+            out.push_str("Notes:\n\n");
+            for note in &self.notes {
+                out.push_str(&format!("- {note}\n"));
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +596,32 @@ mod tests {
         let recomputed =
             power_at_n(report.estimated_trials, p0, p1, CiMethod::Wilson, 0.95).unwrap();
         assert!((recomputed - report.achieved_power).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sprt_asn_is_positive_and_finite_for_a_normal_config() {
+        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05).unwrap();
+        assert!(report.expected_trials_under_h0 > 0);
+        assert!(report.expected_trials_under_h1 > 0);
+    }
+
+    #[test]
+    fn sprt_asn_reuses_sprt_config_validation() {
+        assert!(matches!(
+            estimate_sprt_expected_trials(20.0, 0.0, 0.05, 0.05),
+            Err(VeridictError::InvalidThreshold(_))
+        ));
+        assert!(matches!(
+            estimate_sprt_expected_trials(0.0, 20.0, 1.5, 0.05),
+            Err(VeridictError::InvalidThreshold(_))
+        ));
+    }
+
+    #[test]
+    fn sprt_asn_a_larger_elo_gap_needs_fewer_expected_trials() {
+        let small_gap = estimate_sprt_expected_trials(0.0, 10.0, 0.05, 0.05).unwrap();
+        let large_gap = estimate_sprt_expected_trials(0.0, 60.0, 0.05, 0.05).unwrap();
+        assert!(large_gap.expected_trials_under_h0 < small_gap.expected_trials_under_h0);
+        assert!(large_gap.expected_trials_under_h1 < small_gap.expected_trials_under_h1);
     }
 }
