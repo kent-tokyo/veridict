@@ -12,6 +12,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-10
+
+Purely additive - no breaking changes since `0.8.0`.
+
 ### Added
 
 - `compare --correction none|bonferroni|holm`: multiple-comparison correction across a
