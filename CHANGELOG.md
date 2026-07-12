@@ -10,6 +10,30 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [Unreleased]
+
+### Added
+
+- `compare --metric quantile-diff --quantile Q` (default `0.5`, the median): a bootstrap
+  confidence interval on an arbitrary quantile of `candidate - baseline`, generalizing
+  `mean-diff` from the mean to a quantile - useful where a p95/p99 latency-style regression
+  matters more than the average. Type-7 linear interpolation (R's/NumPy's default quantile
+  convention); `--quantile` must be strictly inside `(0, 1)`. Shares `mean-diff`'s
+  `--resamples`/`--seed`/`DiffCollector` machinery and `--paired-by-id` netting.
+  `--bootstrap-method percentile`/`basic` are supported; `bca` is implemented but rejected as a
+  config error (`IncompatibleBootstrapMethod`) - the sample quantile is a non-smooth statistic,
+  so BCa's jackknife acceleration has no solid asymptotic footing the way it does for the mean,
+  confirmed (not just theorized) by `tests/calibration/quantile_coverage.rs`'s new coverage
+  simulations. `estimated_additional_trials`/`--correction` treat it exactly like `mean-diff`
+  (no closed-form CI-at-n/CI-at-confidence function for either's bootstrap CI). New
+  `data_quality.thin_quantile_tail` warning fires when the requested quantile's tail has fewer
+  than 10 expected observations. `power`/`matrix`/`plan` support is deferred (see
+  `docs/research-map.md`) - a genuinely different, harder problem than mirroring `mean-diff`'s.
+- A weekly (plus PR-triggered on `src/stats/**`/`tests/calibration/**` changes, plus
+  on-demand) `calibration.yml` CI workflow now actually runs the `#[ignore]`d bootstrap/quantile
+  coverage-calibration tests, which previously only ran when someone happened to invoke them
+  locally.
+
 ## [0.10.0] - 2026-07-10
 
 Purely additive - no breaking changes since `0.9.0`.

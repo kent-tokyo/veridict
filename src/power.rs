@@ -158,6 +158,10 @@ impl PowerMetric {
             MetricKind::MeanDiff => Err(VeridictError::UnsupportedPowerMetric {
                 metric: crate::metrics::metric_label(kind),
             }),
+            // No `Self::QuantileDiff` variant exists at all - `power --metric quantile-diff` is
+            // unsupported outright (see `VeridictError::PowerUnsupportedForQuantileDiff`'s doc),
+            // not just missing a dedicated constructor the way `MeanDiff` needed one.
+            MetricKind::QuantileDiff => Err(VeridictError::PowerUnsupportedForQuantileDiff),
         }
     }
 
@@ -576,6 +580,11 @@ impl PowerReport {
             MetricKind::SignTest => "sign-test",
             MetricKind::Elo => "elo",
             MetricKind::MeanDiff => "mean-diff",
+            // Unreachable in practice - `PowerReport` is only ever built for a metric
+            // `PowerMetric::new`/`PowerMetric::MeanDiff` actually accepted, and
+            // `quantile-diff` is rejected outright by both. Kept total rather than
+            // `unreachable!()`, same precedent as `metrics::ci_method_label`.
+            MetricKind::QuantileDiff => "quantile-diff",
         };
         let method_clause = match (self.assume_sd, self.sd_source) {
             (Some(sd), Some(source)) => format!("assumed SD **{sd}** (from `--{source}`)"),

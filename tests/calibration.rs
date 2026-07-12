@@ -9,6 +9,9 @@ mod binomial_coverage;
 #[path = "calibration/bootstrap_coverage.rs"]
 mod bootstrap_coverage;
 
+#[path = "calibration/quantile_coverage.rs"]
+mod quantile_coverage;
+
 #[path = "calibration/sprt_error_rates.rs"]
 mod sprt_error_rates;
 

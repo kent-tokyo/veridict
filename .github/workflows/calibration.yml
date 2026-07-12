@@ -1,0 +1,45 @@
+name: Calibration
+
+# The Monte Carlo coverage-calibration tests under tests/calibration/ are `#[ignore]`d (too slow
+# for every push/PR - see e.g. tests/calibration/bootstrap_coverage.rs's own doc comment). They're
+# deterministic (fixed seeds), so they only ever change output when the statistical code under
+# test changes - hence the path-scoped pull_request trigger below, on top of a weekly schedule and
+# an on-demand workflow_dispatch.
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/stats/**"
+      - "tests/calibration/**"
+
+permissions:
+  issues: write
+
+jobs:
+  calibration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test calibration -- --ignored
+
+      # A silently-red scheduled run with nobody watching is itself a silent failure - open (or
+      # comment on) a tracking issue rather than relying on someone noticing the Actions tab.
+      # Only `github`-provided, non-attacker-controlled context values (server_url, repository,
+      # run_id) are interpolated here - no PR/issue/commit text ever reaches this shell.
+      - name: File/update a tracking issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Calibration coverage tests failing"
+          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --title "$TITLE" --body "Scheduled/PR calibration run failed: $RUN_URL"
+          fi

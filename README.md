@@ -36,6 +36,9 @@ spreadsheet and guess:
 * **Ranking/optimization algorithm tuning** - a numeric objective per run
   (NDCG, loss, throughput) -> `--metric mean-diff` (`examples/ranking_elo.jsonl`
   if the objective is itself win/loss/draw-shaped).
+* **Latency/tail-performance regression gate** - a mean can hide a worsened
+  worst case -> `--metric quantile-diff --quantile 0.95` (or `0.99`) on paired
+  per-request latencies (`examples/paired_scores.jsonl`).
 * **Release regression gate in CI** - candidate build vs last known-good
   baseline, wired into a pipeline with `--fail-below`/`--pass-above` and a
   `veridict` exit code (see [Regression gate](#usage) below).
@@ -256,11 +259,21 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
   support `--ci-method exact`: its win rate is fractional (a draw is half a
   win), and Clopper-Pearson's coverage guarantee only holds for a true
   integer-count binomial.
+* **`quantile-diff`** - bootstrap confidence interval on the `--quantile Q`
+  (default `0.5`, the median; e.g. `0.95` for p95) quantile of
+  `candidate - baseline` for paired numeric records - `mean-diff` generalized
+  from the mean to an arbitrary quantile, for gates where the typical worst
+  case matters more than the average (a latency p95/p99 regression gate, for
+  instance). Same `--resamples`/`--seed` as `mean-diff`; only
+  `--bootstrap-method percentile`/`basic` (not `bca` - the sample quantile is
+  a non-smooth statistic, so BCa's jackknife acceleration has no solid
+  footing for it; see [`docs/metrics.md`](docs/metrics.md)). One quantile per
+  invocation - run `compare` again for a second quantile.
 
 `winrate` and `sign-test` report `effect`/`ci_low`/`ci_high` centered on 0
 (deviation from a 50/50 split); `elo` is centered on 0 by construction (an
 even score is 0 Elo). All three compose directly with `--min-effect`.
-`mean-diff` reports them in the input's own units.
+`mean-diff`/`quantile-diff` report them in the input's own units.
 
 Every trial's `baseline_status`/`candidate_status` (`timeout`, `crash`,
 `invalid`) is tallied and reported regardless of which metric you run, both
@@ -366,7 +379,9 @@ Every `compare` report also carries advisory fields that never affect
   failure rate (over 20% timeout/crash/invalid), for `elo`, a draw-heavy run
   (over 50% draws leaves few decisive outcomes to rate from), the measured
   effect being smaller than the CI's own half-width (plausibly noise around
-  zero), or, in unpaired mode, one `id` being repeated 3+ times among 10+
+  zero), for `quantile-diff`, too few expected observations in the thinner
+  tail at the requested quantile (fewer than 10, `paired_count * min(q, 1-q)`),
+  or, in unpaired mode, one `id` being repeated 3+ times among 10+
   id-tagged trials (a sign the same test case was logged multiple times
   rather than run that many independent times - silent when every `id`
   appears exactly twice, the common case of forgetting `--paired-by-id`).
@@ -644,13 +659,13 @@ single net observation instead of two independent ones:
 * `winrate`/`elo`: net by total points across the pair (win=1, draw=0.5,
   loss=0, the standard "paired game" convention) - `>1` is a net candidate
   win, `<1` a net baseline win, exactly `1` a net draw.
-* `mean-diff`/`sign-test`: net by averaging the pair's two diffs.
+* `mean-diff`/`quantile-diff`/`sign-test`: net by averaging the pair's two diffs.
 
 An `id` used only once is an ordinary unpaired sample (mixing paired and
 unpaired testcases in one file is fine). Three or more records sharing an
 `id` is rejected as a data error, not silently truncated to a pair. Without
-`--paired-by-id`, a duplicate `id` on `mean-diff`/`sign-test` records is
-still rejected outright, same as before this flag existed.
+`--paired-by-id`, a duplicate `id` on `mean-diff`/`quantile-diff`/`sign-test`
+records is still rejected outright, same as before this flag existed.
 
 **`sprt --sprt-variant pentanomial` is the one exception to "an id used once
 is an ordinary unpaired sample":** it keeps the pair's full 5-value score
@@ -679,8 +694,9 @@ what's deliberately out of scope.
 
 * **`winrate`/`sign-test` CI** - Wilson score interval (Wilson 1927); `--ci-method exact` gives
   the Clopper-Pearson exact binomial interval (Clopper & Pearson 1934) instead.
-* **`mean-diff` CI** - percentile or BCa (bias-corrected and accelerated) bootstrap, both from
-  Efron & Tibshirani, *An Introduction to the Bootstrap* (1993, ch. 14).
+* **`mean-diff`/`quantile-diff` CI** - percentile or BCa (bias-corrected and accelerated)
+  bootstrap, both from Efron & Tibshirani, *An Introduction to the Bootstrap* (1993, ch. 14). BCa
+  is CLI-gated for `quantile-diff` (see [`docs/metrics.md`](docs/metrics.md)).
 * **`elo`** - the logistic Elo model, the widely-used variant of Elo's original rating system
   (Elo 1978).
 * **`sprt`** - Wald's sequential probability ratio test (Wald 1945, `--sprt-variant wald`); the
@@ -698,10 +714,12 @@ choices or heuristics, and are labeled that way deliberately rather than dressed
   Verdict logic) are this project's own conservative design choice.
 * **`estimated_additional_trials`** - for `winrate`/`sign-test`/`elo` this binary-searches the
   real CI formula the report already uses, which is exact for the stated model (point estimate
-  held fixed). `mean-diff` is the exception: there's no such closed form for a bootstrap CI, so it
-  falls back to an `O(1/sqrt(n))` scaling heuristic with a documented bias (see Report extras).
-* **`warnings`** - the 30-trial, 20%-failure-rate, and 50%-draw-rate thresholds are conventional
-  rules of thumb, not derived from a specific paper.
+  held fixed). `mean-diff`/`quantile-diff` are the exception: there's no such closed form for a
+  bootstrap CI, so both fall back to an `O(1/sqrt(n))` scaling heuristic with a documented bias
+  (see Report extras).
+* **`warnings`** - the 30-trial, 20%-failure-rate, 50%-draw-rate, and (`quantile-diff` only)
+  10-expected-observations-in-the-tail thresholds are conventional rules of thumb, not derived
+  from a specific paper.
 
 ### References
 

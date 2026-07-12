@@ -15,6 +15,7 @@
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
         "low_id_diversity": false,
+        "thin_quantile_tail": false,
         "tiny_sample": false
       },
       "effect": 0.12,
@@ -59,6 +60,7 @@
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
         "low_id_diversity": false,
+        "thin_quantile_tail": false,
         "tiny_sample": false
       },
       "effect": 85.04323715257746,

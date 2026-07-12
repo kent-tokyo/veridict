@@ -78,11 +78,11 @@ struct CompareArgs {
     #[arg(long, requires = "pass_above", allow_hyphen_values = true)]
     fail_below: Option<f64>,
 
-    /// Bootstrap resample count, used only by --metric mean-diff.
+    /// Bootstrap resample count, used only by --metric mean-diff/quantile-diff.
     #[arg(long, default_value_t = 10_000)]
     resamples: usize,
 
-    /// Bootstrap RNG seed, used only by --metric mean-diff. Defaults to a
+    /// Bootstrap RNG seed, used only by --metric mean-diff/quantile-diff. Defaults to a
     /// fixed seed, so the same input reproduces bit-identical output in CI.
     #[arg(long)]
     seed: Option<u64>,
@@ -94,12 +94,22 @@ struct CompareArgs {
     #[arg(long, value_enum, default_value = "wilson")]
     ci_method: CiMethodArg,
 
-    /// Bootstrap variant for --metric mean-diff. `bca` corrects for bias and
-    /// skewness; `basic` reflects the percentile interval around the point
-    /// estimate (simpler, no bias-correction of its own); `percentile` stays
-    /// the default so existing CI numbers don't silently shift.
+    /// Bootstrap variant for --metric mean-diff/quantile-diff. `bca` corrects for bias and
+    /// skewness (not available for quantile-diff - the sample quantile's jackknife acceleration
+    /// term has no solid footing for a non-smooth statistic, a config error rather than a
+    /// silent fallback); `basic` reflects the percentile interval around the point estimate
+    /// (simpler, no bias-correction of its own); `percentile` stays the default so existing CI
+    /// numbers don't silently shift.
     #[arg(long, value_enum, default_value = "percentile")]
     bootstrap_method: BootstrapMethodArg,
+
+    /// Quantile to measure for --metric quantile-diff (e.g. 0.95 for p95); must be in (0, 1).
+    /// Defaults to 0.5 (the median) when --metric quantile-diff is used without this flag.
+    /// Unused by every other requested metric, so it can be combined with e.g. --metric
+    /// mean-diff in the same multi-metric run - but a config error if no --metric
+    /// quantile-diff is requested at all.
+    #[arg(long)]
+    quantile: Option<f64>,
 
     /// Treat two records sharing an id as one testcase played twice (e.g.
     /// roles swapped to cancel the testcase's own bias) and combine them
@@ -449,6 +459,7 @@ enum MetricArg {
     MeanDiff,
     SignTest,
     Elo,
+    QuantileDiff,
 }
 
 impl From<MetricArg> for MetricKind {
@@ -458,6 +469,7 @@ impl From<MetricArg> for MetricKind {
             MetricArg::MeanDiff => MetricKind::MeanDiff,
             MetricArg::SignTest => MetricKind::SignTest,
             MetricArg::Elo => MetricKind::Elo,
+            MetricArg::QuantileDiff => MetricKind::QuantileDiff,
         }
     }
 }
@@ -576,10 +588,31 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
     let ci_method: CiMethod = args.ci_method.into();
     let bootstrap_method: BootstrapMethod = args.bootstrap_method.into();
     let failure_policy: FailurePolicy = args.failure_policy.into();
+    // `MetricConfig::new` itself treats `quantile` as silently unused by non-`QuantileDiff`
+    // metrics (so it can be shared across e.g. `--metric mean-diff --metric quantile-diff` in one
+    // run) - but a `--quantile` passed without *any* `--metric quantile-diff` requested at all is
+    // a config error at this, the CLI boundary, not a silent no-op: the project's own "never
+    // silently drop/fall back" rule (see `IncompatibleCiMethod`/`IncompatibleFailurePolicy`).
+    if args.quantile.is_some()
+        && !args
+            .metrics
+            .iter()
+            .any(|m| matches!(m, MetricArg::QuantileDiff))
+    {
+        return Err(VeridictError::QuantileRequiresQuantileDiffMetric);
+    }
     let metrics: Vec<MetricConfig> = args
         .metrics
         .into_iter()
-        .map(|m| MetricConfig::new(m.into(), ci_method, bootstrap_method, failure_policy))
+        .map(|m| {
+            MetricConfig::new(
+                m.into(),
+                ci_method,
+                bootstrap_method,
+                failure_policy,
+                args.quantile,
+            )
+        })
         .collect::<Result<_, _>>()?;
 
     let correction: Correction = args.correction.into();

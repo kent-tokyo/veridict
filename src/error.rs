@@ -62,12 +62,36 @@ pub enum VeridictError {
     },
 
     #[error(
+        "--bootstrap-method {method} is not available for {metric}; the sample quantile is a \
+         non-smooth statistic, so BCa's jackknife acceleration term has no solid asymptotic \
+         footing the way it does for mean-diff - use percentile or basic instead (see \
+         docs/metrics.md's quantile-diff section)"
+    )]
+    IncompatibleBootstrapMethod {
+        method: &'static str,
+        metric: &'static str,
+    },
+
+    #[error("invalid --quantile {0}: must be finite and in (0, 1)")]
+    InvalidQuantile(f64),
+
+    #[error("--quantile requires --metric quantile-diff to be one of the requested metrics")]
+    QuantileRequiresQuantileDiffMetric,
+
+    #[error(
         "power estimation for metric {metric} isn't supported via this flat (kind, ci_method) \
          constructor; winrate/sign-test/elo take a ci_method here, but mean-diff needs an assumed \
          standard deviation instead - construct PowerMetric::MeanDiff {{ assume_sd, sd_source }} \
          directly (see docs/metrics.md's power section)"
     )]
     UnsupportedPowerMetric { metric: &'static str },
+
+    #[error(
+        "power estimation isn't supported for metric quantile-diff; it needs an order-statistic \
+         asymptotic variance (or a density estimate at the quantile), a separate research \
+         problem from mean-diff's closed-form power - see docs/research-map.md"
+    )]
+    PowerUnsupportedForQuantileDiff,
 
     #[error(
         "--assume-effect ({assume_effect}) must be strictly greater than --min-effect \

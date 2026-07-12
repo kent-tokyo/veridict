@@ -35,14 +35,14 @@
     "verdict": { "$ref": "#/$defs/verdict" },
     "metric": {
       "type": "string",
-      "enum": ["winrate", "mean-diff", "sign-test", "elo"]
+      "enum": ["winrate", "mean-diff", "sign-test", "elo", "quantile-diff"]
     },
     "baseline_count": { "type": "integer", "minimum": 0 },
     "candidate_count": { "type": "integer", "minimum": 0 },
     "paired_count": { "type": "integer", "minimum": 0 },
     "effect": {
       "type": "number",
-      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff."
+      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff/quantile-diff."
     },
     "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
     "ci_low": { "type": "number" },
@@ -57,7 +57,7 @@
     "estimated_additional_trials": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff."
+      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff/quantile-diff."
     },
     "warnings": {
       "type": "array",
@@ -65,6 +65,12 @@
       "description": "Human-readable data-quality flags; never affects verdict. Structured counterpart is data_quality."
     },
     "data_quality": { "$ref": "#/$defs/data_quality" },
+    "quantile": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "exclusiveMaximum": 1,
+      "description": "The quantile quantile-diff measured (e.g. 0.95 for p95). Present only for metric quantile-diff; omitted entirely (not null) for every other metric."
+    },
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
@@ -73,12 +79,12 @@
     "family_size": {
       "type": "integer",
       "minimum": 1,
-      "description": "Number of --metric flags in this run's family; present only alongside correction_method. mean-diff counts toward this even though it can't be individually corrected (see achieved_alpha)."
+      "description": "Number of --metric flags in this run's family; present only alongside correction_method. mean-diff/quantile-diff count toward this even though neither can be individually corrected (see achieved_alpha)."
     },
     "achieved_alpha": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "Smallest one-sided significance at which this report's own CI would still pass, in the same units as (1 - confidence). Present only for a report whose unadjusted verdict was pass and whose metric has a closed-form CI (not mean-diff)."
+      "description": "Smallest one-sided significance at which this report's own CI would still pass, in the same units as (1 - confidence). Present only for a report whose unadjusted verdict was pass and whose metric has a closed-form CI (not mean-diff/quantile-diff)."
     },
     "adjusted_alpha_threshold": {
       "type": "number",
@@ -117,13 +123,14 @@
     "data_quality": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity"],
+      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity", "thin_quantile_tail"],
       "properties": {
         "tiny_sample": { "type": "boolean", "description": "paired_count < 30" },
         "high_failure_rate": { "type": "boolean", "description": "over 20% of trials failed to execute" },
         "draw_heavy": { "type": "boolean", "description": "elo only; always false for other metrics. Over 50% draws." },
         "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" },
-        "low_id_diversity": { "type": "boolean", "description": "one id repeated >= 3 times among >= 10 id-tagged trials, unpaired mode only; always false when --paired-by-id is set or too few records carry an id" }
+        "low_id_diversity": { "type": "boolean", "description": "one id repeated >= 3 times among >= 10 id-tagged trials, unpaired mode only; always false when --paired-by-id is set or too few records carry an id" },
+        "thin_quantile_tail": { "type": "boolean", "description": "quantile-diff only; always false for other metrics. Fewer than 10 expected observations (paired_count * min(quantile, 1-quantile)) in the thinner tail." }
       }
     }
   }

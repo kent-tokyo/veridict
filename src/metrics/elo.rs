@@ -84,6 +84,7 @@ impl MetricAggregator for EloAggregator {
                 warning: Some("no trials to compute an Elo difference".to_string()),
                 records_with_id: 0,
                 max_id_count: 0,
+                quantile: None,
             });
         }
         let score = (candidate_wins as f64 + 0.5 * draws as f64) / n as f64;
@@ -102,6 +103,7 @@ impl MetricAggregator for EloAggregator {
             warning: None,
             records_with_id: 0,
             max_id_count: 0,
+            quantile: None,
         })
     }
 }

@@ -1,9 +1,8 @@
-//! Paired bootstrap confidence intervals for a mean difference: the
-//! original plain percentile method, BCa (bias-corrected and accelerated),
-//! and the basic/reflected bootstrap - all three covered in Efron &
-//! Tibshirani, "An Introduction to the Bootstrap" (1993, ch. 14) - each
-//! added alongside the others rather than replacing them, so existing
-//! callers' output doesn't silently change.
+//! Paired bootstrap confidence intervals for a mean difference, or for an arbitrary quantile
+//! difference (`quantile-diff`): the original plain percentile method, BCa (bias-corrected and
+//! accelerated), and the basic/reflected bootstrap - all three covered in Efron & Tibshirani, "An
+//! Introduction to the Bootstrap" (1993, ch. 14) - each added alongside the others rather than
+//! replacing them, so existing callers' output doesn't silently change.
 //!
 //! Seeding: caller-supplied, defaulting to `DEFAULT_SEED` (see `--seed` on
 //! the CLI). Same input + same seed gives bit-identical output across runs,
@@ -275,6 +274,154 @@ pub fn sample_variance(values: &[f64]) -> f64 {
 
 pub fn sample_sd(values: &[f64]) -> f64 {
     sample_variance(values).sqrt()
+}
+
+/// Type-7 linear-interpolation quantile (R's default `type=7`, also NumPy's `percentile`
+/// default) - the least-surprising convention among several published ones. `q` should be in
+/// `[0, 1]`; CLI-facing callers restrict further to the open interval `(0, 1)` (see
+/// `VeridictError::InvalidQuantile`), since the sample min/max (`q` = 0 or 1) has no
+/// well-behaved bootstrap distribution to speak of.
+pub fn quantile(values: &[f64], q: f64) -> f64 {
+    debug_assert!(!values.is_empty(), "quantile called on an empty sample");
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted_quantile(&sorted, q)
+}
+
+/// `quantile`'s core, given an already-sorted slice - shared with the BCa jackknife below, which
+/// rebuilds a sorted subslice with one index skipped (still sorted, no re-sort needed) for each
+/// leave-one-out replicate rather than resorting from scratch every time.
+fn sorted_quantile(sorted: &[f64], q: f64) -> f64 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let h = q * (n - 1) as f64;
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    if lo == hi {
+        return sorted[lo];
+    }
+    let frac = h - lo as f64;
+    sorted[lo] + frac * (sorted[hi] - sorted[lo])
+}
+
+/// Resampled quantiles, sorted ascending - the quantile analogue of `bootstrap_means`.
+fn bootstrap_quantiles(diffs: &[f64], q: f64, resamples: usize, seed: u64) -> Vec<f64> {
+    let n = diffs.len();
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut quantiles: Vec<f64> = Vec::with_capacity(resamples);
+
+    for _ in 0..resamples {
+        let mut resample: Vec<f64> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let idx = rng.random_range(0..n);
+            resample.push(diffs[idx]);
+        }
+        resample.sort_by(f64::total_cmp);
+        quantiles.push(sorted_quantile(&resample, q));
+    }
+    quantiles.sort_by(f64::total_cmp);
+    quantiles
+}
+
+/// Percentile bootstrap CI for the `q`-th quantile of `diffs` - the quantile analogue of
+/// [`bootstrap_mean_diff_ci`]. `diffs` must be non-empty.
+pub fn bootstrap_quantile_diff_ci(
+    diffs: &[f64],
+    q: f64,
+    confidence: f64,
+    resamples: usize,
+    seed: u64,
+) -> (f64, f64) {
+    debug_assert!(!diffs.is_empty(), "bootstrap called with empty sample");
+    debug_assert!(resamples > 0, "bootstrap called with zero resamples");
+
+    let quantiles = bootstrap_quantiles(diffs, q, resamples, seed);
+    let alpha = 1.0 - confidence;
+    let lo_idx = lo_index(alpha / 2.0, resamples);
+    let hi_idx = hi_index(1.0 - alpha / 2.0, resamples).max(lo_idx);
+
+    (quantiles[lo_idx], quantiles[hi_idx])
+}
+
+/// Basic (reflected) bootstrap CI for the `q`-th quantile of `diffs` - the quantile analogue of
+/// [`bootstrap_mean_diff_ci_basic`]; see that function's doc for the method itself.
+pub fn bootstrap_quantile_diff_ci_basic(
+    diffs: &[f64],
+    q: f64,
+    confidence: f64,
+    resamples: usize,
+    seed: u64,
+) -> (f64, f64) {
+    debug_assert!(!diffs.is_empty(), "bootstrap called with empty sample");
+    debug_assert!(resamples > 0, "bootstrap called with zero resamples");
+
+    let effect = quantile(diffs, q);
+    let (perc_lo, perc_hi) = bootstrap_quantile_diff_ci(diffs, q, confidence, resamples, seed);
+    (2.0 * effect - perc_hi, 2.0 * effect - perc_lo)
+}
+
+/// BCa bootstrap CI for the `q`-th quantile of `diffs` - the quantile analogue of
+/// [`bootstrap_mean_diff_ci_bca`], reusing the same generic `bias_correction_z0`/
+/// `weighted_acceleration`/`bca_adjusted_percentiles` helpers.
+///
+/// **Not reachable from the CLI** (`MetricConfig::new` rejects `BootstrapMethod::Bca` for
+/// `quantile-diff` with `VeridictError::IncompatibleBootstrapMethod`) - the sample quantile is a
+/// non-smooth statistic (the empirical quantile function is a step function), so the jackknife
+/// acceleration term this function computes has no solid asymptotic footing the way it does for
+/// the mean. Implemented and exported so `tests/calibration/quantile_coverage.rs` can measure its
+/// actual coverage directly; lifting the CLI gate is a deliberate follow-up once that evidence is
+/// reviewed, not an automatic unlock.
+///
+/// The jackknife's leave-one-out quantile is recomputed by skipping one index out of the
+/// already-sorted sample (no re-sort needed, since removing one element from a sorted sequence
+/// leaves the rest sorted) - O(n) per replicate, O(n^2) total. An O(1)-per-replicate index-shift
+/// trick is possible but not worth its boundary-case complexity: this jackknife runs once per CI
+/// call, dwarfed by the `resamples`-iteration resampling loop, at the trial counts this project
+/// targets.
+pub fn bootstrap_quantile_diff_ci_bca(
+    diffs: &[f64],
+    q: f64,
+    confidence: f64,
+    resamples: usize,
+    seed: u64,
+) -> (f64, f64) {
+    debug_assert!(!diffs.is_empty(), "bootstrap called with empty sample");
+    debug_assert!(resamples > 0, "bootstrap called with zero resamples");
+
+    let n = diffs.len();
+    if n == 1 {
+        // Jackknife/acceleration are undefined for a single observation; mirror the percentile
+        // method's (already degenerate) n=1 answer.
+        return (diffs[0], diffs[0]);
+    }
+
+    let original_estimate = quantile(diffs, q);
+    let quantiles = bootstrap_quantiles(diffs, q, resamples, seed);
+
+    let below = quantiles.iter().filter(|&&v| v < original_estimate).count() as f64;
+    let z0 = bias_correction_z0(below, resamples);
+
+    let mut sorted: Vec<f64> = diffs.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let jack_replicates: Vec<(f64, f64)> = (0..n)
+        .map(|skip| {
+            let leave_one_out: Vec<f64> = sorted
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != skip)
+                .map(|(_, &v)| v)
+                .collect();
+            (sorted_quantile(&leave_one_out, q), 1.0)
+        })
+        .collect();
+    let a = weighted_acceleration(&jack_replicates);
+
+    let (p_lo, p_hi) = bca_adjusted_percentiles(z0, a, confidence);
+    let lo_idx = lo_index(p_lo, resamples);
+    let hi_idx = hi_index(p_hi, resamples).max(lo_idx);
+    (quantiles[lo_idx], quantiles[hi_idx])
 }
 
 #[cfg(test)]
@@ -587,5 +734,131 @@ mod tests {
     fn sample_variance_of_identical_values_is_zero() {
         assert_eq!(sample_variance(&[3.0, 3.0, 3.0]), 0.0);
         assert_eq!(sample_sd(&[3.0, 3.0, 3.0]), 0.0);
+    }
+
+    // --- quantile (type-7 interpolation) ---
+
+    #[test]
+    fn quantile_matches_hand_computed_type7_examples() {
+        // np.percentile([1..10], 90) == 9.1 under NumPy's (type-7) default.
+        let values: Vec<f64> = (1..=10).map(|v| v as f64).collect();
+        assert_close(quantile(&values, 0.9), 9.1, 1e-9);
+        // Odd count: median lands exactly on the middle element.
+        assert_close(quantile(&[1.0, 2.0, 3.0, 4.0, 5.0], 0.5), 3.0, 1e-9);
+        // Even count: median interpolates halfway between the two middle elements.
+        assert_close(quantile(&[1.0, 2.0, 3.0, 4.0], 0.5), 2.5, 1e-9);
+    }
+
+    #[test]
+    fn quantile_ignores_input_order() {
+        let sorted = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let shuffled = [3.0, 1.0, 5.0, 2.0, 4.0];
+        assert_eq!(quantile(&sorted, 0.5), quantile(&shuffled, 0.5));
+    }
+
+    #[test]
+    fn quantile_single_value_is_that_value() {
+        assert_eq!(quantile(&[7.0], 0.1), 7.0);
+        assert_eq!(quantile(&[7.0], 0.9), 7.0);
+    }
+
+    // --- quantile-diff bootstrap CIs ---
+
+    #[test]
+    fn quantile_ci_deterministic_across_calls() {
+        let diffs = vec![0.1, 0.2, -0.05, 0.3, 0.0, 0.15];
+        let (lo1, hi1) = bootstrap_quantile_diff_ci(&diffs, 0.5, 0.95, 2000, DEFAULT_SEED);
+        let (lo2, hi2) = bootstrap_quantile_diff_ci(&diffs, 0.5, 0.95, 2000, DEFAULT_SEED);
+        assert_eq!(lo1, lo2);
+        assert_eq!(hi1, hi2);
+    }
+
+    #[test]
+    fn quantile_ci_brackets_true_median() {
+        let diffs = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let (lo, hi) = bootstrap_quantile_diff_ci(&diffs, 0.5, 0.95, 5000, DEFAULT_SEED);
+        assert!(
+            lo <= 3.0 && 3.0 <= hi,
+            "expected [{lo}, {hi}] to bracket the true median 3.0"
+        );
+    }
+
+    #[test]
+    fn quantile_ci_single_sample_no_panic() {
+        let diffs = vec![2.5];
+        let (lo, hi) = bootstrap_quantile_diff_ci(&diffs, 0.5, 0.95, 1000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!(lo, 2.5);
+        assert_eq!(hi, 2.5);
+    }
+
+    #[test]
+    fn quantile_ci_ties_do_not_panic() {
+        let diffs = vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 0.0, 0.0, 1.0];
+        let (lo, hi) = bootstrap_quantile_diff_ci(&diffs, 0.9, 0.95, 2000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert!(lo <= hi);
+    }
+
+    #[test]
+    fn quantile_ci_basic_reflects_percentile_exactly() {
+        let effect = quantile(&SKEWED, 0.9);
+        let (perc_lo, perc_hi) =
+            bootstrap_quantile_diff_ci(&SKEWED, 0.9, 0.95, 10_000, DEFAULT_SEED);
+        let (basic_lo, basic_hi) =
+            bootstrap_quantile_diff_ci_basic(&SKEWED, 0.9, 0.95, 10_000, DEFAULT_SEED);
+        assert_eq!(basic_lo, 2.0 * effect - perc_hi);
+        assert_eq!(basic_hi, 2.0 * effect - perc_lo);
+    }
+
+    #[test]
+    fn quantile_ci_basic_single_sample_no_panic() {
+        let diffs = vec![2.5];
+        let (lo, hi) = bootstrap_quantile_diff_ci_basic(&diffs, 0.5, 0.95, 1000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!(lo, 2.5);
+        assert_eq!(hi, 2.5);
+    }
+
+    #[test]
+    fn quantile_ci_bca_deterministic_across_calls() {
+        let (lo1, hi1) = bootstrap_quantile_diff_ci_bca(&SKEWED, 0.9, 0.95, 2000, DEFAULT_SEED);
+        let (lo2, hi2) = bootstrap_quantile_diff_ci_bca(&SKEWED, 0.9, 0.95, 2000, DEFAULT_SEED);
+        assert_eq!(lo1, lo2);
+        assert_eq!(hi1, hi2);
+    }
+
+    #[test]
+    fn quantile_ci_bca_single_sample_no_panic() {
+        let diffs = vec![2.5];
+        let (lo, hi) = bootstrap_quantile_diff_ci_bca(&diffs, 0.5, 0.95, 1000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!(lo, 2.5);
+        assert_eq!(hi, 2.5);
+    }
+
+    #[test]
+    fn quantile_ci_bca_constant_data_no_panic() {
+        let diffs = vec![2.5; 5];
+        let (lo, hi) = bootstrap_quantile_diff_ci_bca(&diffs, 0.5, 0.95, 1000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!(lo, 2.5);
+        assert_eq!(hi, 2.5);
+    }
+
+    #[test]
+    fn quantile_ci_bca_ties_do_not_panic() {
+        let diffs = vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 0.0, 0.0, 1.0];
+        let (lo, hi) = bootstrap_quantile_diff_ci_bca(&diffs, 0.9, 0.95, 2000, DEFAULT_SEED);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert!(lo <= hi);
+    }
+
+    #[test]
+    fn quantile_ci_bca_differs_from_percentile_on_skewed_data() {
+        let (bca_lo, bca_hi) =
+            bootstrap_quantile_diff_ci_bca(&SKEWED, 0.9, 0.95, 10_000, DEFAULT_SEED);
+        let (pct_lo, pct_hi) = bootstrap_quantile_diff_ci(&SKEWED, 0.9, 0.95, 10_000, DEFAULT_SEED);
+        assert_ne!((bca_lo, bca_hi), (pct_lo, pct_hi));
     }
 }

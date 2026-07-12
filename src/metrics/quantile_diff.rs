@@ -1,5 +1,6 @@
-//! Percentile bootstrap confidence interval on `candidate - baseline` for
-//! paired numeric records.
+//! Bootstrap confidence interval on the `quantile`-th quantile of `candidate - baseline` for
+//! paired numeric records - the same input shape as `mean_diff`, generalized from the mean to an
+//! arbitrary quantile (median, p90, p95, ...).
 
 use crate::error::VeridictError;
 use crate::input::Record;
@@ -8,20 +9,22 @@ use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_la
 use crate::stats::bootstrap;
 use crate::{BootstrapMethod, MetricKind, TrialStatus};
 
-pub(crate) struct MeanDiffAggregator {
+pub(crate) struct QuantileDiffAggregator {
     collector: DiffCollector,
     confidence: f64,
     resamples: usize,
     seed: u64,
+    quantile: f64,
     bootstrap_method: BootstrapMethod,
 }
 
-impl MeanDiffAggregator {
+impl QuantileDiffAggregator {
     pub(crate) fn new(
         confidence: f64,
         resamples: usize,
         seed: u64,
         paired_by_id: bool,
+        quantile: f64,
         bootstrap_method: BootstrapMethod,
     ) -> Self {
         Self {
@@ -29,12 +32,13 @@ impl MeanDiffAggregator {
             confidence,
             resamples,
             seed,
+            quantile,
             bootstrap_method,
         }
     }
 }
 
-impl MetricAggregator for MeanDiffAggregator {
+impl MetricAggregator for QuantileDiffAggregator {
     fn ingest(
         &mut self,
         line: usize,
@@ -64,7 +68,7 @@ impl MetricAggregator for MeanDiffAggregator {
         if !used {
             return Err(VeridictError::SchemaMismatch {
                 line,
-                context: metric_label(MetricKind::MeanDiff),
+                context: metric_label(MetricKind::QuantileDiff),
                 detail: "record has no fields usable by this metric and no status fields"
                     .to_string(),
             });
@@ -90,28 +94,38 @@ impl MetricAggregator for MeanDiffAggregator {
                 crashes,
                 invalid,
                 failures: *failures,
-                warning: Some("no paired numeric trials to compute mean difference".to_string()),
+                warning: Some(
+                    "no paired numeric trials to compute quantile difference".to_string(),
+                ),
                 records_with_id: 0,
                 max_id_count: 0,
-                quantile: None,
+                quantile: Some(self.quantile),
             });
         }
-        let effect = bootstrap::mean(&diffs);
+        let effect = bootstrap::quantile(&diffs, self.quantile);
         let (ci_low, ci_high) = match self.bootstrap_method {
-            BootstrapMethod::Percentile => bootstrap::bootstrap_mean_diff_ci(
+            BootstrapMethod::Percentile => bootstrap::bootstrap_quantile_diff_ci(
                 &diffs,
+                self.quantile,
                 self.confidence,
                 self.resamples,
                 self.seed,
             ),
-            BootstrapMethod::Bca => bootstrap::bootstrap_mean_diff_ci_bca(
+            // Unreachable via the CLI - `MetricConfig::new` rejects `Bca` for `quantile-diff`
+            // before a `QuantileDiffAggregator` is ever built (see
+            // `VeridictError::IncompatibleBootstrapMethod`). Kept total rather than
+            // `unreachable!()` since a caller could still construct `MetricConfig::QuantileDiff`
+            // directly, bypassing that guard.
+            BootstrapMethod::Bca => bootstrap::bootstrap_quantile_diff_ci_bca(
                 &diffs,
+                self.quantile,
                 self.confidence,
                 self.resamples,
                 self.seed,
             ),
-            BootstrapMethod::Basic => bootstrap::bootstrap_mean_diff_ci_basic(
+            BootstrapMethod::Basic => bootstrap::bootstrap_quantile_diff_ci_basic(
                 &diffs,
+                self.quantile,
                 self.confidence,
                 self.resamples,
                 self.seed,
@@ -131,7 +145,7 @@ impl MetricAggregator for MeanDiffAggregator {
             warning: None,
             records_with_id: 0,
             max_id_count: 0,
-            quantile: None,
+            quantile: Some(self.quantile),
         })
     }
 }

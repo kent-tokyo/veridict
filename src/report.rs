@@ -55,6 +55,10 @@ pub struct Report {
     /// replacement - `REPORT_SCHEMA_VERSION`'s policy is to stay at `1`
     /// until a field is removed/renamed, and this is a pure addition).
     pub data_quality: DataQuality,
+    /// The quantile `quantile-diff` measured (e.g. `0.95` for p95) - `None` for every other
+    /// metric. Additive alongside every other field, same `REPORT_SCHEMA_VERSION` policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantile: Option<f64>,
     /// Multiple-comparison correction fields (see `correction` module) - all
     /// `None`/omitted unless `compare --correction bonferroni|holm` was
     /// requested, so a default run's JSON is byte-identical to before this
@@ -103,6 +107,10 @@ pub struct DataQuality {
     /// there) or when too few records carry an `id` for the signal to be
     /// meaningful - see `collect_data_quality`.
     pub low_id_diversity: bool,
+    /// `quantile-diff` only - too few observations expected in the thinner tail to estimate this
+    /// particular quantile reliably (e.g. p95 on a small sample). Always `false` for every other
+    /// metric. See `collect_data_quality` for the threshold.
+    pub thin_quantile_tail: bool,
 }
 
 /// A metric's effect/CI/thresholds are proportions (winrate, sign-test),
@@ -112,7 +120,7 @@ fn fmt_effect(metric: MetricKind, value: f64) -> String {
     match metric {
         MetricKind::WinRate | MetricKind::SignTest => format!("{:+.1} pp", value * 100.0),
         MetricKind::Elo => format!("{value:+.1} elo"),
-        MetricKind::MeanDiff => format!("{value:+.4}"),
+        MetricKind::MeanDiff | MetricKind::QuantileDiff => format!("{value:+.4}"),
     }
 }
 
@@ -157,7 +165,10 @@ impl Report {
              - crash: {crashes} (baseline={b_crash}, candidate={c_crash})\n\
              - invalid: {invalid} (baseline={b_invalid}, candidate={c_invalid})\n",
             verdict = serde_str(&self.verdict),
-            metric = serde_str(&self.metric),
+            metric = match self.quantile {
+                Some(q) => format!("{} (q={q:.2})", serde_str(&self.metric)),
+                None => serde_str(&self.metric),
+            },
             effect = fmt_effect(self.metric, self.effect),
             confidence_pct = self.confidence * 100.0,
             ci_low = fmt_effect(self.metric, self.ci_low),
@@ -249,6 +260,7 @@ mod tests {
             estimated_additional_trials: None,
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
+            quantile: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,

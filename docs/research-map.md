@@ -9,6 +9,45 @@ of these is legitimate, not a re-litigation of a closed question. See `docs/metr
 
 ## Statistical methods considered but not shipped
 
+### BCa bootstrap for `quantile-diff`
+
+**What it is:** the same bias-corrected-and-accelerated bootstrap `mean-diff`/`matrix` already ship
+(`--bootstrap-method bca`), applied to a quantile instead of a mean.
+
+**Why not yet:** implemented (`stats::bootstrap::bootstrap_quantile_diff_ci_bca`) but rejected as a
+config error at the CLI (`VeridictError::IncompatibleBootstrapMethod`) rather than shipped enabled.
+The sample quantile is a non-smooth statistic - the empirical quantile function is a step function
+- so BCa's jackknife acceleration term has no solid asymptotic footing the way it does for the
+mean, an established statistical caveat rather than a hunch. `tests/calibration/
+quantile_coverage.rs` measures this directly: at p95/n=30 on skewed data, BCa's coverage (0.7910)
+was statistically indistinguishable from plain percentile's (0.7940) - no measured benefit to
+justify the extra complexity and jackknife cost of unlocking it.
+
+**What would change this:** calibration evidence across more quantiles/sample sizes/populations
+showing BCa's correction actually helps for a quantile in at least some regime (e.g. central
+quantiles, or larger n), enough to justify a narrower unlock than "always allowed" - or a concrete
+report that percentile/basic's coverage is inadequate in practice and BCa is worth the risk anyway.
+
+### `power`/`matrix`/`plan` support for `quantile-diff`
+
+**What it is:** `power --metric quantile-diff` (pre-experiment sample-size estimate for a quantile
+gate) and `matrix`/`plan` support for `quantile-diff` as a pairwise comparison metric.
+
+**Why not yet:** `power --metric mean-diff`'s closed-form calculation (see `docs/metrics.md`) relies
+on the sample mean's asymptotic normality (`Normal(assume_effect, assume_sd^2/n)`) - a sample
+quantile's asymptotic variance instead depends on the population density *at* that quantile
+(`Var(quantile_hat) ≈ q(1-q) / (n * f(x_q)^2)`), which isn't estimable from a single assumed
+standard deviation the way `mean-diff`'s is; it needs either a density estimate or a distributional
+assumption `mean-diff`'s design deliberately avoids requiring. A genuinely different, harder
+problem, not a mirror of `mean-diff`'s existing constructor. `matrix`/`plan` support is scoped out
+for the same reason `--failure-policy` and multiple-comparison correction weren't extended to
+`matrix` in earlier rounds - no concrete workflow has asked for it yet, and `matrix`'s own verdict
+concept is itself still an open design question (see "Matrix verdict semantics" below).
+
+**What would change this:** a concrete request for a pre-experiment sample-size estimate for a
+quantile-based gate (most plausibly a latency/p95 regression-testing workflow), with enough detail
+to settle whether a density-estimate or distributional-assumption approach fits the request better.
+
 ### Wilson continuity correction (`winrate`/`sign-test`/`elo`)
 
 **What it is:** a small-sample correction to the Wilson score interval that widens it slightly,

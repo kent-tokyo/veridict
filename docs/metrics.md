@@ -61,6 +61,58 @@ widest just because it's the "exact" one.
 output is bit-identical across runs of the same input - every resample gets its own independently
 seeded RNG stream, verified invariant to worker/thread count).
 
+## `quantile-diff` bootstrap confidence interval
+
+**Established statistic, generalized from `mean-diff`'s mean to an arbitrary quantile** (`--quantile
+Q`, default `0.5` = the median) of `candidate - baseline`. Useful where the mean isn't the number
+that matters - a p95/p99 latency regression gate, for instance, where a handful of outliers
+shouldn't move the verdict but a shift in the *typical worst case* should. Same input (paired
+numeric records, `DiffCollector`), same `--resamples`/`--seed` semantics as `mean-diff`.
+
+**Quantile convention:** type-7 linear interpolation (R's default `type=7`, also NumPy's
+`percentile` default) - the least-surprising choice among several published conventions.
+`--quantile` must be strictly inside `(0, 1)`; `0` or `1` (the sample min/max) is rejected as
+`VeridictError::InvalidQuantile` rather than silently accepted, since the bootstrap distribution of
+a sample extreme doesn't converge the way an interior quantile's does.
+
+**Two of `mean-diff`'s three bootstrap methods (`--bootstrap-method`):**
+
+- **`percentile` (default)** - resample `candidate - baseline` pairs with replacement, take the
+  `alpha/2`/`1 - alpha/2` percentiles of the resampled quantiles.
+- **`basic`** (reflected) - same reflection-around-the-point-estimate construction as `mean-diff`'s.
+
+**`bca` is implemented but rejected as a config error** (`VeridictError::IncompatibleBootstrapMethod`),
+not silently unavailable. The sample quantile is a non-smooth statistic (the empirical quantile
+function is a step function), so BCa's jackknife acceleration term has no solid asymptotic footing
+the way it does for the mean - an established statistical caveat, not a hunch. `tests/calibration/
+quantile_coverage.rs` measures this directly rather than leaving it purely theoretical: at p95/n=30
+on skewed data, BCa's measured coverage (0.7910) was statistically indistinguishable from plain
+percentile's (0.7940) - no evidence the correction helps here the way it measurably does for
+`mean-diff` (see `tests/calibration/bootstrap_coverage.rs`). The gate stays until calibration
+evidence justifies lifting it, in either direction.
+
+**Tail quantiles need real sample size, and the report says so.** A `q`-th quantile at small `n`
+has only `n * min(q, 1-q)` expected observations in the thinner tail - p95 at n=30 has roughly 1.5,
+p99 at n=30 has roughly 0.3 (a case `tests/calibration/quantile_coverage.rs` documents as
+genuinely degenerate, not a bug: measured coverage there was 0.2670 against a 0.95 nominal target).
+`data_quality.thin_quantile_tail` fires when that expected count drops below 10 (the same shape as
+the binomial `np >= 10` rule of thumb), independent of the separate `tiny_sample` flag - a sample
+large enough to clear `tiny_sample`'s `n >= 30` floor can still trip this one at an extreme `q`
+(e.g. n=100 at q=0.95 has only ~5 expected tail observations).
+
+**Limitation, not a bug: one quantile per `compare` invocation.** `--quantile` is a single
+per-invocation flag, like `--bootstrap-method`; there's no way to request `quantile-diff` at two
+different quantiles in one run. Run `compare` twice (once per quantile) if you need both a p50 and
+a p95 gate, for instance.
+
+**Not supported: `power --metric quantile-diff` and `matrix`/`plan`.** Power needs an
+order-statistic asymptotic variance (or a density estimate at the quantile) - a separate research
+problem from `mean-diff`'s closed-form power, not a mirror of it (see `docs/research-map.md`).
+`estimated_additional_trials`/`--correction` treat `quantile-diff` exactly like `mean-diff`: the
+`O(1/sqrt(n))` CLT-scaling fallback for the former (no closed-form CI-width-at-n function for
+either's bootstrap CI), and exclusion from individual correction while still counting toward
+`family_size` for the latter (no closed-form CI-at-a-hypothetical-confidence function either).
+
 ## `elo`
 
 **Established statistic with one documented approximation.** Score rate
@@ -505,18 +557,18 @@ So correction only ever moves an unadjusted `pass` to `inconclusive` - it never 
 wasn't already failing, and never touches a metric whose unadjusted verdict was already `fail` or
 `inconclusive`. That asymmetry falls straight out of the math above; it isn't a special case.
 
-**`mean-diff` counts toward `family_size` but keeps its own, unadjusted verdict.** There is no
-closed-form CI-at-a-hypothetical-confidence function for a bootstrap CI without real resampled data
-(same reason `estimated_additional_trials`/`power` both special-case it) - a mean-diff report's own
-pass/fail is left as computed. It still counts toward `family_size`, though: excluding it would
-under-count the real multiplicity risk the *other* metrics in the same run are actually exposed to
-- the conservative choice.
+**`mean-diff`/`quantile-diff` count toward `family_size` but keep their own, unadjusted verdict.**
+There is no closed-form CI-at-a-hypothetical-confidence function for either's bootstrap CI without
+real resampled data (same reason `estimated_additional_trials`/`power` both special-case them) -
+such a report's own pass/fail is left as computed. It still counts toward `family_size`, though:
+excluding it would under-count the real multiplicity risk the *other* metrics in the same run are
+actually exposed to - the conservative choice.
 
 **Report fields** (all omitted, not present as `null`, unless `--correction` is something other
 than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
 `achieved_alpha` (the smallest one-sided significance at which this report's own CI would still
-pass - `null`/omitted for `mean-diff`), `adjusted_alpha_threshold` (the corrected threshold
-`achieved_alpha` was actually compared against), and `unadjusted_verdict` (the verdict before
+pass - `null`/omitted for `mean-diff`/`quantile-diff`), `adjusted_alpha_threshold` (the corrected
+threshold `achieved_alpha` was actually compared against), and `unadjusted_verdict` (the verdict before
 correction - `verdict` itself becomes the *adjusted* value, since that's the field the exit code
 and `verdict::aggregate` actually act on).
 
@@ -546,13 +598,14 @@ itself doesn't move.
 - For **`winrate`/`sign-test`/`elo`**, this binary-searches the real, already-tested CI function
   the report itself uses (`wilson`/`jeffreys`/`exact`, per `--ci-method`), holding the point
   estimate fixed - not an approximation, an exact search against real, already-verified math.
-- For **`mean-diff`**, there is no closed-form "CI width at a hypothetical n" function for a
-  bootstrap CI without real resampled data, so it falls back to the `O(1/sqrt(n))` CLT-scaling
-  model instead. This has a documented, quantified bias: verified within ~1.5% of an actual re-run
-  for a clean 4x sample-size jump at moderate n, but a real ~18% *under*-estimate at n=100, because
-  e.g. Wilson's CI also shrinks via an `O(z^2/n)` recentering term the simple `1/sqrt(n)` model
-  doesn't capture. Treat `mean-diff`'s number as "roughly this many, plausibly more," not a
-  guarantee.
+- For **`mean-diff`/`quantile-diff`**, there is no closed-form "CI width at a hypothetical n"
+  function for a bootstrap CI without real resampled data, so both fall back to the
+  `O(1/sqrt(n))` CLT-scaling model instead. This has a documented, quantified bias for
+  `mean-diff`: verified within ~1.5% of an actual re-run for a clean 4x sample-size jump at
+  moderate n, but a real ~18% *under*-estimate at n=100, because e.g. Wilson's CI also shrinks via
+  an `O(z^2/n)` recentering term the simple `1/sqrt(n)` model doesn't capture. `quantile-diff`
+  reuses the same model, unverified for its own bootstrap CI. Treat either metric's number as
+  "roughly this many, plausibly more," not a guarantee.
 
 Returns `null` when there's nothing meaningful to suggest: the verdict is already `pass`/`fail`,
 there are zero paired trials, or the effect sits *inside* the pass/fail threshold band (the "dead
@@ -588,6 +641,10 @@ warning never changes `pass`/`fail`/`inconclusive`):
   entirely under `--paired-by-id` (repeated ids mean something different there - see
   [paired testcases](../README.md#paired-testcases)). This only catches literal `id` collisions -
   it says nothing about near-duplicate trials that don't share an `id`.
+- **Thin quantile tail** (`quantile-diff` only) - fewer than 10 expected observations
+  (`paired_count * min(q, 1-q)`) in the thinner tail at the requested quantile - see the
+  `quantile-diff` section above.
 
-None of these thresholds (30, 20%, 50%, 3-of-10) come from a specific paper - they're the kind of
-rule of thumb a careful practitioner would apply by hand, made automatic.
+None of these thresholds (30, 20%, 50%, 3-of-10, 10-expected-in-the-tail) come from a specific
+paper - they're the kind of rule of thumb a careful practitioner would apply by hand, made
+automatic.

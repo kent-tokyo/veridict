@@ -51,6 +51,7 @@
 //! same run are actually exposed to, so it still counts - the conservative choice, consistent with
 //! "false pass worse than inconclusive."
 
+use crate::metrics;
 use crate::report::Report;
 use crate::stats::elo;
 use crate::stats::{exact, jeffreys, wilson};
@@ -94,10 +95,11 @@ const BISECTION_ITERATIONS: u32 = 60;
 /// Smallest `gamma` (same units as `1 - confidence`) at which this report's own CI, recomputed at
 /// confidence `1 - gamma` from the same observed data, would still have its lower bound (in the
 /// metric's native "effect" units - a proportion offset from zero for winrate/sign-test, Elo
-/// points for elo) clear `pass_above`. `None` for `mean-diff` (no closed-form CI-at-a-hypothetical-
-/// confidence function exists - see module doc) - callers must leave such a report's verdict
-/// unadjusted. Only ever called for a report whose verdict is already `Pass` at `confidence`, so
-/// `gamma_orig = 1 - confidence` is a known-passing search bracket, not re-verified here.
+/// points for elo) clear `pass_above`. `None` for `mean-diff`/`quantile-diff` (no closed-form
+/// CI-at-a-hypothetical-confidence function exists for either's bootstrap CI - see module doc) -
+/// callers must leave such a report's verdict unadjusted. Only ever called for a report whose
+/// verdict is already `Pass` at `confidence`, so `gamma_orig = 1 - confidence` is a known-passing
+/// search bracket, not re-verified here.
 fn achieved_alpha(
     metric: MetricKind,
     ci_method: CiMethod,
@@ -107,7 +109,7 @@ fn achieved_alpha(
     pass_above: f64,
     confidence: f64,
 ) -> Option<f64> {
-    if metric == MetricKind::MeanDiff {
+    if metric == MetricKind::MeanDiff || metric == MetricKind::QuantileDiff {
         return None;
     }
 
@@ -239,12 +241,15 @@ pub fn apply_correction(
     for (i, report) in reports.iter_mut().enumerate() {
         let unadjusted_verdict = report.verdict;
 
-        if report.metric == MetricKind::MeanDiff && unadjusted_verdict == Verdict::Pass {
+        let no_closed_form_ci =
+            report.metric == MetricKind::MeanDiff || report.metric == MetricKind::QuantileDiff;
+        if no_closed_form_ci && unadjusted_verdict == Verdict::Pass {
             report.warnings.push(format!(
-                "excluded from its own {method} multiple-comparison correction (mean-diff has no \
+                "excluded from its own {method} multiple-comparison correction ({metric} has no \
                  closed-form CI at an adjusted confidence level); still counts toward \
                  family_size={family_size}",
                 method = correction.label(),
+                metric = metrics::metric_label(report.metric),
             ));
         }
 
@@ -322,6 +327,7 @@ mod tests {
             estimated_additional_trials: None,
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
+            quantile: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -510,6 +516,7 @@ mod tests {
             estimated_additional_trials: r.estimated_additional_trials,
             warnings: r.warnings.clone(),
             data_quality: r.data_quality,
+            quantile: r.quantile,
             correction_method: r.correction_method,
             family_size: r.family_size,
             achieved_alpha: r.achieved_alpha,

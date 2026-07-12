@@ -100,6 +100,8 @@ pub enum MetricKind {
     SignTest,
     #[serde(rename = "elo")]
     Elo,
+    #[serde(rename = "quantile-diff")]
+    QuantileDiff,
 }
 
 /// Which confidence-interval method `winrate`/`sign-test` use. `Exact`
@@ -154,8 +156,9 @@ pub enum FailurePolicy {
 /// invalid pairing a compile error instead of a runtime one.
 /// `MetricKind`-keyed code (`Report.metric`, `build_report`,
 /// `estimate_additional_trials`) is unchanged - call [`MetricConfig::kind`]
-/// to recover it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// to recover it. `PartialEq` only, not `Eq`: `QuantileDiff`'s `quantile: f64` field has no total
+/// equality (`f64` isn't `Eq`), so the derive would fail across the whole enum otherwise.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MetricConfig {
     WinRate {
         ci_method: CiMethod,
@@ -170,6 +173,14 @@ pub enum MetricConfig {
     Elo {
         failure_policy: FailurePolicy,
     },
+    /// `quantile` is always in `(0, 1)` (validated in `new`) - the sample min/max has no
+    /// well-behaved bootstrap distribution, so those endpoints are rejected rather than allowed
+    /// through. `bootstrap_method` is never `Bca` here (also validated in `new`) - see
+    /// `VeridictError::IncompatibleBootstrapMethod`'s doc for why.
+    QuantileDiff {
+        quantile: f64,
+        bootstrap_method: BootstrapMethod,
+    },
 }
 
 impl MetricConfig {
@@ -181,6 +192,7 @@ impl MetricConfig {
             Self::SignTest { .. } => MetricKind::SignTest,
             Self::MeanDiff { .. } => MetricKind::MeanDiff,
             Self::Elo { .. } => MetricKind::Elo,
+            Self::QuantileDiff { .. } => MetricKind::QuantileDiff,
         }
     }
 
@@ -188,22 +200,32 @@ impl MetricConfig {
     /// same compatibility checks `compute_many` used to run on every call
     /// (`ci_method` other than `Wilson` is only valid for `WinRate`/
     /// `SignTest`; `failure_policy` other than `ReportOnly` is only valid
-    /// for `WinRate`/`Elo`), now run once at construction instead of once
-    /// per call. A caller that already knows which knobs its metric needs
-    /// can construct a variant directly (e.g. `MetricConfig::MeanDiff { .. }`)
-    /// and skip this - it's valid by construction, no runtime check needed.
+    /// for `WinRate`/`Elo`; `Bca` isn't a valid `bootstrap_method` for
+    /// `QuantileDiff` - see `VeridictError::IncompatibleBootstrapMethod`), now
+    /// run once at construction instead of once per call. A caller that
+    /// already knows which knobs its metric needs can construct a variant
+    /// directly (e.g. `MetricConfig::MeanDiff { .. }`) and skip this - it's
+    /// valid by construction, no runtime check needed.
+    ///
+    /// `quantile` for any kind other than `QuantileDiff` is silently unused,
+    /// not a config error - same precedent as `bootstrap_method` for
+    /// `WinRate`/`SignTest`/`Elo` (which don't read it either): it lets a
+    /// single `compare --metric mean-diff --metric quantile-diff --quantile
+    /// 0.9` invocation share one `--quantile` flag across the whole run
+    /// without erroring on the metric that doesn't need it.
     pub fn new(
         kind: MetricKind,
         ci_method: CiMethod,
         bootstrap_method: BootstrapMethod,
         failure_policy: FailurePolicy,
+        quantile: Option<f64>,
     ) -> Result<Self, VeridictError> {
         match kind {
             MetricKind::WinRate => Ok(Self::WinRate {
                 ci_method,
                 failure_policy,
             }),
-            MetricKind::SignTest | MetricKind::MeanDiff
+            MetricKind::SignTest | MetricKind::MeanDiff | MetricKind::QuantileDiff
                 if failure_policy != FailurePolicy::ReportOnly =>
             {
                 Err(VeridictError::IncompatibleFailurePolicy {
@@ -211,15 +233,33 @@ impl MetricConfig {
                     metric: metrics::metric_label(kind),
                 })
             }
-            MetricKind::MeanDiff | MetricKind::Elo if ci_method != CiMethod::Wilson => {
+            MetricKind::MeanDiff | MetricKind::Elo | MetricKind::QuantileDiff
+                if ci_method != CiMethod::Wilson =>
+            {
                 Err(VeridictError::IncompatibleCiMethod {
                     method: metrics::ci_method_label(ci_method),
+                    metric: metrics::metric_label(kind),
+                })
+            }
+            MetricKind::QuantileDiff if bootstrap_method == BootstrapMethod::Bca => {
+                Err(VeridictError::IncompatibleBootstrapMethod {
+                    method: metrics::bootstrap_method_label(bootstrap_method),
                     metric: metrics::metric_label(kind),
                 })
             }
             MetricKind::SignTest => Ok(Self::SignTest { ci_method }),
             MetricKind::MeanDiff => Ok(Self::MeanDiff { bootstrap_method }),
             MetricKind::Elo => Ok(Self::Elo { failure_policy }),
+            MetricKind::QuantileDiff => {
+                let q = quantile.unwrap_or(0.5);
+                if !q.is_finite() || q <= 0.0 || q >= 1.0 {
+                    return Err(VeridictError::InvalidQuantile(q));
+                }
+                Ok(Self::QuantileDiff {
+                    quantile: q,
+                    bootstrap_method,
+                })
+            }
         }
     }
 
@@ -227,13 +267,16 @@ impl MetricConfig {
     /// only ever actually read there for `WinRate`/`SignTest`
     /// (`estimate_additional_trials` hardcodes its own Wilson-based branch
     /// for `Elo` before this value would be read, and returns early for
-    /// `MeanDiff` before it too - see `verdict::estimate_additional_trials`).
-    /// `Wilson` here for `MeanDiff`/`Elo` is a safe placeholder, not a real
+    /// `MeanDiff`/`QuantileDiff` before it too - see
+    /// `verdict::estimate_additional_trials`). `Wilson` here for
+    /// `MeanDiff`/`Elo`/`QuantileDiff` is a safe placeholder, not a real
     /// choice being made on their behalf.
     fn ci_method(&self) -> CiMethod {
         match self {
             Self::WinRate { ci_method, .. } | Self::SignTest { ci_method } => *ci_method,
-            Self::MeanDiff { .. } | Self::Elo { .. } => CiMethod::Wilson,
+            Self::MeanDiff { .. } | Self::Elo { .. } | Self::QuantileDiff { .. } => {
+                CiMethod::Wilson
+            }
         }
     }
 }
@@ -380,6 +423,7 @@ fn build_report(
         estimated_additional_trials,
         warnings,
         data_quality,
+        quantile: out.quantile,
         correction_method: None,
         family_size: None,
         achieved_alpha: None,
@@ -457,6 +501,27 @@ fn collect_data_quality(
             "the measured effect is smaller than the CI's own half-width: it could plausibly be noise around zero, even though the sample isn't tiny"
                 .to_string(),
         );
+    }
+
+    // `quantile-diff` only. Distribution-free proxy for "is there enough data in the thinner
+    // tail to estimate this quantile at all" - same shape as the binomial `np >= 10` rule of
+    // thumb, using the expected count in whichever tail is smaller. Deliberately NOT guarded by
+    // `!tiny_sample`: unlike `effect_within_noise_floor` (a redundant restatement of "the sample
+    // is small" once n alone already flags it), this carries information `tiny_sample`'s n-only
+    // threshold can't see - e.g. n=100 at q=0.95 has only 5 expected tail observations and should
+    // fire even though `paired_count < 30` is false.
+    if let Some(q) = out.quantile
+        && out.paired_count > 0
+    {
+        quality.thin_quantile_tail = out.paired_count as f64 * q.min(1.0 - q) < 10.0;
+        if quality.thin_quantile_tail {
+            warnings.push(format!(
+                "thin quantile tail: only ~{:.1} expected observation(s) in the thinner tail at q={:.2} with {} paired trial(s) - this quantile estimate is likely unreliable",
+                out.paired_count as f64 * q.min(1.0 - q),
+                q,
+                out.paired_count
+            ));
+        }
     }
 
     // records_with_id/max_id_count are 0 when --paired-by-id is set - paired

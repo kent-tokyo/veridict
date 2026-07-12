@@ -13,6 +13,7 @@
 mod common;
 mod elo;
 mod mean_diff;
+mod quantile_diff;
 mod sign_test;
 mod winrate;
 
@@ -23,7 +24,8 @@ use std::collections::HashMap;
 use crate::error::VeridictError;
 use crate::input::Record;
 use crate::{
-    CiMethod, FailurePolicy, IntoRecordResult, MetricConfig, MetricKind, Outcome, TrialStatus,
+    BootstrapMethod, CiMethod, FailurePolicy, IntoRecordResult, MetricConfig, MetricKind, Outcome,
+    TrialStatus,
 };
 
 /// Per-side failure tally, so a report can distinguish "the baseline kept
@@ -68,6 +70,9 @@ pub struct MetricOutput {
     pub records_with_id: u64,
     /// The largest number of records sharing any single id.
     pub max_id_count: u64,
+    /// The quantile `quantile-diff` measured (e.g. `0.95` for p95), so the report can say which
+    /// one. `None` for every other metric.
+    pub quantile: Option<f64>,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called once per record
@@ -128,6 +133,17 @@ fn build_aggregator(
             confidence,
             paired_by_id,
             ci_method,
+        )),
+        MetricConfig::QuantileDiff {
+            quantile,
+            bootstrap_method,
+        } => Box::new(quantile_diff::QuantileDiffAggregator::new(
+            confidence,
+            resamples,
+            seed,
+            paired_by_id,
+            quantile,
+            bootstrap_method,
         )),
     }
 }
@@ -264,6 +280,7 @@ pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
         MetricKind::MeanDiff => "metric mean-diff",
         MetricKind::SignTest => "metric sign-test",
         MetricKind::Elo => "metric elo",
+        MetricKind::QuantileDiff => "metric quantile-diff",
     }
 }
 
@@ -288,6 +305,18 @@ pub(crate) fn failure_policy_label(policy: FailurePolicy) -> &'static str {
         FailurePolicy::ReportOnly => "report-only",
         FailurePolicy::Exclude => "exclude",
         FailurePolicy::Loss => "loss",
+    }
+}
+
+/// A label for `IncompatibleBootstrapMethod`'s error message; matches the CLI's
+/// `--bootstrap-method` spelling. Only ever reached for `Bca` (the upfront guard in
+/// `MetricConfig::new` never fires for `Percentile`/`Basic`), but kept total rather than
+/// `unreachable!()` for those arms, same precedent as `ci_method_label`.
+pub(crate) fn bootstrap_method_label(method: BootstrapMethod) -> &'static str {
+    match method {
+        BootstrapMethod::Percentile => "percentile",
+        BootstrapMethod::Bca => "bca",
+        BootstrapMethod::Basic => "basic",
     }
 }
 
