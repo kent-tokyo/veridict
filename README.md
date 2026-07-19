@@ -98,11 +98,11 @@ is the strictest of the individual ones (any `fail` wins, then any
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
-Guard against a lucky pass across that metric family (see [Multiple-comparison
-correction](#multiple-comparison-correction)):
+Guard each metric's own claim against a lucky pass, read as a family of simultaneous claims (see
+[Multiple-comparison correction](#multiple-comparison-correction)):
 
 ```bash
-veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --correction holm
+veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --claim-correction holm
 ```
 
 Exact binomial CI on a small sample, BCa bootstrap on a skewed one:
@@ -307,59 +307,68 @@ metric.
 ## Multiple-comparison correction
 
 Running several `--metric` flags together means several independent chances for *some individual
-metric's own* `verdict`/`promotion` to clear its bar by luck alone - `--correction bonferroni`/
+metric's own* `verdict`/`promotion` to clear its bar by luck alone. `--claim-correction bonferroni`/
 `holm` keeps that per-metric risk, read as a family of simultaneous claims, at or below what a
-single, uncorrected metric already has today (see [`docs/metrics.md`](docs/metrics.md)'s
-`--correction` section for the full reasoning). That target doesn't strictly need the combined
-`verdict`/`promotion` `compare` reports for the whole run to be protected too - requiring every
-metric to pass already makes the combined result at least as conservative as a single metric, with
-no correction needed for *that* guarantee. In the current report model, though, `--correction`
-still *does* affect the combined result as a side effect (adjusted per-metric verdicts feed
-straight into the same aggregation `compare` always does) - so today, correction can still turn an
-overall `pass` into `inconclusive`. Scoping `--correction` away from the combined verdict is a
-planned follow-up, not current behavior. Not supported together with `--cluster-by-id` (rejected
-as a configuration error - see `docs/metrics.md`). Default is `none` - today's existing behavior,
-unchanged, unless you opt in.
+single, uncorrected metric already has today - but it never touches the deployment-gate
+`verdict`/`promotion` `compare` already reports for the whole run: requiring every metric to pass
+already makes that combined result at least as conservative as a single metric, with no correction
+needed for *that* guarantee (see [`docs/metrics.md`](docs/metrics.md)'s `--claim-correction`
+section for the full reasoning). Instead, correction populates a separate
+`family_adjusted_verdict`/`family_adjusted_promotion` per report (`unadjusted_verdict` also
+appears alongside them, a deprecated compatibility alias that always equals `verdict` - read
+`verdict` instead) and an overall `simultaneous_claims_promotion`. Not supported together with
+`--cluster-by-id` or `--metric mean-diff`/`quantile-diff` (rejected as a configuration error - see
+`docs/metrics.md`). `--correction` is kept as a deprecated alias for one release. Default is
+`none` - today's existing behavior, unchanged, unless you opt in.
 
 ```console
-$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
+$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --claim-correction bonferroni
 {
   "schema_version": 1,
-  "verdict": "inconclusive",
+  "verdict": "pass",
+  "promotion": "promoted",
+  "simultaneous_claims_promotion": "not_promoted",
   "reports": [
     {
-      "verdict": "inconclusive",
+      "verdict": "pass",
+      "promotion": "promoted",
       "metric": "winrate",
-      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Bonferroni correction (family_size=2): achieved significance 0.045328 exceeds the corrected threshold 0.025000 - downgraded from pass to inconclusive.",
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200",
       "correction_method": "bonferroni",
       "family_size": 2,
       "achieved_alpha": 0.045327562117809694,
       "adjusted_alpha_threshold": 0.025000000000000022,
-      "unadjusted_verdict": "pass"
+      "unadjusted_verdict": "pass",
+      "family_adjusted_verdict": "inconclusive",
+      "family_adjusted_promotion": "not_promoted"
       // ...
     },
     {
       "verdict": "pass",
+      "promotion": "promoted",
       "metric": "elo",
-      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Bonferroni correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200",
       "correction_method": "bonferroni",
       "family_size": 2,
       "achieved_alpha": 0.016420872210740903,
       "adjusted_alpha_threshold": 0.025000000000000022,
-      "unadjusted_verdict": "pass"
+      "unadjusted_verdict": "pass",
+      "family_adjusted_verdict": "pass",
+      "family_adjusted_promotion": "promoted"
       // ...
     }
   ]
 }
 ```
 
-Without `--correction`, both metrics pass on this same input. `winrate`'s evidence is real but
-comparatively weak; split two ways it no longer clears its corrected bar, so *that metric's own*
-verdict drops to `inconclusive` (and, as a side effect of how `verdict::aggregate` combines
-reports today, so does the run's combined verdict - see the section above for why that side
-effect isn't itself the guarantee `--correction` is providing). `--correction holm` is uniformly
-more powerful than `bonferroni` for the same guarantee (it would keep both metrics passing here);
-either can only downgrade an unadjusted pass to inconclusive, never invent a fail.
+`winrate`'s evidence is real but comparatively weak; split two ways it no longer clears its
+corrected bar, so *that metric's own* `family_adjusted_verdict` drops to `inconclusive` and the
+overall `simultaneous_claims_promotion` becomes `not_promoted`. The deployment-gate `verdict`/
+`promotion` stay `pass`/`promoted` throughout - both metrics still individually pass at the
+original, uncorrected confidence, and that's what the combined result is built from.
+`--claim-correction holm` is uniformly more powerful than `bonferroni` for the same guarantee (it
+would keep both metrics' family-adjusted claims at `pass` here); either can only downgrade an
+unadjusted pass to inconclusive, never invent a fail.
 
 ## Report extras
 
@@ -659,7 +668,7 @@ either arm's own standard deviation** - the classic paired-design mislabeling ri
 wrong silently corrupts every number downstream. See
 [`docs/metrics.md`](docs/metrics.md)'s `power --metric mean-diff` section for the formula, why
 `z_conf` must be the two-sided confidence quantile (the same correctness point behind `power`'s
-own two-effect-value design and `--correction`'s `alpha/2` family target), and `--pilot`'s
+own two-effect-value design and `--claim-correction`'s `alpha/2` family target), and `--pilot`'s
 tiny-sample/small-pilot caveats.
 
 `--sprt` switches to a structurally different question: Wald's SPRT already guarantees its

@@ -10,6 +10,43 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.14.0] - 2026-07-20
+
+### Changed
+
+- **Breaking: split the deployment-gate verdict from family-adjusted metric claims, and renamed
+  `--correction` to `--claim-correction`.** `--correction`'s statistical target was always a
+  family of *simultaneous per-metric claims*, not `verdict::aggregate`'s combined result (an
+  intersection-union rule requiring every metric to pass is already at least as conservative as a
+  single metric, with no correction needed of its own - see 0.13.0's entry below). But the report
+  shape didn't reflect that: `apply_correction` mutated each report's own `verdict` in place, so a
+  claim-correction downgrade could still pull the whole run's combined `verdict`/`promotion` down
+  as a side effect of sharing one field, not by statistical necessity. Now: `Report.verdict`/
+  `promotion` and `MultiReport.verdict`/`promotion` are the deployment gate, always computed from
+  *unadjusted* per-metric verdicts and never touched by `--claim-correction`, no matter what's
+  passed. Correction instead populates `Report.family_adjusted_verdict`/
+  `family_adjusted_promotion` and a new `MultiReport.simultaneous_claims_promotion` (`promoted`
+  only if every report's `family_adjusted_promotion` is too) - the field to read if "does every
+  metric's own improvement claim individually survive being read as part of the family" matters on
+  its own. `Report.unadjusted_verdict` is retained as a deprecated compatibility alias for
+  `verdict` (it now always equals `verdict`, since `verdict` is never adjusted) so an existing
+  consumer of a corrected report doesn't see a field vanish; new consumers should migrate to
+  `verdict` directly, and it's scheduled for removal alongside a future `REPORT_SCHEMA_VERSION`
+  bump, not this round. `--correction` is kept as a deprecated alias for one release (prints a
+  warning to stderr; the two flags are mutually exclusive). See
+  [`docs/metrics.md`](docs/metrics.md)'s `--claim-correction` section.
+- **Breaking: `--claim-correction`/`--correction` now reject a family containing `--metric
+  mean-diff`/`quantile-diff` as a configuration error (exit code 3)**, instead of silently leaving
+  such a report uncorrected while still counting it toward `family_size` - the same "reject
+  outright rather than leave an incomplete guarantee" call 0.13.0 made for `--cluster-by-id`,
+  applied consistently to the other gap in the same family-wise claim. Bootstrap-aware correction
+  is a separate, deferred piece of work.
+- **Correctness dependency, now explicit: failure caps run before claim correction.**
+  `verdict::apply_failure_caps`/`apply_failure_caps_to_multi` finalize `validity`/`verdict`/
+  `promotion` *before* `correction::apply_correction`/`apply_correction_to_multi` ever runs, so a
+  report already forced to `Inconclusive` for a technical failure can never count as a legitimate
+  statistical claim just because its raw numeric verdict looked clean.
+
 ## [0.13.0] - 2026-07-20
 
 ### Fixed

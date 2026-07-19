@@ -108,10 +108,11 @@ a p95 gate, for instance.
 **Not supported: `power --metric quantile-diff` and `matrix`/`plan`.** Power needs an
 order-statistic asymptotic variance (or a density estimate at the quantile) - a separate research
 problem from `mean-diff`'s closed-form power, not a mirror of it (see `docs/research-map.md`).
-`estimated_additional_trials`/`--correction` treat `quantile-diff` exactly like `mean-diff`: the
-`O(1/sqrt(n))` CLT-scaling fallback for the former (no closed-form CI-width-at-n function for
-either's bootstrap CI), and exclusion from individual correction while still counting toward
-`family_size` for the latter (no closed-form CI-at-a-hypothetical-confidence function either).
+`estimated_additional_trials`/`--claim-correction` treat `quantile-diff` exactly like `mean-diff`:
+the `O(1/sqrt(n))` CLT-scaling fallback for the former (no closed-form CI-width-at-n function for
+either's bootstrap CI), and outright rejection as a configuration error for the latter (no
+closed-form CI-at-a-hypothetical-confidence function either - see the `--claim-correction` section
+below).
 
 ## `elo`
 
@@ -250,8 +251,10 @@ a `verdict` off of *at all*. Breaching a cap sets `validity: invalid`, forces `v
 inconclusive` (overwriting whatever `verdict::decide`/the LLR boundary check actually produced),
 and clears `estimated_additional_trials` (more trials can't fix a technical-failure problem) -
 applied as a final pass over an already-built report (`verdict::apply_failure_caps`/
-`sprt::apply_failure_caps`), the same "mutate a finished report" shape `--correction` already
-uses for a different cross-cutting concern.
+`sprt::apply_failure_caps`), the same "mutate a finished report" shape `--claim-correction`
+already uses for a different cross-cutting concern - and must run *before* it, so an invalid
+report never counts as a legitimate claim (see the `--claim-correction` section's "processing
+order" paragraph).
 
 Deliberately an absolute count, not a rate: `data_quality.high_failure_rate` (over 20% of trials)
 already covers "this run's failure *rate* looks unusually high," advisory-only, never changing
@@ -587,7 +590,7 @@ matters for a pass); `wilson_ci_from_proportion` computes its own `z` the same w
 trials than actually needed - the optimistic, false-pass-prone direction this project exists to
 avoid. This is the same "a two-sided CI read one-sidedly only carries half its nominal budget in
 that tail" fact that already shaped `power`'s two-effect-value design (above) and
-`--correction`'s `alpha/2` family target (see that section) - verified consistent here by
+`--claim-correction`'s `alpha/2` family target (see that section) - verified consistent here by
 construction, not re-derived from scratch, and confirmed independently before implementation.
 
 **This is a normal approximation of a real bootstrap decision rule, not an exact search against
@@ -630,36 +633,55 @@ threshold to use, and the "false pass is worse than inconclusive" bias behind pi
 pessimistic/optimistic bound rather than the point estimate, are veridict's own design decisions,
 not a theorem.
 
-## `--correction`
+## `--claim-correction`
 
-**Why this exists.** `compare --metric elo --metric winrate --metric sign-test` runs several
-metrics against the same candidate in one call; `verdict::aggregate` combines them (any `fail`
-sinks the run, else any `inconclusive` holds it back, else `pass`). But each metric's own
-pass/fail decision is made independently at the stated `--confidence` - run enough metrics (or,
-across a broader campaign, enough candidates) and the chance that *something* clears its bar by
-luck alone climbs. That directly undermines this project's own "a false pass is worse than an
-inconclusive result" bias (see above): an uncorrected multi-metric family is more likely to
-produce a lucky pass than any single metric run alone would be. `--correction none` (the default)
-is exactly today's existing behavior, unchanged - correction is opt-in.
+**Two different questions, two different fields.** `compare --metric elo --metric winrate
+--metric sign-test` runs several metrics against the same candidate in one call, and there are two
+separate things a caller might want to know: "should this candidate be promoted overall" (the
+deployment gate: `verdict`/`promotion`, always the *unadjusted* per-metric values combined via
+`verdict::aggregate` - any `fail` sinks the run, else any `inconclusive` holds it back, else
+`pass`) and "does every metric's own improvement claim individually survive being read as part of
+a simultaneous family" (`--claim-correction`: `family_adjusted_verdict`/`family_adjusted_promotion`
+per report, and `simultaneous_claims_promotion` on a multi-metric run's overall result).
+`--claim-correction` only ever touches the second - `verdict`/`promotion` are never adjusted, no
+matter what `--claim-correction` is given. `--correction` is kept as a deprecated alias for one
+release (prints a warning to stderr; the two flags are mutually exclusive).
+
+**Why the deployment gate needs no correction of its own.** Each metric's own pass/fail decision
+is made independently at the stated `--confidence` - run enough metrics (or, across a broader
+campaign, enough candidates) and the chance that *some individual metric's own claim* clears its
+bar by luck alone climbs. But the combined `verdict`/`promotion` already requires *every* metric to
+pass: an intersection-union rule over `alpha/2`-level tests (see below for why `alpha/2`, not the
+nominal `alpha`) is itself level `alpha/2`, unconditionally (Berger 1982) - already at least as
+conservative as a single uncorrected metric, with no correction needed. Applying Bonferroni/Holm on
+top of that AND-gate wouldn't tighten its own guarantee; it would only cost power (more
+`inconclusive` verdicts, more trials needed to clear a corrected bar the aggregate never actually
+required). That's why `verdict`/`promotion` stay unadjusted regardless of `--claim-correction`.
+
+**Why `family_adjusted_verdict`/`simultaneous_claims_promotion` still need one.** The risk above is
+real for a different reading: each metric's own `verdict`/`promotion` is also its own field on its
+own `Report`, readable on its own by whatever, if anything, treats "this metric individually
+improved" as a claim in its own right - not just as an input to the combined gate. `--claim-correction`
+controls exactly that family-wise risk. `--claim-correction none` (the default) is exactly today's
+existing behavior, unchanged - correction is opt-in.
 
 **The family-error target: no worse than today's own single-metric baseline.** `compare`'s pass
 rule already reads a *two-sided* `(1-confidence)` CI's *lower* bound as a one-sided pass signal -
 a two-sided interval splits its error budget evenly between both tails, so a single, uncorrected
 metric today already has a one-sided false-pass rate of `alpha/2` (e.g. 0.025 at the default 95%
 confidence), not the nominal `alpha`. The natural, and only defensible, correction target is
-therefore "running `m` metrics together is no more dangerous than running one" - keep the
-*family's* one-sided false-pass rate at that same `alpha/2`, not the nominal `alpha` itself (which
-would let a "corrected" multi-metric family tolerate a *higher* false-pass rate than a single
-uncorrected metric already has today). This falls straight out of standard textbook Bonferroni
-simultaneous confidence intervals (Dunn 1961; Miller, *Simultaneous Statistical Inference*, 1966):
-recompute each test's ordinary, symmetric, two-sided CI at confidence `1 - alpha/m` (the same
-`alpha = 1-confidence` the tool already uses, split across the family - no extra factor of
-anything) and re-run the same pass/fail rule against it.
+therefore "running `m` metrics together as simultaneous claims is no more dangerous than running
+one" - keep the *family's* one-sided false-pass rate at that same `alpha/2`, not the nominal
+`alpha` itself. This falls straight out of standard textbook Bonferroni simultaneous confidence
+intervals (Dunn 1961; Miller, *Simultaneous Statistical Inference*, 1966): recompute each test's
+ordinary, symmetric, two-sided CI at confidence `1 - alpha/m` (the same `alpha = 1-confidence` the
+tool already uses, split across the family - no extra factor of anything) and re-run the same
+pass/fail rule against it to get `family_adjusted_verdict`.
 
-**`--correction bonferroni`**: a uniform significance budget `alpha/family_size` for every metric
-in the run, regardless of how strong or weak each one's own evidence is.
+**`--claim-correction bonferroni`**: a uniform significance budget `alpha/family_size` for every
+metric in the run, regardless of how strong or weak each one's own evidence is.
 
-**`--correction holm`** (recommended over Bonferroni): sorts metrics by their own achieved
+**`--claim-correction holm`** (recommended over Bonferroni): sorts metrics by their own achieved
 significance ascending and steps down, comparing the `k`-th (1-based) most significant result to
 `alpha/(family_size-k+1)`, stopping at the first failure. Uniformly more powerful than Bonferroni
 for the same family-wise guarantee - it never rejects fewer true passes than Bonferroni would, and
@@ -667,72 +689,68 @@ often rejects strictly more (Holm 1979). A report past an early failure in the o
 held back regardless of its own significance, because that sequential stop is what gives Holm its
 guarantee, not independent per-metric comparisons.
 
-**Correction can only downgrade a pass, never invent a fail.** Widening a CI (lower confidence
+**Correction can only downgrade a claim, never invent a fail.** Widening a CI (lower confidence
 budget per test) only ever pushes its lower bound down and its upper bound up. For a report that
 already passed (`ci_low >= pass_above`, which by construction means `ci_low > fail_below` too,
 since `pass_above > fail_below`), a wider `ci_high` can never newly satisfy `ci_high <= fail_below`.
-So correction only ever moves an unadjusted `pass` to `inconclusive` - it never fails a metric that
-wasn't already failing, and never touches a metric whose unadjusted verdict was already `fail` or
-`inconclusive`. That asymmetry falls straight out of the math above; it isn't a special case.
+So `family_adjusted_verdict` only ever moves an unadjusted `pass` to `inconclusive` - it never
+fails a metric that wasn't already failing, and never touches a metric whose own `verdict` was
+already `fail` or `inconclusive` (`family_adjusted_verdict` just mirrors `verdict` for those). That
+asymmetry falls straight out of the math above; it isn't a special case.
 
-**`mean-diff`/`quantile-diff` count toward `family_size` but keep their own, unadjusted verdict.**
-There is no closed-form CI-at-a-hypothetical-confidence function for either's bootstrap CI without
-real resampled data (same reason `estimated_additional_trials`/`power` both special-case them) -
-such a report's own pass/fail is left as computed. It still counts toward `family_size`, though:
-excluding it would under-count the real multiplicity risk the *other* metrics in the same run are
-actually exposed to - the conservative choice.
+**Processing order matters: failure caps, then claim correction, then both aggregates.**
+`--claim-correction` only ever adjusts a report whose own `verdict` is `Pass` *after* any
+`--max-timeouts`/`--max-crashes`/`--max-invalid` cap has already been applied - a report forced to
+`Inconclusive` for a technical failure must never count as a legitimate statistical claim just
+because its raw numeric verdict looked clean. Concretely: (1) compute each metric's CI and
+`verdict`; (2) apply failure caps, finalizing `validity`/`verdict`/`promotion`; (3) claim-correct
+only the valid, still-`Pass` reports; (4) `verdict`/`promotion` were already finalized in step 2,
+from unadjusted values, and `--claim-correction` never revisits them; (5) aggregate
+`simultaneous_claims_promotion` from every report's `family_adjusted_promotion`.
 
-**`--correction` is rejected outright when combined with `--cluster-by-id` (a configuration
-error, exit code 3).** `achieved_alpha` recomputes each metric's CI at a hypothetical confidence
-from `successes`/`paired_count` alone - the closed-form Wilson/Jeffreys/Exact math `compare`
-itself uses when *not* clustering. A `--cluster-by-id` report's actual, displayed CI comes from a
-cluster bootstrap instead, and there's no closed-form CI-at-a-hypothetical-confidence function for
-that (the same shape of gap as `mean-diff`/`quantile-diff` above). Silently falling back to the
-i.i.d. reconstruction would be worse than just excluding the report from correction, though:
-whenever clustering has positive intra-cluster correlation (the usual case, and the whole reason
-`--cluster-by-id` widens the CI to begin with), the i.i.d. reconstruction is *narrower* than the
-true cluster-robust CI, so it reads more significant than the report actually is - correction
-could then *under*-downgrade a pass it should have caught, leniency in exactly the direction this
-project's own bias forbids. Rejecting the combination is the safe default until a cluster-aware
-`achieved_alpha` exists (see `docs/research-map.md`).
+**`mean-diff`/`quantile-diff` and `--cluster-by-id` are rejected outright (a configuration error,
+exit code 3) - not silently left uncorrected while still counting toward `family_size`.** There is
+no closed-form CI-at-a-hypothetical-confidence function for a bootstrap CI (mean-diff/quantile-diff)
+without real resampled data (same reason `estimated_additional_trials`/`power` special-case them),
+nor for a cluster bootstrap CI (`--cluster-by-id`) - `achieved_alpha` has nothing valid to search
+against for either. Worse for `--cluster-by-id` specifically: a naive fallback reconstructing a
+plain i.i.d. CI from `successes`/`paired_count` alone comes out *narrower* than the true
+cluster-robust CI whenever there's positive intra-cluster correlation (the usual case, and the
+whole reason `--cluster-by-id` widens the CI to begin with) - it would read as more significant
+than the report actually is, so correction could *under*-downgrade a claim it should have caught,
+leniency in exactly the direction this project's own bias forbids. A family that can't get a real,
+method-consistent guarantee for every member doesn't get a `family_adjusted_verdict`/
+`simultaneous_claims_promotion` result at all; both are separate, deferred pieces of work (see
+`docs/research-map.md`).
 
-**What `--correction`'s statistical target is, versus what it currently touches.** The target is
-simultaneous per-metric claims: read as a family, no more than one metric's worth of false-pass
-risk should be spent across all of them together. `verdict::aggregate`'s combined result ("any fail
-sinks it, else any inconclusive holds it back, else pass") doesn't need that target applied to
-reach the same guarantee on its own: requiring *every* metric to pass is already an
-intersection-union rule over level-`alpha/2` tests, which is itself level `alpha/2`, unconditionally
-(Berger 1982) - so a workflow that only ever reads the combined verdict gets no additional
-guarantee from `--correction`, only lost power.
-**In the current report model, though, `--correction` still changes the combined result**:
-`apply_correction` mutates each report's own `verdict` in place, and `multi.verdict` is
-re-aggregated from those already-adjusted per-report verdicts - so a metric downgraded from `pass`
-to `inconclusive` by correction can still pull the whole run's combined verdict down with it, the
-same as any other inconclusive metric would. `--correction` isn't scoped away from the aggregate
-today; it just doesn't need to be relied on for the aggregate's own guarantee. Separating a
-deployment-oriented aggregate gate (computed from unadjusted per-metric verdicts) from a
-family-adjusted simultaneous-claims result is planned as its own follow-up change, not part of this
-round.
-
-**Report fields** (all omitted, not present as `null`, unless `--correction` is something other
-than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
+**Report fields** (all omitted, not present as `null`, unless `--claim-correction` is something
+other than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
 `achieved_alpha` (the smallest one-sided significance at which this report's own CI would still
-pass - `null`/omitted for `mean-diff`/`quantile-diff`), `adjusted_alpha_threshold` (the corrected
-threshold `achieved_alpha` was actually compared against), and `unadjusted_verdict` (the verdict before
-correction - `verdict` itself becomes the *adjusted* value, since that's the field the exit code
-and `verdict::aggregate` actually act on).
+pass), `adjusted_alpha_threshold` (the corrected threshold `achieved_alpha` was actually compared
+against), `family_adjusted_verdict` (this metric's claim, read as part of the family - see above),
+and `family_adjusted_promotion` (`Promotion::decide(validity, family_adjusted_verdict)`). A
+multi-metric run's top-level result additionally carries `simultaneous_claims_promotion`
+(`promoted` only if every report's `family_adjusted_promotion` is `promoted` too).
+
+**`unadjusted_verdict` is a deprecated compatibility alias for `verdict`, not a new field.**
+Before this split, `verdict` itself became the *adjusted* value once correction ran, and
+`unadjusted_verdict` held the pre-correction one alongside it. `verdict` is never adjusted now, so
+`unadjusted_verdict` always just equals it - kept only so an existing consumer of a corrected
+report doesn't see a field vanish out from under it, still within `REPORT_SCHEMA_VERSION` 1 for
+that reason. New consumers should read `verdict` directly; `unadjusted_verdict` is scheduled for
+removal alongside a future schema version bump, not this round.
 
 **A single-metric run degenerates to a no-op.** With `family_size=1`, both Bonferroni's and Holm's
 threshold reduce to `alpha/1 = alpha` - exactly the report's own existing, uncorrected pass
-condition. `--correction` is accepted and reported on a single-`--metric` run for uniformity, but
-never changes its verdict.
+condition, so `family_adjusted_verdict` just mirrors `verdict`. `--claim-correction` is accepted
+and reported on a single-`--metric` run for uniformity, but never changes anything about its
+outcome.
 
-**`estimated_additional_trials` stays `null` on a correction-downgraded report.** It's computed
-once, before correction runs, from the *unadjusted* verdict - a report downgraded from `pass` to
-`inconclusive` by correction still shows `null` there, same as any other `pass`. A consumer that
-assumes "inconclusive always has a trials estimate" will see `null` for this new reason too; the
-number correction's `inconclusive` would actually need (more trials at the *corrected* confidence,
-not the original one) isn't computed this round.
+**`estimated_additional_trials` stays `null` on a claim-correction-downgraded report.** It's
+computed once, from `verdict` before claim correction runs at all - a report whose
+`family_adjusted_verdict` is `inconclusive` while `verdict` is still `pass` shows `null` there,
+same as any other `pass`. The number a corrected `inconclusive` would actually need (more trials
+at the *corrected* confidence) isn't computed this round.
 
 **Out of scope for now**: `matrix`'s all-pairs correction (matrix has no verdict concept to correct
 at all today - see `docs/research-map.md`'s "matrix verdict semantics" entry), `sprt`'s own

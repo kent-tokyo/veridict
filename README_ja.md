@@ -92,10 +92,11 @@ cat results.jsonl | veridict compare - --metric winrate
 veridict compare results.jsonl --metric winrate --metric sign-test --min-effect 0.02
 ```
 
-そのメトリクスの組に対して、偶然のpassを防ぐ([多重比較補正](#多重比較補正)を参照):
+各メトリクス自身の主張を、同時に成立した家族として読んだときの偶然のpassから守る
+([多重比較補正](#多重比較補正)を参照):
 
 ```bash
-veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --correction holm
+veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 --claim-correction holm
 ```
 
 小さいサンプルには正確二項信頼区間、歪んだ分布にはBCaブートストラップ:
@@ -247,61 +248,68 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 ## 多重比較補正
 
 複数の `--metric` を同時に実行するということは、*個々のメトリクス自身の* `verdict`/`promotion`
-のどれか1つが偶然しきい値を超えてしまう独立したチャンスが複数あるということです -
-`--correction bonferroni`/`holm` は、それらを「同時に成立した複数の主張」として読んだときのリスク
-を、補正なしの単一メトリクスが今日すでに持っているリスク以下に保ちます(詳しい理由は
-[`docs/metrics_ja.md`](docs/metrics_ja.md)の `--correction` セクションを参照)。この目標自体は、
-`compare` が出す組み合わさった `verdict`/`promotion` まで守る必要はありません - 全metricのpassを
-要求する現在の集約ルールは、それだけで既に単一メトリクス以上に保守的だからです。**ただし現行の
-reportモデルでは、`--correction` は副作用として組み合わさった判定にも今なお影響します**:
-補正後の個別metricの `verdict` がそのまま既存の集約処理に渡るため、補正によってpassから
-inconclusiveに格下げされたmetricが1つあれば、実行全体のoverall verdictも同じように
-inconclusiveへ引き下げられ得ます。`--correction` を組み合わさった判定から切り離すことは、今回とは
-別の、今後の変更として計画されています。`--correction` が主に効くのは、下流が個々のメトリクスの
-`verdict`/`promotion` を単独で参照する場合です。`--cluster-by-id` との併用はサポートされておらず、
-設定エラーとして拒否されます(理由は `docs/metrics_ja.md` 参照)。デフォルトは `none` -
-オプトインしない限り、今日と全く同じ挙動のままです。
+のどれか1つが偶然しきい値を超えてしまう独立したチャンスが複数あるということです。
+`--claim-correction bonferroni`/`holm` は、それらを「同時に成立した複数の主張」として読んだときの
+リスクを、補正なしの単一メトリクスが今日すでに持っているリスク以下に保ちますが、`compare` が出す
+deployment-gateの `verdict`/`promotion` には一切触れません - 全metricのpassを要求する現在の
+集約ルールは、それだけで既に単一メトリクス以上に保守的であり、その保証のために補正は不要だから
+です(詳しい理由は [`docs/metrics_ja.md`](docs/metrics_ja.md)の `--claim-correction` セクションを
+参照)。代わりに、補正はレポートごとの `family_adjusted_verdict`/`family_adjusted_promotion`
+(併せて `unadjusted_verdict` も現れますが、これは常に `verdict` と同値を返す非推奨の互換エイリアス
+です - 代わりに `verdict` を読んでください)と、実行全体の `simultaneous_claims_promotion` という
+別のフィールドに反映されます。`--cluster-by-id`
+や `--metric mean-diff`/`quantile-diff` との併用はサポートされておらず、設定エラーとして拒否
+されます(理由は `docs/metrics_ja.md` 参照)。`--correction` は1リリースだけ非推奨エイリアスとして
+残ります。デフォルトは `none` - オプトインしない限り、今日と全く同じ挙動のままです。
 
 ```console
-$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
+$ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --claim-correction bonferroni
 {
   "schema_version": 1,
-  "verdict": "inconclusive",
+  "verdict": "pass",
+  "promotion": "promoted",
+  "simultaneous_claims_promotion": "not_promoted",
   "reports": [
     {
-      "verdict": "inconclusive",
+      "verdict": "pass",
+      "promotion": "promoted",
       "metric": "winrate",
-      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Bonferroni correction (family_size=2): achieved significance 0.045328 exceeds the corrected threshold 0.025000 - downgraded from pass to inconclusive.",
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200",
       "correction_method": "bonferroni",
       "family_size": 2,
       "achieved_alpha": 0.045327562117809694,
       "adjusted_alpha_threshold": 0.025000000000000022,
-      "unadjusted_verdict": "pass"
+      "unadjusted_verdict": "pass",
+      "family_adjusted_verdict": "inconclusive",
+      "family_adjusted_promotion": "not_promoted"
       // ...
     },
     {
       "verdict": "pass",
+      "promotion": "promoted",
       "metric": "elo",
-      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Bonferroni correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200",
       "correction_method": "bonferroni",
       "family_size": 2,
       "achieved_alpha": 0.016420872210740903,
       "adjusted_alpha_threshold": 0.025000000000000022,
-      "unadjusted_verdict": "pass"
+      "unadjusted_verdict": "pass",
+      "family_adjusted_verdict": "pass",
+      "family_adjusted_promotion": "promoted"
       // ...
     }
   ]
 }
 ```
 
-`--correction` なしでは、この同じ入力に対して両方のメトリクスがpassします。`winrate` の証拠は
-本物ですが相対的に弱く、2つに分けるとその補正後のしきい値をもう超えられなくなるため、
-*そのメトリクス自身の* 判定が `inconclusive` に下がります(そして、現在の `verdict::aggregate`
-の集約方法の副作用として、実行全体の判定もつられて下がります - この副作用自体は
-`--correction` が保証している内容そのものではない点は上のセクション参照)。
-`--correction holm` は同じ保証のもとで `bonferroni` より一様に検出力が高く(この例では両方の
-メトリクスがpassしたままになります)、どちらも補正前のpassをinconclusiveに格下げすることしか
-できず、failを新たに作り出すことはありません。
+`winrate` の証拠は本物ですが相対的に弱く、2つに分けるとその補正後のしきい値をもう超えられなく
+なるため、*そのメトリクス自身の* `family_adjusted_verdict` が `inconclusive` に下がり、全体の
+`simultaneous_claims_promotion` も `not_promoted` になります。deployment-gateの
+`verdict`/`promotion` は最後まで `pass`/`promoted` のままです - 両方のメトリクスとも、補正前の
+信頼水準では引き続き個別にpassしており、組み合わさった結果はその値から作られているからです。
+`--claim-correction holm` は同じ保証のもとで `bonferroni` より一様に検出力が高く(この例では
+両方のメトリクスのfamily-adjusted claimが `pass` のままになります)、どちらも補正前のpassを
+inconclusiveに格下げすることしかできず、failを新たに作り出すことはありません。
 
 ## レポートの追加情報
 
@@ -445,7 +453,7 @@ $ veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --pil
 **`assume_sd` はペアの*差分*(`candidate - baseline`)の標準偏差であり、どちらか一方の腕自身の
 標準偏差ではありません** - ペアデザインでよくある典型的なラベル付けミスです。これを間違えると
 下流のすべての数値が静かに壊れます。計算式、`z_conf` がなぜ両側の信頼水準分位点でなければ
-ならないか(`power` 自身の2つの効果値を要求する設計や `--correction` の `alpha/2` という
+ならないか(`power` 自身の2つの効果値を要求する設計や `--claim-correction` の `alpha/2` という
 ファミリー目標を形作ったのと同じ正確性のポイントです)、そして `--pilot` の小サンプルに関する
 注意点は [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power --metric mean-diff` セクションを
 参照してください。
