@@ -682,6 +682,38 @@ such a report's own pass/fail is left as computed. It still counts toward `famil
 excluding it would under-count the real multiplicity risk the *other* metrics in the same run are
 actually exposed to - the conservative choice.
 
+**`--correction` is rejected outright when combined with `--cluster-by-id` (a configuration
+error, exit code 3).** `achieved_alpha` recomputes each metric's CI at a hypothetical confidence
+from `successes`/`paired_count` alone - the closed-form Wilson/Jeffreys/Exact math `compare`
+itself uses when *not* clustering. A `--cluster-by-id` report's actual, displayed CI comes from a
+cluster bootstrap instead, and there's no closed-form CI-at-a-hypothetical-confidence function for
+that (the same shape of gap as `mean-diff`/`quantile-diff` above). Silently falling back to the
+i.i.d. reconstruction would be worse than just excluding the report from correction, though:
+whenever clustering has positive intra-cluster correlation (the usual case, and the whole reason
+`--cluster-by-id` widens the CI to begin with), the i.i.d. reconstruction is *narrower* than the
+true cluster-robust CI, so it reads more significant than the report actually is - correction
+could then *under*-downgrade a pass it should have caught, leniency in exactly the direction this
+project's own bias forbids. Rejecting the combination is the safe default until a cluster-aware
+`achieved_alpha` exists (see `docs/research-map.md`).
+
+**What `--correction`'s statistical target is, versus what it currently touches.** The target is
+simultaneous per-metric claims: read as a family, no more than one metric's worth of false-pass
+risk should be spent across all of them together. `verdict::aggregate`'s combined result ("any fail
+sinks it, else any inconclusive holds it back, else pass") doesn't need that target applied to
+reach the same guarantee on its own: requiring *every* metric to pass is already an
+intersection-union rule over level-`alpha/2` tests, which is itself level `alpha/2`, unconditionally
+(Berger 1982) - so a workflow that only ever reads the combined verdict gets no additional
+guarantee from `--correction`, only lost power.
+**In the current report model, though, `--correction` still changes the combined result**:
+`apply_correction` mutates each report's own `verdict` in place, and `multi.verdict` is
+re-aggregated from those already-adjusted per-report verdicts - so a metric downgraded from `pass`
+to `inconclusive` by correction can still pull the whole run's combined verdict down with it, the
+same as any other inconclusive metric would. `--correction` isn't scoped away from the aggregate
+today; it just doesn't need to be relied on for the aggregate's own guarantee. Separating a
+deployment-oriented aggregate gate (computed from unadjusted per-metric verdicts) from a
+family-adjusted simultaneous-claims result is planned as its own follow-up change, not part of this
+round.
+
 **Report fields** (all omitted, not present as `null`, unless `--correction` is something other
 than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
 `achieved_alpha` (the smallest one-sided significance at which this report's own CI would still

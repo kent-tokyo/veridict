@@ -1281,6 +1281,57 @@ fn cluster_by_id_rejected_for_mean_diff() {
 }
 
 #[test]
+fn cluster_by_id_conflicts_with_correction() {
+    let stdin: String = (0..20)
+        .flat_map(|i| {
+            (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--cluster-by-id",
+            "--correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--correction"))
+        .stderr(predicate::str::contains("--cluster-by-id"));
+}
+
+#[test]
+fn cluster_by_id_with_explicit_correction_none_still_succeeds() {
+    // --correction none is a no-op (apply_correction returns immediately, same as if the flag
+    // were never passed) - only a real correction method conflicts with --cluster-by-id.
+    let stdin: String = (0..20)
+        .flat_map(|i| {
+            (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--cluster-by-id",
+            "--correction",
+            "none",
+            "--min-effect",
+            "0.1",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"cluster_count\": 20"));
+}
+
+#[test]
 fn cluster_by_id_works_for_elo() {
     let stdin: String = (0..20)
         .flat_map(|i| {

@@ -167,7 +167,17 @@ fastest to identify the single best candidate? something else?).
 
 **What it is:** when a `compare` run requests several `--metric` flags together, each gets its own
 independent verdict at the stated confidence level - running several tests without correction
-(e.g. Bonferroni/Holm) inflates the overall false-positive rate across the combined result.
+(e.g. Bonferroni/Holm) inflates the false-positive rate across that *family of individual
+per-metric verdicts*, read as simultaneous claims. This is deliberately not the same target as
+`verdict::aggregate`'s combined result: aggregating with "every metric must pass" is itself an
+intersection-union rule over `alpha/2`-level tests, which is already no more likely to false-pass
+than a single metric, with no correction needed (Berger 1982) - correction here exists for
+whatever, if anything, reads an individual metric's own verdict on its own. That target/mechanism
+split isn't reflected in the report shape yet, though: `apply_correction` mutates each report's
+`verdict` in place, and today's `multi.verdict` is re-aggregated from those already-adjusted
+per-report verdicts, so correction can still pull the combined verdict down to `inconclusive` as a
+side effect - see `docs/metrics.md`'s "current report model" caveat and the "target-vs-mechanism
+split" entry below for the planned follow-up.
 
 **Now covered, for `compare`'s multi-metric family.** `--correction bonferroni`/`holm` (see
 `docs/metrics.md`'s `--correction` section) keeps the family's one-sided false-pass rate at or
@@ -191,7 +201,35 @@ shipped for `compare`) and `sprt`'s own multiplicity question (running several s
 different, less conservative family-error target than FWER), finer-grained correction "families"
 (e.g. correcting across candidates in a broader campaign, not just across metrics within one
 `compare` run), and sequential/repeated-looks warnings (checking an accumulating result multiple
-times before it's final is itself a multiplicity risk this round doesn't address).
+times before it's final is itself a multiplicity risk this round doesn't address). `--correction`
+combined with `--cluster-by-id` is rejected outright (a configuration error) rather than silently
+reconstructing the wrong CI shape - see `docs/metrics.md`'s `--correction` section; a cluster-aware
+`achieved_alpha` is unstarted.
+
+### Separating the deployment-oriented aggregate gate from family-adjusted metric claims
+
+**What it is:** `--correction`'s statistical target is a family of *simultaneous per-metric*
+claims, not `verdict::aggregate`'s combined result - an intersection-union rule requiring every
+metric to pass is already at least as conservative as a single metric, correction or not (see the
+entry above). But the current report shape doesn't express that split: `apply_correction` mutates
+each report's own `verdict` in place, and `multi.verdict`/`multi.promotion` are computed from those
+already-adjusted per-report values, so correction still moves the combined result today, just as a
+side effect of sharing one field rather than by statistical necessity.
+
+**What would change this:** give each report both an unadjusted `verdict`/`promotion` (feeding a
+deployment-oriented `MultiReport.verdict`/`promotion` that `--correction` never touches) and a
+separate `family_adjusted_verdict`/`family_adjusted_promotion` (feeding a new
+`MultiReport.simultaneous_claims_promotion`, true only when every individually-correctable
+report's family-adjusted claim still holds). Likely pairs with renaming the flag to
+`--claim-correction` (keeping `--correction` as a deprecated alias for one release) so the CLI name
+matches what it actually adjusts.
+
+**Why not yet:** a report-shape/CLI-surface change, not a bug fix - deliberately kept out of the
+v0.13.0 round that rejected the `--cluster-by-id` combination (see above), so the two don't get
+mixed into one diff. mean-diff/quantile-diff's own gap (no closed-form correction, still counted
+toward `family_size`) needs a decision too before `simultaneous_claims_promotion` can claim a real
+guarantee: either error out for any family containing them under `--claim-correction`, or expose
+their exclusion as a structured field rather than a `warnings` string a consumer could miss.
 
 ### Matrix verdict semantics
 

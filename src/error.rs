@@ -194,6 +194,18 @@ pub enum VeridictError {
     ClusterByIdConflictsWithPairedById,
 
     #[error(
+        "--correction is not supported together with --cluster-by-id: achieved_alpha rebuilds a \
+         plain i.i.d. Wilson CI from the raw record count, not the cluster bootstrap CI the report \
+         actually used - under positive intra-cluster correlation that reconstruction is narrower \
+         than the true cluster-robust CI, so correction could under-downgrade a pass instead of \
+         catching it, the opposite of this project's own false-pass-is-worse-than-inconclusive \
+         bias. Rejected outright rather than silently applying a mismatched correction; \
+         cluster-aware correction is a separate, deferred piece of work (see \
+         docs/research-map.md)"
+    )]
+    CorrectionConflictsWithClusterById,
+
+    #[error(
         "Bradley-Terry MM solver did not converge after {iterations} iterations \
          (largest relative rating change {last_relative_change:.3e} still above the \
          {threshold:.0e} threshold; competitor index {worst_competitor} changed most). \

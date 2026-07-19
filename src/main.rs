@@ -686,7 +686,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             &metrics,
             correction,
             args.confidence,
-        );
+        )?;
         verdict::apply_failure_caps(&mut report, &caps);
         (
             report.verdict,
@@ -709,7 +709,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             &metrics,
             correction,
             args.confidence,
-        );
+        )?;
         multi.verdict = verdict::aggregate(multi.reports.iter().map(|r| r.verdict));
         verdict::apply_failure_caps_to_multi(&mut multi, &caps);
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())

@@ -306,11 +306,20 @@ metric.
 
 ## Multiple-comparison correction
 
-Running several `--metric` flags together means several independent chances for *something* to
-clear its bar by luck alone - `--correction bonferroni`/`holm` keeps that combined risk at or
-below what a single, uncorrected metric already has today (see
-[`docs/metrics.md`](docs/metrics.md)'s `--correction` section for the full reasoning). Default is
-`none` - today's existing behavior, unchanged, unless you opt in.
+Running several `--metric` flags together means several independent chances for *some individual
+metric's own* `verdict`/`promotion` to clear its bar by luck alone - `--correction bonferroni`/
+`holm` keeps that per-metric risk, read as a family of simultaneous claims, at or below what a
+single, uncorrected metric already has today (see [`docs/metrics.md`](docs/metrics.md)'s
+`--correction` section for the full reasoning). That target doesn't strictly need the combined
+`verdict`/`promotion` `compare` reports for the whole run to be protected too - requiring every
+metric to pass already makes the combined result at least as conservative as a single metric, with
+no correction needed for *that* guarantee. In the current report model, though, `--correction`
+still *does* affect the combined result as a side effect (adjusted per-metric verdicts feed
+straight into the same aggregation `compare` always does) - so today, correction can still turn an
+overall `pass` into `inconclusive`. Scoping `--correction` away from the combined verdict is a
+planned follow-up, not current behavior. Not supported together with `--cluster-by-id` (rejected
+as a configuration error - see `docs/metrics.md`). Default is `none` - today's existing behavior,
+unchanged, unless you opt in.
 
 ```console
 $ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
@@ -344,13 +353,13 @@ $ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --m
 }
 ```
 
-Without `--correction`, both metrics pass on this same input and the overall verdict is `pass`.
-`winrate`'s evidence is real but comparatively weak; split two ways it no longer clears its
-corrected bar, so the overall verdict drops to `inconclusive` - exactly the "false pass is worse
-than an inconclusive result" bias this project is built around, now applied across a metric
-family instead of just within one metric. `--correction holm` is uniformly more powerful than
-`bonferroni` for the same guarantee (it would keep both metrics passing here); either can only
-downgrade an unadjusted pass to inconclusive, never invent a fail.
+Without `--correction`, both metrics pass on this same input. `winrate`'s evidence is real but
+comparatively weak; split two ways it no longer clears its corrected bar, so *that metric's own*
+verdict drops to `inconclusive` (and, as a side effect of how `verdict::aggregate` combines
+reports today, so does the run's combined verdict - see the section above for why that side
+effect isn't itself the guarantee `--correction` is providing). `--correction holm` is uniformly
+more powerful than `bonferroni` for the same guarantee (it would keep both metrics passing here);
+either can only downgrade an unadjusted pass to inconclusive, never invent a fail.
 
 ## Report extras
 

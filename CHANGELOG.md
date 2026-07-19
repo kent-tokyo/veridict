@@ -10,6 +10,39 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.13.0] - 2026-07-20
+
+### Fixed
+
+- **`--correction` combined with `--cluster-by-id` no longer silently miscorrects.**
+  `achieved_alpha` (the binary search `--correction bonferroni`/`holm` both use) recomputes a
+  report's CI at a hypothetical confidence from `successes`/`paired_count` alone - the closed-form
+  Wilson/Jeffreys/Exact math `compare` uses when *not* clustering. A `--cluster-by-id` report's
+  actual, displayed CI comes from a cluster bootstrap instead, which that reconstruction can't see:
+  under positive intra-cluster correlation (the usual case, and the whole reason `--cluster-by-id`
+  widens the CI to begin with), the i.i.d. reconstruction comes out *narrower* than the true
+  cluster-robust CI, so a report could read as more significant than it really is - correction
+  could then under-downgrade a pass it should have caught, leniency in exactly the direction this
+  project's own "false pass worse than inconclusive" bias forbids. `compare --correction
+  bonferroni|holm --cluster-by-id` is now rejected outright as a configuration error (exit code 3,
+  `VeridictError::CorrectionConflictsWithClusterById`) rather than silently applying a mismatched
+  correction. `--correction none` (the default) is unaffected. Cluster-aware correction is a
+  separate, deferred piece of work - see `docs/research-map.md`.
+
+### Changed
+
+- **Breaking:** `correction::apply_correction` now returns `Result<(), VeridictError>` instead of
+  `()`, to surface the new `CorrectionConflictsWithClusterById` error to library callers, not just
+  the CLI. Any caller must now handle (or `?`-propagate) the `Result`.
+- Docs (`README.md`/`README_ja.md`, `docs/metrics.md`/`docs/metrics_ja.md`,
+  `docs/research-map.md`) now distinguish `--correction`'s statistical target (a family of
+  *simultaneous per-metric* claims - `verdict::aggregate`'s combined result doesn't need it, since
+  requiring every metric to pass is already at least as conservative as a single metric,
+  correction or not) from what it currently touches (the combined verdict still moves today, as a
+  side effect of correction mutating each report's `verdict` in place before re-aggregation).
+  Separating a deployment-oriented aggregate gate from a family-adjusted simultaneous-claims result
+  is planned as an independent follow-up - see `docs/research-map.md`'s new entry.
+
 ## [0.12.0] - 2026-07-19
 
 ### Added

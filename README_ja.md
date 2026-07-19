@@ -246,11 +246,21 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 
 ## 多重比較補正
 
-複数の `--metric` を同時に実行するということは、*何か1つ*が偶然しきい値を超えてしまう独立した
-チャンスが複数あるということです - `--correction bonferroni`/`holm` は、その組み合わさったリスク
+複数の `--metric` を同時に実行するということは、*個々のメトリクス自身の* `verdict`/`promotion`
+のどれか1つが偶然しきい値を超えてしまう独立したチャンスが複数あるということです -
+`--correction bonferroni`/`holm` は、それらを「同時に成立した複数の主張」として読んだときのリスク
 を、補正なしの単一メトリクスが今日すでに持っているリスク以下に保ちます(詳しい理由は
-[`docs/metrics_ja.md`](docs/metrics_ja.md)の `--correction` セクションを参照)。デフォルトは
-`none` - オプトインしない限り、今日と全く同じ挙動のままです。
+[`docs/metrics_ja.md`](docs/metrics_ja.md)の `--correction` セクションを参照)。この目標自体は、
+`compare` が出す組み合わさった `verdict`/`promotion` まで守る必要はありません - 全metricのpassを
+要求する現在の集約ルールは、それだけで既に単一メトリクス以上に保守的だからです。**ただし現行の
+reportモデルでは、`--correction` は副作用として組み合わさった判定にも今なお影響します**:
+補正後の個別metricの `verdict` がそのまま既存の集約処理に渡るため、補正によってpassから
+inconclusiveに格下げされたmetricが1つあれば、実行全体のoverall verdictも同じように
+inconclusiveへ引き下げられ得ます。`--correction` を組み合わさった判定から切り離すことは、今回とは
+別の、今後の変更として計画されています。`--correction` が主に効くのは、下流が個々のメトリクスの
+`verdict`/`promotion` を単独で参照する場合です。`--cluster-by-id` との併用はサポートされておらず、
+設定エラーとして拒否されます(理由は `docs/metrics_ja.md` 参照)。デフォルトは `none` -
+オプトインしない限り、今日と全く同じ挙動のままです。
 
 ```console
 $ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --metric elo --min-effect 0.02 --correction bonferroni
@@ -284,13 +294,14 @@ $ veridict compare examples/chess_engine_multi_metric.jsonl --metric winrate --m
 }
 ```
 
-`--correction` なしでは、この同じ入力に対して両方のメトリクスがpassし、全体の判定も `pass` に
-なります。`winrate` の証拠は本物ですが相対的に弱く、2つに分けるとその補正後のしきい値をもう超え
-られなくなるため、全体の判定は `inconclusive` に下がります - これはまさに本プロジェクトの土台と
-なっている「false passはinconclusiveより悪い」という方針を、単一メトリクスの中だけでなくメトリクス
-の組全体に適用したものです。`--correction holm` は同じ保証のもとで `bonferroni` より一様に検出力
-が高く(この例では両方のメトリクスがpassしたままになります)、どちらも補正前のpassを
-inconclusiveに格下げすることしかできず、failを新たに作り出すことはありません。
+`--correction` なしでは、この同じ入力に対して両方のメトリクスがpassします。`winrate` の証拠は
+本物ですが相対的に弱く、2つに分けるとその補正後のしきい値をもう超えられなくなるため、
+*そのメトリクス自身の* 判定が `inconclusive` に下がります(そして、現在の `verdict::aggregate`
+の集約方法の副作用として、実行全体の判定もつられて下がります - この副作用自体は
+`--correction` が保証している内容そのものではない点は上のセクション参照)。
+`--correction holm` は同じ保証のもとで `bonferroni` より一様に検出力が高く(この例では両方の
+メトリクスがpassしたままになります)、どちらも補正前のpassをinconclusiveに格下げすることしか
+できず、failを新たに作り出すことはありません。
 
 ## レポートの追加情報
 

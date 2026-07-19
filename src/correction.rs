@@ -50,7 +50,19 @@
 //! `family_size` entirely would under-count the real multiplicity risk the *other* metrics in the
 //! same run are actually exposed to, so it still counts - the conservative choice, consistent with
 //! "false pass worse than inconclusive."
+//!
+//! **`--cluster-by-id` is rejected outright, not silently miscorrected.** A cluster-by-id report's
+//! displayed CI comes from a cluster bootstrap, not the closed-form Wilson/Jeffreys/Exact family
+//! `achieved_alpha` searches against. Reconstructing from `successes`/`paired_count` alone (the
+//! only inputs `achieved_alpha` has) rebuilds a plain i.i.d. CI instead - narrower than the true
+//! cluster-robust CI whenever there's positive intra-cluster correlation (the usual case; that
+//! correlation is the whole reason `--cluster-by-id` widens the CI in the first place). A narrower
+//! reconstruction makes `achieved_alpha` read smaller than it truly is, so correction could
+//! under-downgrade a pass it should have caught - leniency in exactly the direction this project's
+//! own bias forbids. `apply_correction` refuses the combination rather than silently computing a
+//! number that doesn't correspond to the report it's supposedly correcting.
 
+use crate::error::VeridictError;
 use crate::metrics;
 use crate::report::Report;
 use crate::stats::elo;
@@ -195,14 +207,22 @@ fn holm_reject(
 /// or inconclusive). `family_size = reports.len()` always - a single-metric run degenerates both
 /// Bonferroni and Holm to a no-op (`alpha/1 = alpha`, exactly the report's own existing pass
 /// condition), so callers don't need to special-case it away.
+///
+/// Returns `Err(VeridictError::CorrectionConflictsWithClusterById)` if any report was built with
+/// `--cluster-by-id` (detected via `report.cluster_count.is_some()` - set only under
+/// `--cluster-by-id`, see `Report`'s doc) and `correction != Correction::None` - see the module
+/// doc's "`--cluster-by-id` is rejected outright" section for why.
 pub fn apply_correction(
     reports: &mut [Report],
     configs: &[MetricConfig],
     correction: Correction,
     confidence: f64,
-) {
+) -> Result<(), VeridictError> {
     if correction == Correction::None {
-        return;
+        return Ok(());
+    }
+    if reports.iter().any(|r| r.cluster_count.is_some()) {
+        return Err(VeridictError::CorrectionConflictsWithClusterById);
     }
     let family_size = reports.len();
     let alpha = 1.0 - confidence;
@@ -286,6 +306,7 @@ pub fn apply_correction(
         report.adjusted_alpha_threshold = thresholds[i];
         report.unadjusted_verdict = Some(unadjusted_verdict);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -459,7 +480,7 @@ mod tests {
     fn none_leaves_reports_completely_untouched() {
         let mut reports = vec![winrate_pass(80, 100, 0.02)];
         let configs = vec![winrate_config()];
-        apply_correction(&mut reports, &configs, Correction::None, 0.95);
+        apply_correction(&mut reports, &configs, Correction::None, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
         assert_eq!(reports[0].correction_method, None);
         assert_eq!(reports[0].family_size, None);
@@ -472,9 +493,9 @@ mod tests {
         // family_size=1: alpha/1 == alpha, exactly the report's own existing pass condition.
         let mut reports = vec![winrate_pass(80, 100, 0.02)];
         let configs = vec![winrate_config()];
-        apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95);
+        apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
-        apply_correction(&mut reports, &configs, Correction::Holm, 0.95);
+        apply_correction(&mut reports, &configs, Correction::Holm, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
     }
 
@@ -485,7 +506,7 @@ mod tests {
         // survives alone but not split three ways.
         let mut reports = vec![winrate_pass(62, 100, 0.02)];
         let configs = vec![winrate_config()];
-        apply_correction(&mut reports, &configs, Correction::None, 0.95);
+        apply_correction(&mut reports, &configs, Correction::None, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
 
         let single = winrate_pass(62, 100, 0.02);
@@ -495,7 +516,7 @@ mod tests {
             clone_report(&single),
         ];
         let configs = vec![winrate_config(), winrate_config(), winrate_config()];
-        apply_correction(&mut family, &configs, Correction::Bonferroni, 0.95);
+        apply_correction(&mut family, &configs, Correction::Bonferroni, 0.95).unwrap();
         assert_eq!(family[0].verdict, Verdict::Inconclusive);
         assert_eq!(family[0].unadjusted_verdict, Some(Verdict::Pass));
         assert_eq!(family[0].family_size, Some(3));
@@ -586,11 +607,28 @@ mod tests {
             },
             winrate_config(),
         ];
-        apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95);
+        apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap();
 
         assert_eq!(reports[0].verdict, Verdict::Pass);
         assert_eq!(reports[0].achieved_alpha, None);
         assert_eq!(reports[0].family_size, Some(2));
         assert!(reports[0].warnings.iter().any(|w| w.contains("mean-diff")));
+    }
+
+    #[test]
+    fn correction_rejects_a_cluster_by_id_report() {
+        let mut report = winrate_pass(80, 100, 0.02);
+        report.cluster_count = Some(20);
+        let mut reports = vec![report];
+        let configs = vec![winrate_config()];
+        let err =
+            apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::VeridictError::CorrectionConflictsWithClusterById
+        ));
+        // Untouched - the error is returned before any report is mutated.
+        assert_eq!(reports[0].verdict, Verdict::Pass);
+        assert_eq!(reports[0].correction_method, None);
     }
 }
