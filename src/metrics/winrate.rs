@@ -12,6 +12,7 @@ use crate::metrics::common::OutcomeCollector;
 use crate::metrics::{
     FailureBreakdown, MetricAggregator, MetricOutput, effective_outcome, metric_label,
 };
+use crate::stats::bootstrap::cluster_bootstrap_ci;
 use crate::stats::{exact, jeffreys, wilson};
 use crate::{CiMethod, FailurePolicy, MetricKind, TrialStatus};
 
@@ -20,21 +21,45 @@ pub(crate) struct WinRateAggregator {
     confidence: f64,
     ci_method: CiMethod,
     failure_policy: FailurePolicy,
+    cluster_by_id: bool,
+    resamples: usize,
+    seed: u64,
 }
 
 impl WinRateAggregator {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         confidence: f64,
         paired_by_id: bool,
+        cluster_by_id: bool,
         ci_method: CiMethod,
         failure_policy: FailurePolicy,
+        resamples: usize,
+        seed: u64,
     ) -> Self {
         Self {
-            collector: OutcomeCollector::new(paired_by_id),
+            collector: OutcomeCollector::new(paired_by_id, cluster_by_id),
             confidence,
             ci_method,
             failure_policy,
+            cluster_by_id,
+            resamples,
+            seed,
         }
+    }
+}
+
+/// `candidate_wins / (candidate_wins + baseline_wins)` - the raw proportion, same scale
+/// `wilson_ci`/`exact`/`jeffreys` already return (not yet recentered to the `-0.5` "effect"
+/// scale `finish` converts to at the very end, for both branches uniformly). `NaN` when there
+/// are no decisive outcomes to divide by - `cluster_bootstrap_outcome_draws` retries a resample
+/// that lands here rather than ever letting a `NaN` reach a report field (see its own doc).
+fn winrate_statistic(baseline_wins: u64, candidate_wins: u64, _draws: u64) -> f64 {
+    let n = baseline_wins + candidate_wins;
+    if n == 0 {
+        f64::NAN
+    } else {
+        candidate_wins as f64 / n as f64
     }
 }
 
@@ -69,7 +94,26 @@ impl MetricAggregator for WinRateAggregator {
     }
 
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError> {
-        let (baseline_wins, candidate_wins, _draws) = self.collector.finish()?;
+        let confidence = self.confidence;
+        let ci_method = self.ci_method;
+        let resamples = self.resamples;
+        let seed = self.seed;
+        let (baseline_wins, candidate_wins, _draws, clusters) = if self.cluster_by_id {
+            let clusters = self.collector.finish_clusters();
+            let (b, c, d) =
+                clusters
+                    .iter()
+                    .flatten()
+                    .fold((0u64, 0u64, 0u64), |(b, c, d), outcome| match outcome {
+                        crate::Outcome::BaselineWin => (b + 1, c, d),
+                        crate::Outcome::CandidateWin => (b, c + 1, d),
+                        crate::Outcome::Draw => (b, c, d + 1),
+                    });
+            (b, c, d, Some(clusters))
+        } else {
+            let (b, c, d) = self.collector.finish()?;
+            (b, c, d, None)
+        };
         let timeouts = failures.baseline.timeout + failures.candidate.timeout;
         let crashes = failures.baseline.crash + failures.candidate.crash;
         let invalid = failures.baseline.invalid + failures.candidate.invalid;
@@ -91,14 +135,45 @@ impl MetricAggregator for WinRateAggregator {
                 records_with_id: 0,
                 max_id_count: 0,
                 quantile: None,
+                cluster_count: None,
+                max_cluster_size: None,
+                effective_sample_size: None,
+                design_effect: None,
             });
         }
-        let (lo, hi) = match self.ci_method {
-            CiMethod::Wilson => wilson::wilson_ci(candidate_wins, n, self.confidence)?,
-            CiMethod::Exact => exact::clopper_pearson_ci(candidate_wins, n, self.confidence)?,
-            CiMethod::Jeffreys => jeffreys::jeffreys_ci(candidate_wins, n, self.confidence)?,
-        };
         let p_hat = candidate_wins as f64 / n as f64;
+
+        let (lo, hi, cluster_count, max_cluster_size, effective_sample_size, design_effect) =
+            match &clusters {
+                Some(clusters) => {
+                    let result = cluster_bootstrap_ci(
+                        clusters,
+                        n,
+                        confidence,
+                        resamples,
+                        seed,
+                        winrate_statistic,
+                    );
+                    (
+                        result.ci_low,
+                        result.ci_high,
+                        Some(clusters.len() as u64),
+                        clusters.iter().map(|c| c.len() as u64).max(),
+                        Some(result.effective_sample_size),
+                        Some(result.design_effect),
+                    )
+                }
+                None => {
+                    let (lo, hi) = match ci_method {
+                        CiMethod::Wilson => wilson::wilson_ci(candidate_wins, n, confidence)?,
+                        CiMethod::Exact => {
+                            exact::clopper_pearson_ci(candidate_wins, n, confidence)?
+                        }
+                        CiMethod::Jeffreys => jeffreys::jeffreys_ci(candidate_wins, n, confidence)?,
+                    };
+                    (lo, hi, None, None, None, None)
+                }
+            };
         Ok(MetricOutput {
             effect: p_hat - 0.5,
             ci_low: lo - 0.5,
@@ -106,6 +181,10 @@ impl MetricAggregator for WinRateAggregator {
             baseline_count: baseline_wins,
             candidate_count: candidate_wins,
             paired_count: n,
+            cluster_count,
+            max_cluster_size,
+            effective_sample_size,
+            design_effect,
             timeouts,
             crashes,
             invalid,

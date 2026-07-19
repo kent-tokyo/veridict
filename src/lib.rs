@@ -29,6 +29,100 @@ pub enum Verdict {
     Inconclusive,
 }
 
+/// Whether a report's underlying data is trustworthy enough to read a
+/// `Verdict` off of at all - independent of what that verdict says.
+/// `Invalid` means a hard technical-failure cap (`FailureCaps`) was
+/// breached: not "the evidence was weak" (that's `Inconclusive`, still
+/// `Valid`), but "the run itself can't be trusted to have measured the
+/// candidate at all." Keeping this a separate axis from `Verdict` is the
+/// point: a `Pass`/`Fail` produced from data that also breached a failure
+/// cap (possible under `--failure-policy loss`, where a crash can tip the
+/// numeric verdict) must never be reported as a clean `Pass`/`Fail` - see
+/// `verdict::apply_failure_caps`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Validity {
+    Valid,
+    Invalid,
+}
+
+/// The one field a deployment/promotion pipeline should actually gate on -
+/// collapses `Validity` and `Verdict` into a single go/no-go: `Promoted`
+/// only when the run is both `Validity::Valid` and `Verdict::Pass`. Every
+/// other combination (invalid data, a fail, an inconclusive result) is
+/// `NotPromoted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Promotion {
+    Promoted,
+    NotPromoted,
+}
+
+impl Promotion {
+    pub fn decide(validity: Validity, verdict: Verdict) -> Self {
+        if validity == Validity::Valid && verdict == Verdict::Pass {
+            Promotion::Promoted
+        } else {
+            Promotion::NotPromoted
+        }
+    }
+}
+
+/// Hard per-run caps on technical failure counts (`timeout`/`crash`/
+/// `invalid` - the same categories `TrialStatus`/`FailureBreakdown` already
+/// track; no new domain-specific categories). `None` (the `Default`) means
+/// uncapped - today's existing behavior, unchanged, unless a cap is opted
+/// into. These are zero-tolerance-style gates (e.g. `max_crashes = 0`), not
+/// a rate threshold: a single technical failure can matter regardless of
+/// how many clean trials surround it, unlike `data_quality.high_failure_rate`
+/// (a rate-based, purely advisory warning that never changes `verdict`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureCaps {
+    pub max_timeouts: Option<u64>,
+    pub max_crashes: Option<u64>,
+    pub max_invalid: Option<u64>,
+}
+
+impl FailureCaps {
+    /// `Valid` with no reason if every configured cap is respected (always
+    /// true when every cap is `None`); otherwise `Invalid` with a reason
+    /// naming the first breached cap, checked in timeout/crash/invalid
+    /// order.
+    pub fn check(&self, timeouts: u64, crashes: u64, invalid: u64) -> (Validity, Option<String>) {
+        if let Some(max) = self.max_timeouts
+            && timeouts > max
+        {
+            return (
+                Validity::Invalid,
+                Some(format!(
+                    "{timeouts} timeout(s) exceeds the configured cap of {max}"
+                )),
+            );
+        }
+        if let Some(max) = self.max_crashes
+            && crashes > max
+        {
+            return (
+                Validity::Invalid,
+                Some(format!(
+                    "{crashes} crash(es) exceeds the configured cap of {max}"
+                )),
+            );
+        }
+        if let Some(max) = self.max_invalid
+            && invalid > max
+        {
+            return (
+                Validity::Invalid,
+                Some(format!(
+                    "{invalid} invalid result(s) exceeds the configured cap of {max}"
+                )),
+            );
+        }
+        (Validity::Valid, None)
+    }
+}
+
 /// Health of a single trial's execution, independent of any score it produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrialStatus {
@@ -311,6 +405,10 @@ impl IntoRecordResult for (usize, input::Record) {
 /// Runs one metric end to end: classify records, compute its effect and
 /// confidence interval, and apply the pass/fail thresholds. `paired_by_id`
 /// enables paired-testcase variance reduction (see `metrics::compute`).
+/// `cluster_by_id` enables a cluster-robust bootstrap CI instead (winrate/elo
+/// only - mutually exclusive with `paired_by_id`, see
+/// `VeridictError::IncompatibleClusterById`/`ClusterByIdConflictsWithPairedById`).
+#[allow(clippy::too_many_arguments)]
 pub fn compare_one<I>(
     records: I,
     metric: MetricConfig,
@@ -319,12 +417,21 @@ pub fn compare_one<I>(
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    cluster_by_id: bool,
 ) -> Result<Report, VeridictError>
 where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
-    let out = metrics::compute(records, metric, confidence, resamples, seed, paired_by_id)?;
+    let out = metrics::compute(
+        records,
+        metric,
+        confidence,
+        resamples,
+        seed,
+        paired_by_id,
+        cluster_by_id,
+    )?;
     Ok(build_report(
         metric.kind(),
         confidence,
@@ -340,6 +447,7 @@ where
 /// any metric is inconclusive, else `Pass`. Matches the "a false pass is
 /// worse than an inconclusive result" rule: one metric failing sinks the
 /// whole run.
+#[allow(clippy::too_many_arguments)]
 pub fn compare_many<I>(
     records: I,
     metrics: &[MetricConfig],
@@ -348,12 +456,21 @@ pub fn compare_many<I>(
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    cluster_by_id: bool,
 ) -> Result<MultiReport, VeridictError>
 where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
-    let outs = metrics::compute_many(records, metrics, confidence, resamples, seed, paired_by_id)?;
+    let outs = metrics::compute_many(
+        records,
+        metrics,
+        confidence,
+        resamples,
+        seed,
+        paired_by_id,
+        cluster_by_id,
+    )?;
     let reports: Vec<Report> = metrics
         .iter()
         .zip(outs)
@@ -371,6 +488,8 @@ where
     Ok(MultiReport {
         schema_version: report::REPORT_SCHEMA_VERSION,
         verdict,
+        validity: Validity::Valid,
+        promotion: Promotion::decide(Validity::Valid, verdict),
         reports,
     })
 }
@@ -389,22 +508,33 @@ fn build_report(
         Some(warning) => (Verdict::Inconclusive, warning.clone()),
         None => verdict::decide(out.ci_low, out.ci_high, thresholds),
     };
-    let estimated_additional_trials = verdict::estimate_additional_trials(
-        metric,
-        ci_method,
-        verdict,
-        out.effect,
-        out.ci_low,
-        out.ci_high,
-        out.paired_count,
-        thresholds,
-        confidence,
-    );
+    // `estimate_additional_trials` binary-searches wilson/jeffreys/exact -
+    // none of which describe a cluster bootstrap CI's width at a hypothetical
+    // n, and the independent unit under clustering is the cluster, not the
+    // trial, so `paired_count` isn't even the right n to scale from.
+    let estimated_additional_trials = if out.cluster_count.is_some() {
+        None
+    } else {
+        verdict::estimate_additional_trials(
+            metric,
+            ci_method,
+            verdict,
+            out.effect,
+            out.ci_low,
+            out.ci_high,
+            out.paired_count,
+            thresholds,
+            confidence,
+        )
+    };
     let (data_quality, warnings) = collect_data_quality(metric, &out);
+    let promotion = Promotion::decide(Validity::Valid, verdict);
 
     Report {
         schema_version: report::REPORT_SCHEMA_VERSION,
         verdict,
+        validity: Validity::Valid,
+        promotion,
         metric,
         baseline_count: out.baseline_count,
         candidate_count: out.candidate_count,
@@ -424,6 +554,10 @@ fn build_report(
         warnings,
         data_quality,
         quantile: out.quantile,
+        cluster_count: out.cluster_count,
+        max_cluster_size: out.max_cluster_size,
+        effective_sample_size: out.effective_sample_size,
+        design_effect: out.design_effect,
         correction_method: None,
         family_size: None,
         achieved_alpha: None,
@@ -608,6 +742,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Pass);
@@ -632,6 +767,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
@@ -651,6 +787,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -672,6 +809,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
@@ -710,6 +848,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -754,6 +893,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(report.reports[0].verdict, Verdict::Fail);
@@ -791,6 +931,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -831,6 +972,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert!(!report.data_quality.low_id_diversity);
@@ -859,6 +1001,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert!(!report.data_quality.low_id_diversity);
@@ -880,6 +1023,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -915,6 +1059,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             true,
+            false,
         )
         .unwrap();
         assert!(!report.data_quality.low_id_diversity);
@@ -939,6 +1084,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -979,6 +1125,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -1038,6 +1185,7 @@ mod tests {
             2000,
             DEFAULT_SEED,
             false,
+            false,
         )
         .unwrap();
         assert!(report.warnings.iter().any(|w| w.contains("draws")));
@@ -1071,6 +1219,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();
@@ -1122,6 +1271,7 @@ mod tests {
             &thresholds,
             2000,
             DEFAULT_SEED,
+            false,
             false,
         )
         .unwrap();

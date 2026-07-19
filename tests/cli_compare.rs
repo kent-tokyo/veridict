@@ -974,6 +974,56 @@ fn power_sprt_produces_valid_json_and_exits_zero() {
 }
 
 #[test]
+fn power_sprt_horizon_adds_the_probability_field() {
+    veridict()
+        .args([
+            "power",
+            "--sprt",
+            "--elo0",
+            "0",
+            "--elo1",
+            "20",
+            "--horizon",
+            "500",
+        ])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"horizon\": 500"))
+        .stdout(predicate::str::contains(
+            "\"probability_no_decision_by_horizon\":",
+        ));
+}
+
+#[test]
+fn power_sprt_without_horizon_omits_the_new_fields() {
+    veridict()
+        .args(["power", "--sprt", "--elo0", "0", "--elo1", "20"])
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"horizon\": null").not())
+        .stdout(predicate::str::contains("probability_no_decision_by_horizon").not());
+}
+
+#[test]
+fn power_horizon_requires_sprt() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--assume-effect",
+            "0.1",
+            "--horizon",
+            "500",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--sprt"));
+}
+
+#[test]
 fn power_sprt_rejects_elo0_greater_than_elo1_via_reused_sprt_config_validation() {
     veridict()
         .args(["power", "--sprt", "--elo0", "20", "--elo1", "0"])
@@ -1097,6 +1147,160 @@ fn paired_by_id_rejects_triple_id() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("paired-by-id"));
+}
+
+// --- --cluster-by-id ---
+
+#[test]
+fn cluster_by_id_adds_the_new_report_fields() {
+    // 20 openings, each replayed 5 times, candidate wins every game - a clean pass regardless of
+    // whether the CI accounts for clustering, but cluster_count/max_cluster_size/
+    // effective_sample_size/design_effect must appear and be self-consistent.
+    let stdin: String = (0..20)
+        .flat_map(|i| {
+            (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--cluster-by-id",
+            "--min-effect",
+            "0.1",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"paired_count\": 100"))
+        .stdout(predicate::str::contains("\"cluster_count\": 20"))
+        .stdout(predicate::str::contains("\"max_cluster_size\": 5"))
+        .stdout(predicate::str::contains("\"effective_sample_size\":"))
+        .stdout(predicate::str::contains("\"design_effect\":"));
+}
+
+#[test]
+fn cluster_by_id_leaves_estimated_additional_trials_null_even_when_inconclusive() {
+    // Same heterogeneous data as the CI-widening test below: unclustered reads as a confident
+    // pass, clustered reads inconclusive. A naive port of estimate_additional_trials would
+    // binary-search wilson/jeffreys/exact against a CI that's actually a cluster bootstrap -
+    // wrong math, and paired_count is the wrong n to scale from (the cluster is the independent
+    // unit). Must stay null rather than print a misleadingly precise number.
+    let stdin: String =
+        (0..20)
+            .flat_map(|i| {
+                let (cand, base) = if i % 2 == 0 { (5, 0) } else { (1, 4) };
+                (0..cand)
+                    .map(|_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+                    .chain((0..base).map(move |_| {
+                        format!("{{\"id\":\"op{i}\",\"result\":\"baseline_win\"}}\n")
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    let out = veridict()
+        .args(["compare", "-", "--metric", "winrate", "--cluster-by-id"])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["verdict"], "inconclusive");
+    assert!(report["estimated_additional_trials"].is_null());
+}
+
+#[test]
+fn cluster_by_id_widens_the_ci_versus_treating_clustered_games_as_independent() {
+    // 20 openings with real between-cluster heterogeneity: half strongly favor the candidate
+    // (5-0), half strongly favor the baseline (1-4) - same aggregate p=0.6 a naive Wilson CI on
+    // 100 "independent" trials would read as fairly precise, but there are really only ~20
+    // independent units of evidence here (which opening you drew dominates the outcome, not
+    // game-to-game noise) - the cluster bootstrap must be visibly wider.
+    let stdin: String =
+        (0..20)
+            .flat_map(|i| {
+                let (cand, base) = if i % 2 == 0 { (5, 0) } else { (1, 4) };
+                (0..cand)
+                    .map(|_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+                    .chain((0..base).map(move |_| {
+                        format!("{{\"id\":\"op{i}\",\"result\":\"baseline_win\"}}\n")
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    let clustered = veridict()
+        .args(["compare", "-", "--metric", "winrate", "--cluster-by-id"])
+        .write_stdin(stdin.clone())
+        .output()
+        .unwrap();
+    let unclustered = veridict()
+        .args(["compare", "-", "--metric", "winrate"])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let clustered: serde_json::Value = serde_json::from_slice(&clustered.stdout).unwrap();
+    let unclustered: serde_json::Value = serde_json::from_slice(&unclustered.stdout).unwrap();
+    let width =
+        |r: &serde_json::Value| r["ci_high"].as_f64().unwrap() - r["ci_low"].as_f64().unwrap();
+    assert!(
+        width(&clustered) > width(&unclustered),
+        "cluster CI width {} should exceed the naive i.i.d. CI width {}",
+        width(&clustered),
+        width(&unclustered)
+    );
+    assert!(clustered["design_effect"].as_f64().unwrap() > 1.0);
+}
+
+#[test]
+fn cluster_by_id_conflicts_with_paired_by_id() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--cluster-by-id",
+            "--paired-by-id",
+        ])
+        .write_stdin("{\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn cluster_by_id_rejected_for_mean_diff() {
+    let stdin = "{\"id\":\"a\",\"baseline\":1.0,\"candidate\":1.1}\n";
+    veridict()
+        .args(["compare", "-", "--metric", "mean-diff", "--cluster-by-id"])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--cluster-by-id"));
+}
+
+#[test]
+fn cluster_by_id_works_for_elo() {
+    let stdin: String = (0..20)
+        .flat_map(|i| {
+            (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "elo",
+            "--cluster-by-id",
+            "--min-effect",
+            "10",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"cluster_count\": 20"));
 }
 
 #[test]
@@ -1962,4 +2166,131 @@ fn correction_rejects_an_unknown_method() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("invalid value"));
+}
+
+// --- --max-timeouts/--max-crashes/--max-invalid (validity/promotion) ---
+
+#[test]
+fn uncapped_compare_run_reports_valid_and_promoted() {
+    let stdin = (0..20)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args(["compare", "-", "--metric", "winrate", "--min-effect", "0.1"])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"validity\": \"valid\""))
+        .stdout(predicate::str::contains("\"promotion\": \"promoted\""));
+}
+
+#[test]
+fn breached_crash_cap_forces_inconclusive_and_not_promoted_even_under_failure_policy_loss() {
+    // Under --failure-policy loss a crash would normally just synthesize a baseline_win - here
+    // every candidate trial crashes, which would numerically net to a clean winrate Fail. The
+    // crash cap must catch this before that misleading Fail ever reaches the report.
+    let stdin = (0..20)
+        .map(|_| "{\"candidate_status\":\"crash\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.1",
+            "--failure-policy",
+            "loss",
+            "--max-crashes",
+            "0",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("\"validity\": \"invalid\""))
+        .stdout(predicate::str::contains("\"promotion\": \"not_promoted\""))
+        .stdout(predicate::str::contains("\"reason\": \"INVALID:"));
+}
+
+#[test]
+fn max_timeouts_cap_is_respected_at_exactly_the_limit() {
+    let mut stdin = (0..20)
+        .map(|_| "{\"result\":\"candidate_win\"}\n".to_string())
+        .collect::<String>();
+    stdin.push_str("{\"candidate_status\":\"timeout\"}\n");
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.1",
+            "--max-timeouts",
+            "1",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"validity\": \"valid\""))
+        .stdout(predicate::str::contains("\"promotion\": \"promoted\""));
+}
+
+#[test]
+fn max_invalid_cap_breached_in_a_multi_metric_run_invalidates_the_whole_report() {
+    let mut stdin = (0..20)
+        .map(|i| {
+            format!(
+                "{{\"result\":\"candidate_win\",\"baseline\":{i}.0,\"candidate\":{}.5}}\n",
+                i
+            )
+        })
+        .collect::<String>();
+    stdin.push_str("{\"candidate_status\":\"invalid\"}\n");
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "mean-diff",
+            "--min-effect",
+            "0.1",
+            "--max-invalid",
+            "0",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("\"validity\": \"invalid\""))
+        .stdout(predicate::str::contains("\"promotion\": \"not_promoted\""));
+}
+
+#[test]
+fn sprt_max_crashes_cap_forces_inconclusive() {
+    let mut stdin = (0..40)
+        .map(|_| "{\"result\":\"candidate_win\"}\n".to_string())
+        .collect::<String>();
+    stdin.push_str("{\"candidate_status\":\"crash\"}\n");
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--max-crashes",
+            "0",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("\"validity\": \"invalid\""))
+        .stdout(predicate::str::contains("\"promotion\": \"not_promoted\""));
 }

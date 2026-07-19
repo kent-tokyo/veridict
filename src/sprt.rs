@@ -16,7 +16,7 @@ use crate::report::serde_str;
 use crate::stats::pentanomial_sprt;
 use crate::stats::sprt as math;
 use crate::stats::trinomial_sprt;
-use crate::{FailurePolicy, Outcome, Verdict};
+use crate::{FailureCaps, FailurePolicy, Outcome, Promotion, Validity, Verdict};
 
 /// Which SPRT is run. `Wald` (default): classic two-outcome test, draws
 /// excluded, `elo0`/`elo1` are logistic Elo (`stats::sprt::score_from_elo`).
@@ -116,6 +116,11 @@ impl PentanomialCounts {
 pub struct SprtReport {
     pub schema_version: u32,
     pub verdict: Verdict,
+    /// Same meaning and default (`Valid`) as `Report::validity` - see
+    /// `apply_failure_caps` in this module.
+    pub validity: Validity,
+    /// Same meaning as `Report::promotion`.
+    pub promotion: Promotion,
     pub llr: f64,
     pub lower_bound: f64,
     pub upper_bound: f64,
@@ -285,7 +290,7 @@ where
     // but only the one matching `variant` ever gets fed a record or consumed via `finish()`
     // below; the other is simply dropped unused. Simpler than threading an `Option` through the
     // loop for what's a single small allocation-free struct either way.
-    let mut collector = OutcomeCollector::new(paired_by_id);
+    let mut collector = OutcomeCollector::new(paired_by_id, false);
     let mut pentanomial_collector = PentanomialCollector::new();
 
     for item in records {
@@ -436,6 +441,8 @@ where
     Ok(SprtReport {
         schema_version: crate::report::REPORT_SCHEMA_VERSION,
         verdict,
+        validity: Validity::Valid,
+        promotion: Promotion::decide(Validity::Valid, verdict),
         llr,
         lower_bound: bounds.lower,
         upper_bound: bounds.upper,
@@ -475,7 +482,9 @@ impl SprtReport {
         };
         format!(
             "# Veridict SPRT Report\n\n\
-             Verdict: {verdict}\n\n\
+             Verdict: {verdict}\n\
+             Validity: {validity}\n\
+             Promotion: {promotion}\n\n\
              H0: {unit} <= {elo0:+.1} / H1: {unit} >= {elo1:+.1} (alpha={alpha}, beta={beta})\n\
              LLR: {llr:.4} (bounds: {lower:.4} to {upper:.4})\n\
              {drawelo_line}\n\
@@ -487,6 +496,8 @@ impl SprtReport {
              - crash: {crashes} (baseline={b_crash}, candidate={c_crash})\n\
              - invalid: {invalid} (baseline={b_invalid}, candidate={c_invalid})\n",
             verdict = serde_str(&self.verdict),
+            validity = serde_str(&self.validity),
+            promotion = serde_str(&self.promotion),
             elo0 = self.elo0,
             elo1 = self.elo1,
             alpha = self.alpha,
@@ -526,6 +537,21 @@ impl SprtReport {
             c_invalid = c.invalid,
         )
     }
+}
+
+/// `verdict::apply_failure_caps`, for `SprtReport` - a separate report type
+/// (see this module's doc), so it gets its own copy of the same small gate
+/// rather than a shared trait for two call sites.
+pub fn apply_failure_caps(report: &mut SprtReport, caps: &FailureCaps) {
+    let (validity, reason) = caps.check(report.timeouts, report.crashes, report.invalid);
+    report.validity = validity;
+    if validity == Validity::Invalid {
+        report.verdict = Verdict::Inconclusive;
+        if let Some(reason) = reason {
+            report.reason = format!("INVALID: {reason}. Strength not evaluated.");
+        }
+    }
+    report.promotion = Promotion::decide(report.validity, report.verdict);
 }
 
 #[cfg(test)]
@@ -985,5 +1011,63 @@ mod tests {
             ),
             Err(VeridictError::InvalidThreshold(_))
         ));
+    }
+
+    // --- apply_failure_caps ---
+
+    #[test]
+    fn sprt_report_defaults_to_valid_with_no_caps_applied() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records: Vec<_> = (0..40).map(|_| (1, rec(Some("candidate_win")))).collect();
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
+        assert_eq!(report.validity, Validity::Valid);
+        assert_eq!(
+            report.promotion,
+            Promotion::decide(Validity::Valid, report.verdict)
+        );
+    }
+
+    #[test]
+    fn sprt_report_invalidated_by_a_breached_crash_cap() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let mut records: Vec<_> = (0..40).map(|_| (1, rec(Some("candidate_win")))).collect();
+        for i in 0..3 {
+            records.push((
+                41 + i,
+                Record {
+                    id: None,
+                    baseline: None,
+                    candidate: None,
+                    result: None,
+                    baseline_status: None,
+                    candidate_status: Some("crash".to_string()),
+                },
+            ));
+        }
+        let mut report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+        )
+        .unwrap();
+        assert_eq!(report.crashes, 3);
+        let caps = FailureCaps {
+            max_crashes: Some(0),
+            ..Default::default()
+        };
+        apply_failure_caps(&mut report, &caps);
+        assert_eq!(report.validity, Validity::Invalid);
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.promotion, Promotion::NotPromoted);
+        assert!(report.reason.contains("INVALID"));
     }
 }

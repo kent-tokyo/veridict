@@ -65,7 +65,7 @@ fn mean_trials(true_p: f64, elo0: f64, elo1: f64) -> f64 {
 #[test]
 fn asn_formula_tracks_the_real_mean_within_a_small_measured_margin() {
     let (elo0, elo1) = (0.0, 20.0);
-    let report = estimate_sprt_expected_trials(elo0, elo1, ALPHA, BETA).unwrap();
+    let report = estimate_sprt_expected_trials(elo0, elo1, ALPHA, BETA, None).unwrap();
 
     let empirical_h0 = mean_trials(score_from_elo(elo0), elo0, elo1);
     let empirical_h1 = mean_trials(score_from_elo(elo1), elo0, elo1);
@@ -101,7 +101,7 @@ fn asn_formula_tracks_the_real_mean_within_a_small_measured_margin() {
 fn asn_expected_trials_is_the_optimistic_endpoint_not_the_worst_case() {
     let (elo0, elo1) = (0.0, 20.0);
     let midpoint_elo = (elo0 + elo1) / 2.0;
-    let report = estimate_sprt_expected_trials(elo0, elo1, ALPHA, BETA).unwrap();
+    let report = estimate_sprt_expected_trials(elo0, elo1, ALPHA, BETA, None).unwrap();
 
     let empirical_midpoint = mean_trials(score_from_elo(midpoint_elo), elo0, elo1);
     let formula_h0 = report.expected_trials_under_h0 as f64;

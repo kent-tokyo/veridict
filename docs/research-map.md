@@ -242,6 +242,50 @@ changes which side of a threshold/LLR boundary a run lands on. No concrete workf
 **What would change this:** a concrete request to have a candidate's crash/timeout rate pull its
 own Elo estimate down in a matrix run, not just get reported alongside it.
 
+### `--cluster-by-id` for `mean-diff`/`sign-test`/`quantile-diff`
+
+**What it is:** `--cluster-by-id` (see `docs/metrics.md`) ships for `winrate`/`elo` - a cluster
+bootstrap CI over id-grouped outcome tallies, correctly widening the interval when many trials
+share a common source of correlation (the same opening/testcase replayed several times).
+`mean-diff`/`sign-test`/`quantile-diff` don't get it yet.
+
+**Why not yet:** `winrate`/`elo` both collect through `OutcomeCollector`, which already tracks
+per-id groups for `--paired-by-id`'s netting - extending that same grouping to feed a cluster
+bootstrap instead was a natural reuse. `mean-diff`/`sign-test`/`quantile-diff` collect through
+`DiffCollector`/`SignCounts` instead, which discard per-id structure once a value is netted or
+tallied; giving them real cluster support needs those collectors to retain cluster structure
+through to resampling (which `mean-diff`/`quantile-diff` already do for their own *non*-clustered
+bootstrap, so it's a plausible extension, not a new mechanism) - separate wiring per collector, not
+a mechanical copy of `OutcomeCollector`'s change.
+
+**What would change this:** a concrete workflow needing a cluster-robust CI for paired numeric
+data (e.g. per-request latencies clustered by which endpoint/deployment produced them) - most
+directly implementable for `mean-diff`/`quantile-diff` (already bootstrap-based) before
+`sign-test` (closed-form Wilson on a sign proportion, same harder-conversion shape `winrate`/`elo`
+themselves needed).
+
+### Checkpoint/training lineage tracking
+
+**What it is:** an idea raised alongside `--cluster-by-id`/the validity axis (a broader proposal
+for linking `veridict`'s verdicts to upstream training/checkpoint provenance - candidate parent,
+training recipe, dataset hash, selector rule, checkpoint-selection reason, weight/binary hash -
+and rendering a lineage tree from failed candidates back to their source).
+
+**Why not shipped:** this is squarely the "Deliberately out of scope" list below, not a "not yet"
+item - lineage storage/tracking is an experiment-database concern, and a lineage *tree* display is
+a dashboard concern; both are explicitly one-way-dependency integrations `veridict` itself must
+not become. `veridict` judges results; it doesn't track how they were produced. An opaque
+pass-through of caller-supplied identifiers (so a downstream tracker can join a verdict back to
+its own provenance store) would fit `veridict`'s existing domain-agnostic `id` field without
+`veridict` needing to understand or store what a `checkpoint_id`/`model_id` means - not attempted
+this round since no concrete consumer has asked for it yet.
+
+**What would change this:** a concrete downstream tool that already tracks
+checkpoints/experiments and needs `veridict`'s JSON report to carry an opaque identifier through
+untouched for that tool to join on - at that point, the design question is which field(s) and
+whether `Record`/`Report` should gain a generic passthrough `metadata` field, not whether
+`veridict` should start owning lineage storage itself (it shouldn't).
+
 ## Deliberately out of scope
 
 veridict judges results; it does not produce them. These are not "not yet" items - they're

@@ -8,6 +8,8 @@
   "required": [
     "schema_version",
     "verdict",
+    "validity",
+    "promotion",
     "metric",
     "baseline_count",
     "candidate_count",
@@ -33,6 +35,14 @@
       "description": "Stays 1 across additive changes (new fields/variants); bumps only when a field is removed or renamed."
     },
     "verdict": { "$ref": "#/$defs/verdict" },
+    "validity": {
+      "$ref": "#/$defs/validity",
+      "description": "Valid unless a --max-timeouts/--max-crashes/--max-invalid cap was breached, in which case verdict above is also forced to inconclusive - see FailureCaps in the Rust API."
+    },
+    "promotion": {
+      "$ref": "#/$defs/promotion",
+      "description": "The single go/no-go field: promoted only when validity is valid and verdict is pass."
+    },
     "metric": {
       "type": "string",
       "enum": ["winrate", "mean-diff", "sign-test", "elo", "quantile-diff"]
@@ -71,6 +81,26 @@
       "exclusiveMaximum": 1,
       "description": "The quantile quantile-diff measured (e.g. 0.95 for p95). Present only for metric quantile-diff; omitted entirely (not null) for every other metric."
     },
+    "cluster_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "--cluster-by-id only (winrate/elo): number of distinct resampling clusters. Omitted entirely (not null) when --cluster-by-id wasn't requested."
+    },
+    "max_cluster_size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "--cluster-by-id only: the largest single cluster's record count."
+    },
+    "effective_sample_size": {
+      "type": "number",
+      "minimum": 0,
+      "description": "--cluster-by-id only: paired_count deflated by design_effect (Kish 1965) - how many truly independent trials this clustered data is actually worth."
+    },
+    "design_effect": {
+      "type": "number",
+      "minimum": 0,
+      "description": "--cluster-by-id only: Var(cluster bootstrap) / Var(i.i.d. bootstrap) on the same pooled data. 1.0 means no measurable clustering effect."
+    },
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
@@ -100,6 +130,14 @@
     "verdict": {
       "type": "string",
       "enum": ["pass", "fail", "inconclusive"]
+    },
+    "validity": {
+      "type": "string",
+      "enum": ["valid", "invalid"]
+    },
+    "promotion": {
+      "type": "string",
+      "enum": ["promoted", "not_promoted"]
     },
     "failure_counts": {
       "type": "object",

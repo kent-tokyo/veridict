@@ -8,6 +8,8 @@
   "required": [
     "schema_version",
     "verdict",
+    "validity",
+    "promotion",
     "llr",
     "lower_bound",
     "upper_bound",
@@ -37,6 +39,16 @@
     "verdict": {
       "type": "string",
       "enum": ["pass", "fail", "inconclusive"]
+    },
+    "validity": {
+      "type": "string",
+      "enum": ["valid", "invalid"],
+      "description": "Valid unless a --max-timeouts/--max-crashes/--max-invalid cap was breached, in which case verdict above is also forced to inconclusive."
+    },
+    "promotion": {
+      "type": "string",
+      "enum": ["promoted", "not_promoted"],
+      "description": "The single go/no-go field: promoted only when validity is valid and verdict is pass."
     },
     "llr": { "type": "number", "description": "Accumulated log-likelihood ratio." },
     "lower_bound": { "type": "number" },

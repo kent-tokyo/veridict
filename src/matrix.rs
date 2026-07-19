@@ -374,6 +374,7 @@ where
             1,
             0,
             paired_by_id,
+            false,
         )?;
         let draws = out
             .paired_count

@@ -73,6 +73,21 @@ pub struct MetricOutput {
     /// The quantile `quantile-diff` measured (e.g. `0.95` for p95), so the report can say which
     /// one. `None` for every other metric.
     pub quantile: Option<f64>,
+    /// `--cluster-by-id` only (winrate/elo): number of distinct resampling clusters (one per
+    /// distinct id, plus one per id-less record) the cluster bootstrap CI was computed from.
+    /// `None` when `--cluster-by-id` wasn't requested.
+    pub cluster_count: Option<u64>,
+    /// `--cluster-by-id` only: the largest single cluster's record count - the "how repeated is
+    /// the most-repeated id" signal (e.g. a dominant opening in a chess-engine test).
+    pub max_cluster_size: Option<u64>,
+    /// `--cluster-by-id` only: `paired_count / design_effect` (Kish 1965) - the naive sample
+    /// size deflated for intra-cluster correlation, i.e. "how many truly independent trials this
+    /// clustered data is actually worth."
+    pub effective_sample_size: Option<f64>,
+    /// `--cluster-by-id` only: `Var(cluster bootstrap) / Var(i.i.d. bootstrap)` on the same
+    /// pooled data - 1.0 means no measurable clustering effect; higher means the CI would have
+    /// been overconfident without accounting for the clusters.
+    pub design_effect: Option<f64>,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called once per record
@@ -98,12 +113,14 @@ pub(crate) trait MetricAggregator {
     fn finish(self: Box<Self>, failures: &FailureBreakdown) -> Result<MetricOutput, VeridictError>;
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_aggregator(
     config: MetricConfig,
     confidence: f64,
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    cluster_by_id: bool,
 ) -> Box<dyn MetricAggregator> {
     match config {
         MetricConfig::WinRate {
@@ -112,13 +129,19 @@ fn build_aggregator(
         } => Box::new(winrate::WinRateAggregator::new(
             confidence,
             paired_by_id,
+            cluster_by_id,
             ci_method,
             failure_policy,
+            resamples,
+            seed,
         )),
         MetricConfig::Elo { failure_policy } => Box::new(elo::EloAggregator::new(
             confidence,
             paired_by_id,
+            cluster_by_id,
             failure_policy,
+            resamples,
+            seed,
         )),
         MetricConfig::MeanDiff { bootstrap_method } => {
             Box::new(mean_diff::MeanDiffAggregator::new(
@@ -178,11 +201,26 @@ pub fn compute_many<I>(
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    cluster_by_id: bool,
 ) -> Result<Vec<MetricOutput>, VeridictError>
 where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
+    if cluster_by_id {
+        if paired_by_id {
+            return Err(VeridictError::ClusterByIdConflictsWithPairedById);
+        }
+        for &config in metrics {
+            let kind = config.kind();
+            if !matches!(kind, MetricKind::WinRate | MetricKind::Elo) {
+                return Err(VeridictError::IncompatibleClusterById {
+                    metric: metric_label(kind),
+                });
+            }
+        }
+    }
+
     let mut records = records
         .into_iter()
         .map(IntoRecordResult::into_record_result)
@@ -197,12 +235,22 @@ where
     let mut failures = FailureBreakdown::default();
     let mut aggregators: Vec<Box<dyn MetricAggregator>> = metrics
         .iter()
-        .map(|&config| build_aggregator(config, confidence, resamples, seed, paired_by_id))
+        .map(|&config| {
+            build_aggregator(
+                config,
+                confidence,
+                resamples,
+                seed,
+                paired_by_id,
+                cluster_by_id,
+            )
+        })
         .collect();
 
-    // Paired mode already has its own meaning for a repeated id (nets to one
-    // observation, or a hard `SchemaMismatch` past 2) - this tracking is only
-    // about the unpaired gap, so it's skipped entirely when paired_by_id.
+    // Paired/cluster mode both already have their own meaning for a repeated id (paired: nets to
+    // one observation, or a hard `SchemaMismatch` past 2; cluster: the id IS the resampling unit)
+    // - this tracking is only about the unpaired, unclustered gap, so it's skipped entirely under
+    // either.
     let mut id_counts: HashMap<String, u64> = HashMap::new();
     let mut records_with_id: u64 = 0;
 
@@ -226,7 +274,10 @@ where
                 &mut failures.candidate,
             )?);
         }
-        if !paired_by_id && let Some(id) = record.id.as_deref() {
+        if !paired_by_id
+            && !cluster_by_id
+            && let Some(id) = record.id.as_deref()
+        {
             records_with_id += 1;
             *id_counts.entry(id.to_string()).or_insert(0) += 1;
         }
@@ -256,6 +307,7 @@ pub fn compute<I>(
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
+    cluster_by_id: bool,
 ) -> Result<MetricOutput, VeridictError>
 where
     I: IntoIterator,
@@ -268,6 +320,7 @@ where
         resamples,
         seed,
         paired_by_id,
+        cluster_by_id,
     )
     .map(|mut outs| outs.remove(0))
 }
@@ -583,6 +636,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -601,6 +655,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();
@@ -623,6 +678,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -640,6 +696,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         );
         assert!(matches!(
@@ -666,6 +723,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         );
         assert!(matches!(result, Err(VeridictError::DuplicateId { .. })));
     }
@@ -682,6 +740,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();
@@ -703,6 +762,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         );
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
     }
@@ -719,6 +779,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         );
         assert!(matches!(
@@ -740,6 +801,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         );
         assert!(matches!(
             result,
@@ -758,6 +820,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         );
         assert!(matches!(result, Err(VeridictError::EmptyInput)));
@@ -779,6 +842,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 2);
@@ -797,6 +861,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();
@@ -817,6 +882,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();
@@ -840,6 +906,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         assert!(out.effect.abs() < 1e-9);
@@ -856,6 +923,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();
@@ -884,6 +952,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         )
         .unwrap();
         // 4 raw games -> 2 paired samples: 1 draw (excluded from n), 1 candidate win.
@@ -908,6 +977,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -931,6 +1001,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         );
         assert!(matches!(
             result,
@@ -956,6 +1027,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -977,6 +1049,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         );
         assert!(result.is_ok());
     }
@@ -997,6 +1070,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         );
         assert!(matches!(
             result,
@@ -1023,6 +1097,7 @@ mod tests {
             1000,
             SEED,
             true,
+            false,
         )
         .unwrap();
         assert_eq!(out.paired_count, 1);
@@ -1049,6 +1124,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         );
         assert!(matches!(result, Err(VeridictError::SchemaMismatch { .. })));
@@ -1085,6 +1161,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         let winrate = compute(
@@ -1097,6 +1174,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         let mean_diff = compute(
@@ -1108,6 +1186,7 @@ mod tests {
             1000,
             SEED,
             false,
+            false,
         )
         .unwrap();
         let sign_test = compute(
@@ -1118,6 +1197,7 @@ mod tests {
             0.95,
             1000,
             SEED,
+            false,
             false,
         )
         .unwrap();

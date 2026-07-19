@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use crate::metrics::FailureBreakdown;
-use crate::{MetricKind, Verdict};
+use crate::{MetricKind, Promotion, Validity, Verdict};
 
 /// Current JSON report schema version, for `Report`/`MultiReport`/
 /// `SprtReport`/`ComparisonMatrix` alike. Every change so far (including
@@ -23,6 +23,15 @@ pub const REPORT_SCHEMA_VERSION: u32 = 1;
 pub struct Report {
     pub schema_version: u32,
     pub verdict: Verdict,
+    /// Whether this report's data cleared every configured `FailureCaps`
+    /// threshold - `Valid` unless `--max-timeouts`/`--max-crashes`/
+    /// `--max-invalid` was breached, in which case `verdict` above is also
+    /// forced to `Inconclusive` (see `verdict::apply_failure_caps`). Always
+    /// `Valid` when no cap flag was passed - existing behavior, unchanged.
+    pub validity: Validity,
+    /// The single go/no-go field: `Promoted` only when `validity` is `Valid`
+    /// and `verdict` is `Pass`. Derived, not independently settable.
+    pub promotion: Promotion,
     pub metric: MetricKind,
     pub baseline_count: u64,
     pub candidate_count: u64,
@@ -59,6 +68,21 @@ pub struct Report {
     /// metric. Additive alongside every other field, same `REPORT_SCHEMA_VERSION` policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantile: Option<f64>,
+    /// `--cluster-by-id` only (winrate/elo) - number of distinct resampling clusters. `None`
+    /// when `--cluster-by-id` wasn't requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_count: Option<u64>,
+    /// `--cluster-by-id` only - the largest single cluster's record count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cluster_size: Option<u64>,
+    /// `--cluster-by-id` only - `paired_count` deflated by `design_effect` (Kish 1965): how many
+    /// truly independent trials this clustered data is actually worth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_sample_size: Option<f64>,
+    /// `--cluster-by-id` only - `Var(cluster bootstrap) / Var(i.i.d. bootstrap)` on the same
+    /// data; 1.0 means no measurable clustering effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub design_effect: Option<f64>,
     /// Multiple-comparison correction fields (see `correction` module) - all
     /// `None`/omitted unless `compare --correction bonferroni|holm` was
     /// requested, so a default run's JSON is byte-identical to before this
@@ -152,7 +176,9 @@ impl Report {
         let b = &self.failure_breakdown.baseline;
         let c = &self.failure_breakdown.candidate;
         let mut body = format!(
-            "Verdict: {verdict}\n\n\
+            "Verdict: {verdict}\n\
+             Validity: {validity}\n\
+             Promotion: {promotion}\n\n\
              Metric: {metric}\n\
              Effect: {effect}\n\
              {confidence_pct}% CI: {ci_low} to {ci_high}\n\
@@ -165,6 +191,8 @@ impl Report {
              - crash: {crashes} (baseline={b_crash}, candidate={c_crash})\n\
              - invalid: {invalid} (baseline={b_invalid}, candidate={c_invalid})\n",
             verdict = serde_str(&self.verdict),
+            validity = serde_str(&self.validity),
+            promotion = serde_str(&self.promotion),
             metric = match self.quantile {
                 Some(q) => format!("{} (q={q:.2})", serde_str(&self.metric)),
                 None => serde_str(&self.metric),
@@ -194,6 +222,14 @@ impl Report {
             b_invalid = b.invalid,
             c_invalid = c.invalid,
         );
+        if let Some(cluster_count) = self.cluster_count {
+            body.push_str(&format!(
+                "\nClusters: {cluster_count} (largest: {max_cluster_size}), effective_sample_size={effective_sample_size:.1}, design_effect={design_effect:.2}\n",
+                max_cluster_size = self.max_cluster_size.unwrap_or(0),
+                effective_sample_size = self.effective_sample_size.unwrap_or(0.0),
+                design_effect = self.design_effect.unwrap_or(1.0),
+            ));
+        }
         if !self.warnings.is_empty() {
             body.push_str("\nWarnings:\n");
             for warning in &self.warnings {
@@ -211,6 +247,12 @@ impl Report {
 pub struct MultiReport {
     pub schema_version: u32,
     pub verdict: Verdict,
+    /// `Invalid` if any per-metric report's `validity` is `Invalid` - see
+    /// `verdict::apply_failure_caps_to_multi`.
+    pub validity: Validity,
+    /// `Promotion::decide(validity, verdict)` above - the one field a
+    /// promotion pipeline should read for a multi-metric run.
+    pub promotion: Promotion,
     pub reports: Vec<Report>,
 }
 
@@ -223,8 +265,10 @@ impl MultiReport {
 
     pub fn to_markdown(&self) -> String {
         let mut out = format!(
-            "# Veridict Report\n\nOverall verdict: {}\n",
-            serde_str(&self.verdict)
+            "# Veridict Report\n\nOverall verdict: {}\nOverall validity: {}\nOverall promotion: {}\n",
+            serde_str(&self.verdict),
+            serde_str(&self.validity),
+            serde_str(&self.promotion),
         );
         for report in &self.reports {
             out.push_str("\n---\n\n");
@@ -242,6 +286,8 @@ mod tests {
         Report {
             schema_version: REPORT_SCHEMA_VERSION,
             verdict: Verdict::Pass,
+            validity: Validity::Valid,
+            promotion: Promotion::Promoted,
             metric: MetricKind::WinRate,
             baseline_count: 20,
             candidate_count: 80,
@@ -261,6 +307,10 @@ mod tests {
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
             quantile: None,
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -284,6 +334,8 @@ mod tests {
         let multi = MultiReport {
             schema_version: REPORT_SCHEMA_VERSION,
             verdict: Verdict::Pass,
+            validity: Validity::Valid,
+            promotion: Promotion::Promoted,
             reports: vec![sample_report()],
         };
         assert!(multi.to_json_pretty().contains("\"schema_version\": 1"));
@@ -365,6 +417,8 @@ mod tests {
         let multi = MultiReport {
             schema_version: REPORT_SCHEMA_VERSION,
             verdict: Verdict::Fail,
+            validity: Validity::Valid,
+            promotion: Promotion::NotPromoted,
             reports: vec![sample_report()],
         };
         let md = multi.to_markdown();

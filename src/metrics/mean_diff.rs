@@ -94,6 +94,10 @@ impl MetricAggregator for MeanDiffAggregator {
                 records_with_id: 0,
                 max_id_count: 0,
                 quantile: None,
+                cluster_count: None,
+                max_cluster_size: None,
+                effective_sample_size: None,
+                design_effect: None,
             });
         }
         let effect = bootstrap::mean(&diffs);
@@ -132,6 +136,10 @@ impl MetricAggregator for MeanDiffAggregator {
             records_with_id: 0,
             max_id_count: 0,
             quantile: None,
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
         })
     }
 }

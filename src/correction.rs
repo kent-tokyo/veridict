@@ -293,6 +293,7 @@ mod tests {
     use super::*;
     use crate::report::{DataQuality, REPORT_SCHEMA_VERSION};
     use crate::stats::wilson;
+    use crate::{Promotion, Validity};
 
     #[allow(clippy::too_many_arguments)]
     fn report_with(
@@ -309,6 +310,8 @@ mod tests {
         Report {
             schema_version: REPORT_SCHEMA_VERSION,
             verdict,
+            validity: Validity::Valid,
+            promotion: Promotion::decide(Validity::Valid, verdict),
             metric,
             baseline_count: paired_count - candidate_count,
             candidate_count,
@@ -328,6 +331,10 @@ mod tests {
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
             quantile: None,
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -498,6 +505,8 @@ mod tests {
         Report {
             schema_version: r.schema_version,
             verdict: r.verdict,
+            validity: r.validity,
+            promotion: r.promotion,
             metric: r.metric,
             baseline_count: r.baseline_count,
             candidate_count: r.candidate_count,
@@ -517,6 +526,10 @@ mod tests {
             warnings: r.warnings.clone(),
             data_quality: r.data_quality,
             quantile: r.quantile,
+            cluster_count: r.cluster_count,
+            max_cluster_size: r.max_cluster_size,
+            effective_sample_size: r.effective_sample_size,
+            design_effect: r.design_effect,
             correction_method: r.correction_method,
             family_size: r.family_size,
             achieved_alpha: r.achieved_alpha,

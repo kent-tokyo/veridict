@@ -1,4 +1,5 @@
 {
+  "promotion": "promoted",
   "reports": [
     {
       "baseline_count": 38,
@@ -34,9 +35,11 @@
       "metric": "winrate",
       "paired_count": 100,
       "pass_above": 0.02,
+      "promotion": "promoted",
       "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200",
       "schema_version": 1,
       "timeouts": 0,
+      "validity": "valid",
       "verdict": "pass",
       "warnings": []
     },
@@ -74,13 +77,16 @@
       "metric": "elo",
       "paired_count": 100,
       "pass_above": 0.02,
+      "promotion": "promoted",
       "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200",
       "schema_version": 1,
       "timeouts": 0,
+      "validity": "valid",
       "verdict": "pass",
       "warnings": []
     }
   ],
   "schema_version": 1,
+  "validity": "valid",
   "verdict": "pass"
 }

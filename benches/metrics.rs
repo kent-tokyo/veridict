@@ -97,6 +97,7 @@ fn bench_single_pass_all_metrics(c: &mut Criterion) {
                     2000,
                     0x5EED,
                     false,
+                    false,
                 )
                 .unwrap()
             });
@@ -111,7 +112,16 @@ fn bench_independent_calls_all_metrics(c: &mut Criterion) {
         |b| {
             b.iter(|| {
                 for &metric in &ALL_METRICS {
-                    compute(records.iter().cloned(), metric, 0.95, 2000, 0x5EED, false).unwrap();
+                    compute(
+                        records.iter().cloned(),
+                        metric,
+                        0.95,
+                        2000,
+                        0x5EED,
+                        false,
+                        false,
+                    )
+                    .unwrap();
                 }
             });
         },
@@ -129,6 +139,7 @@ fn bench_single_pass_cheap_metrics(c: &mut Criterion) {
                 2000,
                 0x5EED,
                 false,
+                false,
             )
             .unwrap()
         });
@@ -142,7 +153,16 @@ fn bench_independent_calls_cheap_metrics(c: &mut Criterion) {
         |b| {
             b.iter(|| {
                 for &metric in &CHEAP_METRICS {
-                    compute(records.iter().cloned(), metric, 0.95, 2000, 0x5EED, false).unwrap();
+                    compute(
+                        records.iter().cloned(),
+                        metric,
+                        0.95,
+                        2000,
+                        0x5EED,
+                        false,
+                        false,
+                    )
+                    .unwrap();
                 }
             });
         },

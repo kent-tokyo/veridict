@@ -41,10 +41,10 @@ proptest! {
             MetricConfig::Elo { failure_policy: FailurePolicy::ReportOnly },
         ];
 
-        let combined = compute_many(records.iter().cloned(), &metrics, 0.95, 1000, SEED, false).unwrap();
+        let combined = compute_many(records.iter().cloned(), &metrics, 0.95, 1000, SEED, false, false).unwrap();
 
         for (i, &metric) in metrics.iter().enumerate() {
-            let independent = compute(records.iter().cloned(), metric, 0.95, 1000, SEED, false).unwrap();
+            let independent = compute(records.iter().cloned(), metric, 0.95, 1000, SEED, false, false).unwrap();
             prop_assert_eq!(combined[i].paired_count, independent.paired_count);
             prop_assert_eq!(combined[i].baseline_count, independent.baseline_count);
             prop_assert_eq!(combined[i].candidate_count, independent.candidate_count);

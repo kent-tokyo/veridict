@@ -19,36 +19,45 @@ use crate::error::VeridictError;
 
 /// Shared by WinRate and Elo: one win/loss/draw observation per record.
 /// Order-independent (only integer tallies come out), so no ordering
-/// concern the way `DiffCollector` has. Without `paired_by_id`, this is
-/// O(1) memory (three counters); with it, memory scales with the number of
-/// distinct ids not yet resolved into a pair, not with total record count.
+/// concern the way `DiffCollector` has. Without `paired_by_id`/
+/// `cluster_by_id`, this is O(1) memory (three counters); with either,
+/// memory scales with the number of distinct ids not yet resolved (paired)
+/// or the number of distinct clusters (clustered), not with total record
+/// count.
 pub(crate) struct OutcomeCollector {
     paired_by_id: bool,
+    cluster_by_id: bool,
     baseline_wins: u64,
     candidate_wins: u64,
     draws: u64,
     groups: HashMap<String, Vec<(usize, Outcome)>>,
+    /// `cluster_by_id` only: id-less records, each its own singleton
+    /// cluster (see `finish_clusters`).
+    singletons: Vec<Outcome>,
 }
 
 impl OutcomeCollector {
-    pub(crate) fn new(paired_by_id: bool) -> Self {
+    pub(crate) fn new(paired_by_id: bool, cluster_by_id: bool) -> Self {
         Self {
             paired_by_id,
+            cluster_by_id,
             baseline_wins: 0,
             candidate_wins: 0,
             draws: 0,
             groups: HashMap::new(),
+            singletons: Vec::new(),
         }
     }
 
     pub(crate) fn record(&mut self, line: usize, id: Option<&str>, outcome: Outcome) {
-        match (self.paired_by_id, id) {
-            (true, Some(id)) => {
+        match (self.paired_by_id, self.cluster_by_id, id) {
+            (true, _, Some(id)) | (_, true, Some(id)) => {
                 self.groups
                     .entry(id.to_string())
                     .or_default()
                     .push((line, outcome));
             }
+            (_, true, None) => self.singletons.push(outcome),
             _ => self.tally(outcome),
         }
     }
@@ -59,6 +68,27 @@ impl OutcomeCollector {
             Outcome::CandidateWin => self.candidate_wins += 1,
             Outcome::Draw => self.draws += 1,
         }
+    }
+
+    /// `cluster_by_id` only: every distinct id becomes one resampling
+    /// cluster (any size, not netted or capped at 2 the way `finish`'s
+    /// pairing is), plus one singleton cluster per id-less record - so
+    /// every input record ends up in exactly one cluster, ready for
+    /// `stats::bootstrap`'s cluster bootstrap. Sorted by each cluster's
+    /// minimum line number for the same determinism reason `DiffCollector::
+    /// finish` sorts its groups (unspecified `HashMap` iteration order would
+    /// otherwise make the seeded bootstrap RNG draw a different cluster
+    /// order - and so a different resampled statistic - between process
+    /// runs on the same input and seed).
+    pub(crate) fn finish_clusters(mut self) -> Vec<Vec<Outcome>> {
+        let mut groups: Vec<_> = self.groups.drain().collect();
+        groups.sort_by_key(|(_, g)| g.iter().map(|(line, _)| *line).min().unwrap());
+        let mut clusters: Vec<Vec<Outcome>> = groups
+            .into_iter()
+            .map(|(_, g)| g.into_iter().map(|(_, o)| o).collect())
+            .collect();
+        clusters.extend(self.singletons.drain(..).map(|o| vec![o]));
+        clusters
     }
 
     /// Returns `(baseline_wins, candidate_wins, draws)`.

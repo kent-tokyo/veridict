@@ -90,6 +90,10 @@ impl MetricAggregator for SignTestAggregator {
                 records_with_id: 0,
                 max_id_count: 0,
                 quantile: None,
+                cluster_count: None,
+                max_cluster_size: None,
+                effective_sample_size: None,
+                design_effect: None,
             });
         }
         let (lo, hi) = match self.ci_method {
@@ -113,6 +117,10 @@ impl MetricAggregator for SignTestAggregator {
             records_with_id: 0,
             max_id_count: 0,
             quantile: None,
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
         })
     }
 }

@@ -1,4 +1,5 @@
 {
+  "promotion": "promoted",
   "reports": [
     {
       "achieved_alpha": 0.045327562117809694,
@@ -38,10 +39,12 @@
       "metric": "winrate",
       "paired_count": 100,
       "pass_above": 0.02,
+      "promotion": "promoted",
       "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.045328 <= the corrected threshold 0.050000.",
       "schema_version": 1,
       "timeouts": 0,
       "unadjusted_verdict": "pass",
+      "validity": "valid",
       "verdict": "pass",
       "warnings": []
     },
@@ -83,14 +86,17 @@
       "metric": "elo",
       "paired_count": 100,
       "pass_above": 0.02,
+      "promotion": "promoted",
       "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
       "schema_version": 1,
       "timeouts": 0,
       "unadjusted_verdict": "pass",
+      "validity": "valid",
       "verdict": "pass",
       "warnings": []
     }
   ],
   "schema_version": 1,
+  "validity": "valid",
   "verdict": "pass"
 }

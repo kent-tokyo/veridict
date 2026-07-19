@@ -73,6 +73,7 @@ fn empirical_pass_rate(n: u64, mean: f64, sd: f64, min_effect: f64, confidence: 
             RESAMPLES,
             SEED.wrapping_add(sim),
             false,
+            false,
         )
         .unwrap();
         if report.verdict == Verdict::Pass {

@@ -76,6 +76,8 @@
 //! somewhat higher in practice - `tests/calibration/sprt_asn_calibration.rs` measures the real bias
 //! empirically rather than leaving it as an unquantified caveat.
 
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use serde::Serialize;
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -83,7 +85,8 @@ use crate::error::VeridictError;
 use crate::input::Record;
 use crate::metrics::DiffCollector;
 use crate::sprt::SprtConfig;
-use crate::stats::sprt::{bounds, llr_delta, score_from_elo};
+use crate::stats::bootstrap::DEFAULT_SEED;
+use crate::stats::sprt::{SprtBounds, bounds, llr_delta, score_from_elo};
 use crate::stats::{exact, jeffreys, wilson};
 use crate::{CiMethod, IntoRecordResult, MetricKind};
 
@@ -625,7 +628,72 @@ pub struct SprtPowerReport {
     pub expected_trials_under_h0: u64,
     pub expected_trials_under_h1: u64,
     pub method: &'static str,
+    /// Echoes `--horizon` when given; omitted (not null) otherwise, so a
+    /// call that doesn't ask for this stays byte-identical to before it
+    /// existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horizon: Option<u64>,
+    /// Monte Carlo estimate of `P(no decision within `horizon` decisive
+    /// trials)`, evaluated at the true strength halfway between `elo0`/
+    /// `elo1` - see `probability_no_decision_by_horizon`'s doc for why that
+    /// point, not either endpoint, is the realistic worst case. `Some` iff
+    /// `horizon` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probability_no_decision_by_horizon: Option<f64>,
     pub notes: Vec<String>,
+}
+
+/// Number of independent Monte Carlo replications backing
+/// `probability_no_decision_by_horizon` - each replication itself costs up
+/// to `horizon` steps (unlike a single bootstrap resample), so this is
+/// closer to `matrix`/`plan`'s 2,000-resample default than `compare`'s
+/// 10,000. Not currently CLI-configurable (`compare`'s `--resamples`
+/// precedent would be the natural extension if a caller ever needs a
+/// different tradeoff); seeded with `DEFAULT_SEED`, so the same inputs
+/// always give the same answer.
+const HORIZON_SIMULATIONS: usize = 2_000;
+
+/// Monte Carlo estimate of `P(a Wald SPRT hasn't crossed either boundary
+/// within `horizon` decisive trials)`, evaluated at the true strength
+/// exactly halfway between `elo0`/`elo1` (in Elo, not score, space) - per
+/// `estimate_sprt_expected_trials`'s own doc, a Wald SPRT's expected sample
+/// size peaks near this point, not at either endpoint (`elo0`/`elo1`
+/// themselves), so it's the realistic worst case for "will a run still have
+/// nothing at the horizon," not an arbitrary third case - the same
+/// midpoint-is-worst-case finding `tests/calibration/sprt_asn_calibration.rs`
+/// already measures for expected sample size, applied to a fixed-horizon
+/// tail probability instead. Simulates raw Bernoulli(p_mid) trials against
+/// the same `bounds`/`llr_delta` math `veridict sprt` itself decides with,
+/// not a closed-form approximation - there is no simple closed form for a
+/// random walk's boundary-crossing-time distribution at a general drift, so
+/// this is deliberately boring simulation rather than a derived formula.
+fn probability_no_decision_by_horizon(
+    elo0: f64,
+    elo1: f64,
+    bounds: &SprtBounds,
+    horizon: u64,
+) -> f64 {
+    let p0 = score_from_elo(elo0);
+    let p1 = score_from_elo(elo1);
+    let p_mid = score_from_elo((elo0 + elo1) / 2.0);
+    let mut rng = StdRng::seed_from_u64(DEFAULT_SEED);
+    let mut undecided = 0usize;
+    for _ in 0..HORIZON_SIMULATIONS {
+        let mut llr = 0.0;
+        let mut decided = false;
+        for _ in 0..horizon {
+            let candidate_won = rng.random::<f64>() < p_mid;
+            llr += llr_delta(candidate_won, p0, p1);
+            if llr >= bounds.upper || llr <= bounds.lower {
+                decided = true;
+                break;
+            }
+        }
+        if !decided {
+            undecided += 1;
+        }
+    }
+    undecided as f64 / HORIZON_SIMULATIONS as f64
 }
 
 /// Wald's classical ASN approximation - see the module doc's `--sprt` section for the formula and
@@ -637,6 +705,7 @@ pub fn estimate_sprt_expected_trials(
     elo1: f64,
     alpha: f64,
     beta: f64,
+    horizon: Option<u64>,
 ) -> Result<SprtPowerReport, VeridictError> {
     let config = SprtConfig::new(elo0, elo1, alpha, beta)?;
     let b = bounds(config.alpha, config.beta);
@@ -659,6 +728,40 @@ pub fn estimate_sprt_expected_trials(
     let expected_trials_under_h0 = expected_trials(p0, config.alpha)?;
     let expected_trials_under_h1 = expected_trials(p1, 1.0 - config.beta)?;
 
+    let probability_no_decision_by_horizon =
+        horizon.map(|h| probability_no_decision_by_horizon(config.elo0, config.elo1, &b, h));
+
+    let mut notes = vec![
+        "expected_trials_under_h0/h1 are the two endpoint cases (the true strength sitting \
+             exactly at elo0 or elo1) - a real candidate whose true strength lies between elo0 \
+             and elo1, the common case since you're running SPRT precisely because that strength \
+             is unknown, needs substantially more trials than either endpoint: a Wald SPRT's \
+             expected sample size peaks near the midpoint between the two hypotheses, not at \
+             either one. Budget above these two numbers, not at them, when the candidate's true \
+             strength is genuinely uncertain."
+            .to_string(),
+        "Wald's classical Average Sample Number approximation - ignores \"overshoot\" (the \
+             LLR's excess past a boundary at the moment of stopping), so a real run typically \
+             needs somewhat more trials than this number in practice."
+            .to_string(),
+        "Counts decisive trials only (same as --sprt-variant wald itself) - a draw-heavy \
+             testcase needs more real games than this number, since draws don't move the LLR at \
+             all. Use --sprt-variant trinomial/pentanomial for draw-heavy testing."
+            .to_string(),
+    ];
+    if horizon.is_some() {
+        notes.push(
+            "probability_no_decision_by_horizon is a Monte Carlo estimate (2,000 replications, \
+             fixed seed) evaluated at the true strength exactly halfway between elo0/elo1 - the \
+             realistic worst case, not either endpoint (see the first note above). It answers \
+             \"if I stop testing at horizon trials no matter what, how often will I still have \
+             no verdict,\" for planning the next gate's cutoff - it does not change how a real \
+             veridict sprt run should be stopped (its own alpha/beta boundaries already fully \
+             determine that)."
+                .to_string(),
+        );
+    }
+
     Ok(SprtPowerReport {
         schema_version: crate::report::REPORT_SCHEMA_VERSION,
         elo0: config.elo0,
@@ -668,24 +771,9 @@ pub fn estimate_sprt_expected_trials(
         expected_trials_under_h0,
         expected_trials_under_h1,
         method: "wald_asn_approximation",
-        notes: vec![
-            "expected_trials_under_h0/h1 are the two endpoint cases (the true strength sitting \
-             exactly at elo0 or elo1) - a real candidate whose true strength lies between elo0 \
-             and elo1, the common case since you're running SPRT precisely because that strength \
-             is unknown, needs substantially more trials than either endpoint: a Wald SPRT's \
-             expected sample size peaks near the midpoint between the two hypotheses, not at \
-             either one. Budget above these two numbers, not at them, when the candidate's true \
-             strength is genuinely uncertain."
-                .to_string(),
-            "Wald's classical Average Sample Number approximation - ignores \"overshoot\" (the \
-             LLR's excess past a boundary at the moment of stopping), so a real run typically \
-             needs somewhat more trials than this number in practice."
-                .to_string(),
-            "Counts decisive trials only (same as --sprt-variant wald itself) - a draw-heavy \
-             testcase needs more real games than this number, since draws don't move the LLR at \
-             all. Use --sprt-variant trinomial/pentanomial for draw-heavy testing."
-                .to_string(),
-        ],
+        horizon,
+        probability_no_decision_by_horizon,
+        notes,
     })
 }
 
@@ -708,6 +796,13 @@ impl SprtPowerReport {
             self.expected_trials_under_h0,
             self.expected_trials_under_h1,
         ));
+        if let (Some(horizon), Some(p)) = (self.horizon, self.probability_no_decision_by_horizon) {
+            out.push_str(&format!(
+                "At a {horizon}-trial horizon, the worst-case (midpoint-strength) probability of \
+                 still having no verdict is **{:.1}%**.\n\n",
+                p * 100.0
+            ));
+        }
         if !self.notes.is_empty() {
             out.push_str("Notes:\n\n");
             for note in &self.notes {
@@ -1082,7 +1177,7 @@ mod tests {
 
     #[test]
     fn sprt_asn_is_positive_and_finite_for_a_normal_config() {
-        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05).unwrap();
+        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, None).unwrap();
         assert!(report.expected_trials_under_h0 > 0);
         assert!(report.expected_trials_under_h1 > 0);
     }
@@ -1090,20 +1185,75 @@ mod tests {
     #[test]
     fn sprt_asn_reuses_sprt_config_validation() {
         assert!(matches!(
-            estimate_sprt_expected_trials(20.0, 0.0, 0.05, 0.05),
+            estimate_sprt_expected_trials(20.0, 0.0, 0.05, 0.05, None),
             Err(VeridictError::InvalidThreshold(_))
         ));
         assert!(matches!(
-            estimate_sprt_expected_trials(0.0, 20.0, 1.5, 0.05),
+            estimate_sprt_expected_trials(0.0, 20.0, 1.5, 0.05, None),
             Err(VeridictError::InvalidThreshold(_))
         ));
     }
 
     #[test]
     fn sprt_asn_a_larger_elo_gap_needs_fewer_expected_trials() {
-        let small_gap = estimate_sprt_expected_trials(0.0, 10.0, 0.05, 0.05).unwrap();
-        let large_gap = estimate_sprt_expected_trials(0.0, 60.0, 0.05, 0.05).unwrap();
+        let small_gap = estimate_sprt_expected_trials(0.0, 10.0, 0.05, 0.05, None).unwrap();
+        let large_gap = estimate_sprt_expected_trials(0.0, 60.0, 0.05, 0.05, None).unwrap();
         assert!(large_gap.expected_trials_under_h0 < small_gap.expected_trials_under_h0);
         assert!(large_gap.expected_trials_under_h1 < small_gap.expected_trials_under_h1);
+    }
+
+    // --- probability_no_decision_by_horizon ---
+
+    #[test]
+    fn horizon_omitted_leaves_both_new_fields_absent() {
+        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, None).unwrap();
+        assert_eq!(report.horizon, None);
+        assert_eq!(report.probability_no_decision_by_horizon, None);
+        assert!(
+            !report
+                .to_json_pretty()
+                .contains("probability_no_decision_by_horizon")
+        );
+    }
+
+    #[test]
+    fn horizon_far_below_expected_trials_is_almost_certainly_undecided() {
+        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(1)).unwrap();
+        let p = report.probability_no_decision_by_horizon.unwrap();
+        assert!(p > 0.95, "expected near-1.0, got {p}");
+    }
+
+    #[test]
+    fn horizon_far_above_expected_trials_is_almost_certainly_decided() {
+        let report = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(10_000)).unwrap();
+        let p = report.probability_no_decision_by_horizon.unwrap();
+        assert!(p < 0.05, "expected near-0.0, got {p}");
+    }
+
+    #[test]
+    fn no_decision_probability_shrinks_as_horizon_grows() {
+        let short = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(200))
+            .unwrap()
+            .probability_no_decision_by_horizon
+            .unwrap();
+        let long = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(2_000))
+            .unwrap()
+            .probability_no_decision_by_horizon
+            .unwrap();
+        assert!(
+            long < short,
+            "longer horizon ({long}) should undecide less often than a shorter one ({short})"
+        );
+    }
+
+    #[test]
+    fn horizon_result_is_deterministic_across_repeated_calls() {
+        let a = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(500))
+            .unwrap()
+            .probability_no_decision_by_horizon;
+        let b = estimate_sprt_expected_trials(0.0, 20.0, 0.05, 0.05, Some(500))
+            .unwrap()
+            .probability_no_decision_by_horizon;
+        assert_eq!(a, b);
     }
 }

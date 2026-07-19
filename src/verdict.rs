@@ -9,8 +9,9 @@
 //! an inconclusive result."
 
 use crate::error::VeridictError;
+use crate::report::{MultiReport, Report};
 use crate::stats::{elo, exact, jeffreys, wilson};
-use crate::{CiMethod, MetricKind, Verdict};
+use crate::{CiMethod, FailureCaps, MetricKind, Promotion, Validity, Verdict};
 
 pub struct Thresholds {
     pub pass_above: f64,
@@ -188,6 +189,53 @@ pub fn estimate_additional_trials(
         }
     }
     Some(lo_n.saturating_sub(paired_count))
+}
+
+/// Applies `caps` to an already-built report, the same "mutate a finished
+/// report" shape `correction::apply_correction` already uses for a
+/// different cross-cutting concern. If any cap in `caps` is breached, forces
+/// `report.verdict` to `Inconclusive` and overwrites `report.reason` (a
+/// failure-invalidated run must never surface as a clean `Pass`/`Fail`,
+/// possible today under `--failure-policy loss` where a crash can tip the
+/// numeric verdict) and clears `estimated_additional_trials` (more trials
+/// can't fix a technical-failure problem). Always sets `report.validity`/
+/// `report.promotion`, even under `FailureCaps::default()` (every cap
+/// `None`), which always yields `Validity::Valid` - a run that never passes
+/// a `--max-*` flag is unaffected.
+pub fn apply_failure_caps(report: &mut Report, caps: &FailureCaps) {
+    let (validity, reason) = caps.check(report.timeouts, report.crashes, report.invalid);
+    report.validity = validity;
+    if validity == Validity::Invalid {
+        report.verdict = Verdict::Inconclusive;
+        report.estimated_additional_trials = None;
+        if let Some(reason) = reason {
+            report.reason = format!("INVALID: {reason}. Strength not evaluated.");
+        }
+    }
+    report.promotion = Promotion::decide(report.validity, report.verdict);
+}
+
+/// `apply_failure_caps` for every report in a multi-metric run, then
+/// recomputes `MultiReport.verdict`/`validity`/`promotion` from the
+/// (now caps-applied) per-report values: `validity` is `Invalid` if any
+/// report's is, `verdict` re-aggregates via `aggregate` (a report forced to
+/// `Inconclusive` here must actually hold the overall verdict back, not just
+/// its own), and `promotion` follows the same rule as a single report.
+pub fn apply_failure_caps_to_multi(multi: &mut MultiReport, caps: &FailureCaps) {
+    for report in &mut multi.reports {
+        apply_failure_caps(report, caps);
+    }
+    multi.verdict = aggregate(multi.reports.iter().map(|r| r.verdict));
+    multi.validity = if multi
+        .reports
+        .iter()
+        .any(|r| r.validity == Validity::Invalid)
+    {
+        Validity::Invalid
+    } else {
+        Validity::Valid
+    };
+    multi.promotion = Promotion::decide(multi.validity, multi.verdict);
 }
 
 pub fn decide(ci_low: f64, ci_high: f64, thresholds: &Thresholds) -> (Verdict, String) {
@@ -575,5 +623,113 @@ mod tests {
             (rhi - rlo) / 2.0 <= target_half_width + 1e-6,
             "search-based estimate must actually clear the target width on a real re-run"
         );
+    }
+
+    // --- apply_failure_caps / apply_failure_caps_to_multi ---
+
+    fn report_with(verdict: Verdict, timeouts: u64, crashes: u64, invalid: u64) -> Report {
+        Report {
+            schema_version: crate::report::REPORT_SCHEMA_VERSION,
+            verdict,
+            validity: Validity::Valid,
+            promotion: Promotion::decide(Validity::Valid, verdict),
+            metric: MetricKind::WinRate,
+            baseline_count: 20,
+            candidate_count: 80,
+            paired_count: 100,
+            effect: 0.06,
+            confidence: 0.95,
+            ci_low: 0.02,
+            ci_high: 0.10,
+            pass_above: 0.02,
+            fail_below: -0.02,
+            timeouts,
+            crashes,
+            invalid,
+            failure_breakdown: crate::metrics::FailureBreakdown::default(),
+            reason: "ok".to_string(),
+            estimated_additional_trials: None,
+            warnings: Vec::new(),
+            data_quality: crate::report::DataQuality::default(),
+            quantile: None,
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
+            correction_method: None,
+            family_size: None,
+            achieved_alpha: None,
+            adjusted_alpha_threshold: None,
+            unadjusted_verdict: None,
+        }
+    }
+
+    #[test]
+    fn uncapped_report_is_untouched() {
+        let mut report = report_with(Verdict::Pass, 5, 5, 5);
+        apply_failure_caps(&mut report, &FailureCaps::default());
+        assert_eq!(report.verdict, Verdict::Pass);
+        assert_eq!(report.validity, Validity::Valid);
+        assert_eq!(report.promotion, Promotion::Promoted);
+    }
+
+    #[test]
+    fn breached_crash_cap_forces_inconclusive_and_not_promoted() {
+        let mut report = report_with(Verdict::Pass, 0, 3, 0);
+        let caps = FailureCaps {
+            max_crashes: Some(2),
+            ..Default::default()
+        };
+        apply_failure_caps(&mut report, &caps);
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.validity, Validity::Invalid);
+        assert_eq!(report.promotion, Promotion::NotPromoted);
+        assert!(report.reason.contains("INVALID"));
+        assert!(report.reason.contains("3 crash(es)"));
+        assert_eq!(report.estimated_additional_trials, None);
+    }
+
+    #[test]
+    fn cap_at_exactly_the_limit_is_still_valid() {
+        // A cap of 0 means "zero tolerance", not "at least one" - the boundary
+        // itself (count == max) must stay Valid, only count > max invalidates.
+        let mut report = report_with(Verdict::Pass, 0, 0, 0);
+        let caps = FailureCaps {
+            max_crashes: Some(0),
+            ..Default::default()
+        };
+        apply_failure_caps(&mut report, &caps);
+        assert_eq!(report.validity, Validity::Valid);
+        assert_eq!(report.verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn multi_report_invalidated_if_any_member_breaches_a_cap() {
+        let clean = report_with(Verdict::Pass, 0, 0, 0);
+        let dirty = report_with(Verdict::Fail, 0, 0, 0);
+        let mut multi = MultiReport {
+            schema_version: crate::report::REPORT_SCHEMA_VERSION,
+            verdict: Verdict::Fail,
+            validity: Validity::Valid,
+            promotion: Promotion::NotPromoted,
+            reports: vec![clean, dirty],
+        };
+        // Give the second report 5 timeouts directly (report_with's dirty
+        // report starts clean; mutate after construction for clarity here).
+        multi.reports[1].timeouts = 5;
+        let caps = FailureCaps {
+            max_timeouts: Some(1),
+            ..Default::default()
+        };
+        apply_failure_caps_to_multi(&mut multi, &caps);
+        assert_eq!(multi.validity, Validity::Invalid);
+        assert_eq!(multi.reports[0].validity, Validity::Valid);
+        assert_eq!(multi.reports[1].validity, Validity::Invalid);
+        // The dirty report's own verdict was forced to Inconclusive, which
+        // must now hold back the aggregate too, even though the clean
+        // report still passes.
+        assert_eq!(multi.reports[1].verdict, Verdict::Inconclusive);
+        assert_eq!(multi.verdict, Verdict::Inconclusive);
+        assert_eq!(multi.promotion, Promotion::NotPromoted);
     }
 }

@@ -100,6 +100,10 @@ impl MetricAggregator for QuantileDiffAggregator {
                 records_with_id: 0,
                 max_id_count: 0,
                 quantile: Some(self.quantile),
+                cluster_count: None,
+                max_cluster_size: None,
+                effective_sample_size: None,
+                design_effect: None,
             });
         }
         let effect = bootstrap::quantile(&diffs, self.quantile);
@@ -146,6 +150,10 @@ impl MetricAggregator for QuantileDiffAggregator {
             records_with_id: 0,
             max_id_count: 0,
             quantile: Some(self.quantile),
+            cluster_count: None,
+            max_cluster_size: None,
+            effective_sample_size: None,
+            design_effect: None,
         })
     }
 }

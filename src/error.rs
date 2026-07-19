@@ -179,6 +179,21 @@ pub enum VeridictError {
     },
 
     #[error(
+        "--cluster-by-id is only supported for metric winrate or elo (got {metric}); mean-diff/\
+         sign-test/quantile-diff cluster-robust support is a separate, deferred piece of work \
+         (see docs/research-map.md)"
+    )]
+    IncompatibleClusterById { metric: &'static str },
+
+    #[error(
+        "--cluster-by-id and --paired-by-id are mutually exclusive: pairing nets exactly two \
+         records sharing an id into one observation, while clustering keeps every record in an \
+         id group as its own resampling unit - the two describe incompatible ways to treat a \
+         repeated id"
+    )]
+    ClusterByIdConflictsWithPairedById,
+
+    #[error(
         "Bradley-Terry MM solver did not converge after {iterations} iterations \
          (largest relative rating change {last_relative_change:.3e} still above the \
          {threshold:.0e} threshold; competitor index {worst_competitor} changed most). \

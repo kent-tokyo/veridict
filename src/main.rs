@@ -12,8 +12,8 @@ use veridict::sprt::{SprtConfig, SprtVariant};
 use veridict::stats::bootstrap::{DEFAULT_SEED, sample_sd};
 use veridict::verdict::{self, Thresholds};
 use veridict::{
-    BootstrapMethod, CiMethod, FailurePolicy, MetricConfig, MetricKind, Verdict, VeridictError,
-    input, matrix, power,
+    BootstrapMethod, CiMethod, FailureCaps, FailurePolicy, MetricConfig, MetricKind, Verdict,
+    VeridictError, input, matrix, power,
 };
 
 #[derive(Parser)]
@@ -116,8 +116,19 @@ struct CompareArgs {
     /// into a single net observation instead of two independent ones. An id
     /// used only once is an ordinary unpaired sample; 3+ uses of the same
     /// id is rejected as a data error.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "cluster_by_id")]
     paired_by_id: bool,
+
+    /// Only for --metric winrate/elo: treat every record sharing an id as one correlated
+    /// cluster (e.g. the same opening/testcase replayed several times) instead of independent
+    /// trials, and switch the CI from the closed-form method to a cluster bootstrap that
+    /// resamples whole clusters - correctly widening the interval when trials aren't truly
+    /// independent. Adds cluster_count/max_cluster_size/effective_sample_size/design_effect to
+    /// the report. Mutually exclusive with --paired-by-id (nets exactly two records per id into
+    /// one observation, a different treatment of a repeated id) and any other requested metric
+    /// (mean-diff/sign-test/quantile-diff cluster support is deferred, see docs/research-map.md).
+    #[arg(long, conflicts_with = "paired_by_id")]
+    cluster_by_id: bool,
 
     /// How a failed trial affects --metric winrate/elo (mean-diff/sign-test reject anything but
     /// the default as a config error). `report-only` (default): failures are tallied and
@@ -138,6 +149,22 @@ struct CompareArgs {
     /// invent a fail - see docs/metrics.md's --correction section.
     #[arg(long, value_enum, default_value = "none")]
     correction: CorrectionArg,
+
+    /// Hard cap on candidate+baseline timeout count. Breaching it forces validity=invalid,
+    /// verdict=inconclusive, promotion=not_promoted regardless of the metric's own effect/CI -
+    /// unlike --failure-policy, this can never be satisfied by more clean trials. Unset (default):
+    /// uncapped, existing behavior.
+    #[arg(long)]
+    max_timeouts: Option<u64>,
+
+    /// Hard cap on candidate+baseline crash count. See --max-timeouts for the exact semantics.
+    #[arg(long)]
+    max_crashes: Option<u64>,
+
+    /// Hard cap on candidate+baseline invalid-result count. See --max-timeouts for the exact
+    /// semantics.
+    #[arg(long)]
+    max_invalid: Option<u64>,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -210,6 +237,20 @@ struct SprtArgs {
     /// pentanomial as it does for wald/trinomial).
     #[arg(long, value_enum, default_value = "report-only")]
     failure_policy: FailurePolicyArg,
+
+    /// Hard cap on candidate+baseline timeout count. See `compare --max-timeouts` for the exact
+    /// semantics (breaching it forces validity=invalid/verdict=inconclusive regardless of the
+    /// LLR).
+    #[arg(long)]
+    max_timeouts: Option<u64>,
+
+    /// Hard cap on candidate+baseline crash count. See `compare --max-timeouts`.
+    #[arg(long)]
+    max_crashes: Option<u64>,
+
+    /// Hard cap on candidate+baseline invalid-result count. See `compare --max-timeouts`.
+    #[arg(long)]
+    max_invalid: Option<u64>,
 
     /// Also write the JSON report to this file.
     #[arg(long)]
@@ -415,6 +456,14 @@ struct PowerArgs {
     #[arg(long, default_value_t = 0.05)]
     beta: f64,
 
+    /// For --sprt: also report the Monte Carlo probability that a real `veridict sprt` run
+    /// still hasn't reached a decision after this many decisive trials, evaluated at the
+    /// realistic worst-case true strength (halfway between --elo0/--elo1, not either endpoint).
+    /// A planning number for choosing the next gate's trial budget/cutoff - it does not change
+    /// how a real run itself should be stopped (alpha/beta already fully determine that).
+    #[arg(long, requires = "sprt")]
+    horizon: Option<u64>,
+
     /// Also write the JSON report to this file.
     #[arg(long)]
     report_json: Option<PathBuf>,
@@ -616,6 +665,11 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
         .collect::<Result<_, _>>()?;
 
     let correction: Correction = args.correction.into();
+    let caps = FailureCaps {
+        max_timeouts: args.max_timeouts,
+        max_crashes: args.max_crashes,
+        max_invalid: args.max_invalid,
+    };
     let (verdict, json, markdown) = if let [only] = metrics[..] {
         let mut report = veridict::compare_one(
             records,
@@ -625,6 +679,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
+            args.cluster_by_id,
         )?;
         veridict::correction::apply_correction(
             std::slice::from_mut(&mut report),
@@ -632,6 +687,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             correction,
             args.confidence,
         );
+        verdict::apply_failure_caps(&mut report, &caps);
         (
             report.verdict,
             report.to_json_pretty(),
@@ -646,6 +702,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.resamples,
             seed,
             args.paired_by_id,
+            args.cluster_by_id,
         )?;
         veridict::correction::apply_correction(
             &mut multi.reports,
@@ -654,6 +711,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.confidence,
         );
         multi.verdict = verdict::aggregate(multi.reports.iter().map(|r| r.verdict));
+        verdict::apply_failure_caps_to_multi(&mut multi, &caps);
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };
 
@@ -669,7 +727,14 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     let records = read_records(&args.input, format)?;
     let failure_policy: FailurePolicy = args.failure_policy.into();
 
-    let report = veridict::sprt::run(records, &config, variant, args.paired_by_id, failure_policy)?;
+    let mut report =
+        veridict::sprt::run(records, &config, variant, args.paired_by_id, failure_policy)?;
+    let caps = FailureCaps {
+        max_timeouts: args.max_timeouts,
+        max_crashes: args.max_crashes,
+        max_invalid: args.max_invalid,
+    };
+    veridict::sprt::apply_failure_caps(&mut report, &caps);
     let json = report.to_json_pretty();
     let markdown = report.to_markdown();
 
@@ -885,6 +950,7 @@ fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
             args.elo1.expect("clap requires elo1 with --sprt"),
             args.alpha,
             args.beta,
+            args.horizon,
         )?;
         (report.to_json_pretty(), report.to_markdown())
     } else {

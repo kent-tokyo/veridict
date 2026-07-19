@@ -240,6 +240,100 @@ against its partner exactly the way any other outcome would - `--sprt-variant pe
 included, where a failure's synthesized outcome becomes one of the pair's two games going into the
 5-value bucket.
 
+## `--max-timeouts` / `--max-crashes` / `--max-invalid` (`validity`)
+
+**This project's own design choice, not a citation-backed method** - hard, zero-tolerance-style
+caps on `compare`/`sprt`'s existing `timeouts`/`crashes`/`invalid` counts, orthogonal to
+`--failure-policy`. `--failure-policy` controls whether a failure changes *which outcome a trial
+contributes* to the computation; these caps control whether the run is trustworthy enough to read
+a `verdict` off of *at all*. Breaching a cap sets `validity: invalid`, forces `verdict:
+inconclusive` (overwriting whatever `verdict::decide`/the LLR boundary check actually produced),
+and clears `estimated_additional_trials` (more trials can't fix a technical-failure problem) -
+applied as a final pass over an already-built report (`verdict::apply_failure_caps`/
+`sprt::apply_failure_caps`), the same "mutate a finished report" shape `--correction` already
+uses for a different cross-cutting concern.
+
+Deliberately an absolute count, not a rate: `data_quality.high_failure_rate` (over 20% of trials)
+already covers "this run's failure *rate* looks unusually high," advisory-only, never changing
+`verdict`. A cap is for the opposite case - a single technical failure that must matter regardless
+of how many thousands of clean trials surround it (`--max-crashes 0`), which no rate threshold can
+express: at n=10,000, even 5 crashes is a 0.05% rate, far under any reasonable "high failure rate"
+bar. The concrete failure mode this closes: under `--failure-policy loss`, enough crashes can tip
+a numeric `winrate`/`elo` verdict to `fail` (or, in principle, `pass`) even though the real cause
+was infrastructure, not candidate strength - `--max-crashes 0` catches that before it ever reaches
+the report, rather than requiring a human to separately notice `crashes > 0` next to a confident-
+looking `fail`.
+
+Each cap is independently optional (`None`/unset is uncapped - existing behavior for a run that
+never passes any `--max-*` flag), and all three apply identically to `sprt`, across every
+`--sprt-variant` (a `loss`-synthesized failure counts toward the same `timeouts`/`crashes`/
+`invalid` totals `sprt`'s report already carries, regardless of variant). For a `compare
+--metric`-family run, `validity`/`promotion` are computed per report but the underlying
+`timeouts`/`crashes`/`invalid` counts are identical across every metric in one run (one shared
+scan over the input, see `metrics::compute_many`) - the overall `MultiReport.validity` is
+`invalid` if *any* member report's is.
+
+See [Validity, strength, and promotion](../README.md#validity-strength-and-promotion) in the
+README for the field semantics (`validity`/`verdict`/`promotion` as three separate axes) and a
+worked example.
+
+## `--cluster-by-id` (winrate/elo)
+
+**Established statistic - cluster bootstrap, a standard nonparametric technique (see Field &
+Welsh 2007, "Bootstrapping Clustered Data"; Cameron, Gelbach & Miller 2008 for the cluster-robust
+inference literature this generalizes), applied here rather than derived from scratch.** Every CI
+`compare` ships treats each record as an independent trial. That assumption breaks when many
+records share a common source of correlation - the same opening replayed several times, the same
+underlying testcase logged repeatedly - and the *un*-clustered CI is then too narrow: it counts
+correlated repeats as if they were independent evidence. `--cluster-by-id` treats every id (an id
+used once is its own singleton cluster) as one resampling unit instead: each bootstrap replicate
+draws whole clusters with replacement - not individual records - and recomputes the metric
+statistic (winrate's proportion, elo's score) from the pooled resampled records, the same
+`stats::sprt`-independent Wilson-vs-bootstrap distinction `matrix`'s general-graph mode already
+draws for its own Elo CIs (bootstrap when the naive closed form's independence assumption doesn't
+hold).
+
+**Structurally different from `--paired-by-id`, not a stricter version of it.** Pairing *nets* an
+id's exactly-two records into one observation (see "Paired testcases" above); clustering *keeps*
+every record in an id group as its own resampling unit; the two describe incompatible treatments
+of a repeated id and are mutually exclusive (`ClusterByIdConflictsWithPairedById`).
+
+**`effective_sample_size`/`design_effect` come from the same bootstrap as the CI, not a separately
+computed intra-class correlation.** `design_effect = Var(cluster bootstrap) / Var(i.i.d.
+bootstrap)` - both variances estimated from the identical pooled data via the same resampling
+family (`stats::bootstrap::cluster_bootstrap_ci`/`iid_bootstrap_outcome_draws`), so the two numbers
+are directly comparable rather than mixing a closed-form binomial variance with a bootstrap one
+(which could disagree at small n for reasons that have nothing to do with clustering - the same
+internal-consistency discipline `estimate_additional_trials` already follows by searching the
+exact CI function a report displays, not a different approximation of it).
+`effective_sample_size = paired_count / design_effect` is the standard Kish (1965) deflation of a
+naive sample size under clustering - "how many truly independent trials this clustered data is
+actually worth." `design_effect` near 1.0 means little measurable clustering effect (a small
+`--cluster-by-id` CI difference from the unclustered case is expected, not a sign of a bug);
+noticeably above 1.0 means the unclustered CI would have been overconfident.
+
+**`cluster_count`/`max_cluster_size` are the plain descriptive stats underneath both** - the
+number of distinct clusters (openings/testcases) and the largest single cluster's record count
+(e.g. the most-repeated opening) - reported unconditionally alongside the CI, no estimator
+involved.
+
+**`low_id_diversity` is reinterpreted the same way `--paired-by-id` already reinterprets it**: a
+repeated id is the entire point of clustering, not a sign of a data mistake, so
+`records_with_id`/`max_id_count` tracking (and the warning built from it) is skipped entirely
+under `--cluster-by-id`, exactly as it already is under `--paired-by-id`.
+
+**`estimated_additional_trials` is `null` under `--cluster-by-id`**, not merely unpopulated: it
+would otherwise binary-search wilson/jeffreys/exact against a report whose displayed CI is a
+cluster bootstrap, the exact "different approximation of it" the paragraph above says this project
+avoids - and the independent unit under clustering is the cluster, not the trial, so `paired_count`
+isn't even the right `n` to scale a search from. See `estimated_additional_trials` below.
+
+**Only `winrate`/`elo` this round** (`IncompatibleClusterById` for any other requested metric).
+`mean-diff`/`sign-test`/`quantile-diff` are numeric-diff metrics already bootstrapped by record,
+not by outcome tally - real cluster support for them needs `DiffCollector` (not `OutcomeCollector`)
+to retain cluster structure through to resampling, a genuinely separate piece of wiring, not a
+mechanical extension of this round's work. See `docs/research-map.md`.
+
 ## `matrix`'s general-graph mode
 
 **Established statistic.** Once real candidate-vs-candidate games make the observed graph
@@ -438,6 +532,30 @@ needs more real games than `expected_trials_under_h0`/`expected_trials_under_h1`
 `--sprt-variant trinomial`/`pentanomial` for draw-heavy testing, and treat this number as a
 decisive-trials estimate, not a total-games one.
 
+#### `--horizon N`: probability of no decision by a fixed trial cap
+
+**This project's own design choice, not a citation-backed method.** `expected_trials_under_h0`/
+`expected_trials_under_h1` answer "how many trials, on average"; `--horizon N` answers a different,
+sharper planning question a real gate design needs: "if I stop at `N` trials no matter what, how
+often will I still have nothing?" There is no simple closed form for a random walk's boundary-
+crossing-time *distribution* at a general drift (only its *mean*, which the ASN formula above
+already gives) - so this is deliberately boring Monte Carlo simulation, not a derived formula:
+2,000 independent replications (`stats::bootstrap::DEFAULT_SEED`, so the same inputs always give
+the same answer), each simulating raw Bernoulli trials against the exact same `stats::sprt::
+{bounds, llr_delta}` math `sprt::run`'s real Wald loop decides with, counting how often the
+simulated LLR never crosses either boundary within `N` steps.
+
+**Evaluated at the midpoint, not either endpoint - the same worst case
+`expected_trials_under_h0`/`expected_trials_under_h1`'s own doc above already establishes.**
+`score_from_elo((elo0 + elo1) / 2.0)` is the true win probability simulated from; reporting this at
+`elo0`/`elo1` instead would understate the real risk for a candidate of genuinely unknown strength,
+for the same reason budgeting at the ASN endpoints understates expected sample size.
+
+**Not a stopping rule.** This is a design aid for choosing the *next* gate's trial budget/cutoff,
+exactly like `estimated_additional_trials`/`power`'s other numbers - it never changes how a real
+`veridict sprt` run should be stopped, since that run's own `--alpha`/`--beta` boundaries already
+fully and correctly determine that regardless of how long it takes.
+
 ### `power --metric mean-diff`
 
 **A closed-form calculation, not the search above.** `mean-diff` has no closed-form CI-width-at-n
@@ -611,7 +729,9 @@ Returns `null` when there's nothing meaningful to suggest: the verdict is alread
 there are zero paired trials, or the effect sits *inside* the pass/fail threshold band (the "dead
 zone") - shrinking the CI around a point estimate already in the dead zone can never cross either
 boundary no matter how much data is added; only a genuinely different effect size resolves that
-case, not more data alone.
+case, not more data alone. Also `null` whenever `--cluster-by-id` was used (see
+`--cluster-by-id` above) - none of the binary-searched CI functions describe a cluster bootstrap,
+and the independent unit is the cluster, not the trial.
 
 ## `warnings`
 

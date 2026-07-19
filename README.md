@@ -371,6 +371,10 @@ Every `compare` report also carries advisory fields that never affect
   the effect sits *inside* the pass/fail threshold band (the "dead zone"):
   shrinking the CI around a point estimate that's already in the dead zone
   can never cross either boundary, no matter how much data you add.
+  Also `null` under `--cluster-by-id`: the search binary-searches wilson/
+  jeffreys/exact, none of which describe a cluster bootstrap CI's width at a
+  hypothetical `n`, and the independent unit under clustering is the
+  cluster, not the trial.
   Treat the number as "roughly this many, plausibly more," not a
   guarantee - it has a documented, quantified bias (e.g. an ~18%
   under-estimate at n=100 for one verified case).
@@ -393,6 +397,40 @@ Every `compare` report also carries advisory fields that never affect
 
 See [`docs/metrics.md`](docs/metrics.md) for the full detail on every method
 above, including assumptions and known failure modes.
+
+## Validity, strength, and promotion
+
+Every `compare`/`sprt` report carries three separate fields instead of collapsing everything into
+`verdict`:
+
+* **`validity`** (`valid`/`invalid`) - whether this run's data is trustworthy enough to read a
+  verdict off of at all. `invalid` means a hard technical-failure cap was breached (see below);
+  it is not the same claim as `verdict: inconclusive` ("the evidence was too weak to decide" -
+  still `valid` data).
+* **`verdict`** (`pass`/`fail`/`inconclusive`) - unchanged from before this existed. Forced to
+  `inconclusive` whenever `validity` is `invalid`, so a technical-failure-corrupted run can never
+  surface as a clean `pass`/`fail` - see the `--failure-policy loss` case below.
+* **`promotion`** (`promoted`/`not_promoted`) - the one field a deployment pipeline should
+  actually gate on: `promoted` only when `validity` is `valid` and `verdict` is `pass`.
+
+`--max-timeouts`/`--max-crashes`/`--max-invalid` (on both `compare` and `sprt`) set hard,
+zero-tolerance-style caps on the same `timeout`/`crash`/`invalid` counts every report already
+tallies - unset (the default) is uncapped, today's existing behavior. Breaching a cap sets
+`validity: invalid` regardless of how many clean trials surround it - unlike
+`data_quality.high_failure_rate` (a rate-based, purely advisory warning that never changes
+`verdict`), this is an absolute count, so a single crash can matter even in a run of thousands:
+
+```bash
+veridict compare examples/chess_engine_with_crashes.jsonl --metric winrate --min-effect 0.02 \
+  --failure-policy loss --max-crashes 0
+```
+
+Under `--failure-policy loss`, a crash synthesizes a `baseline_win` - enough crashes can tip a
+numeric `winrate` verdict to `fail` even though the real cause was infrastructure, not strength.
+`--max-crashes 0` catches that before it reaches the report: `validity` becomes `invalid`,
+`verdict` is forced back to `inconclusive`, and `promotion` is `not_promoted`, with `reason`
+naming the breached cap. A multi-metric `compare` run's overall `validity`/`promotion` are
+`invalid`/`not_promoted` if *any* individual metric's report is invalid.
 
 ## SPRT
 
@@ -646,6 +684,24 @@ effect (about 1.6x either endpoint at this same elo0/elo1/alpha/beta, see
 `tests/calibration/sprt_asn_calibration.rs`), not a small correction like the overshoot caveat
 below it. Budget above these numbers when the candidate's true strength is genuinely uncertain.
 
+Add `--horizon N` to also ask the sharper planning question: "if I cap this gate at N trials no
+matter what, how often will I still have no verdict?" - a Monte Carlo estimate (2,000
+replications, fixed seed) evaluated at that same worst-case midpoint strength, not either
+endpoint:
+
+```console
+$ veridict power --sprt --elo0 0 --elo1 20 --horizon 3000
+{
+  ...
+  "horizon": 3000,
+  "probability_no_decision_by_horizon": 0.306,
+  "notes": [ ... ]
+}
+```
+
+This is a planning number for the *next* gate's trial budget/cutoff, not a stopping rule - a real
+`veridict sprt` run's own `--alpha`/`--beta` boundaries already fully determine when it stops.
+
 See [`docs/metrics.md`](docs/metrics.md)'s `power --sprt` section for the formula, its citation,
 and the *measured* overshoot bias (not just a cited caveat).
 
@@ -673,6 +729,57 @@ instead of netting it (see [SPRT](#sprt)), which has no meaning for a lone
 game, so it always requires `--paired-by-id` and rejects any id that
 doesn't appear exactly twice - a lone id is a hard error here, not treated
 as an unpaired sample the way it is everywhere else.
+
+## Clustered testcases
+
+`--cluster-by-id` (`compare --metric winrate`/`--metric elo` only) treats every id as a group of
+*correlated* trials instead of netting an exact pair - the same opening/testcase replayed several
+times, not just twice. Where `--paired-by-id` combines a pair into one observation,
+`--cluster-by-id` keeps every record but switches the CI from the closed-form method to a cluster
+bootstrap: each resample draws whole id-groups with replacement, so trials that share a common
+source of correlation don't each count as independent evidence. The two flags are mutually
+exclusive (they're different treatments of a repeated id, not one stricter than the other).
+
+```console
+$ veridict compare openings.jsonl --metric winrate --cluster-by-id
+```
+
+The concrete failure mode this catches: 20 openings, 5 games each, half the openings strongly
+favor the candidate (5-0) and half strongly favor the baseline (1-4) - same aggregate 60/100
+candidate wins either way. Treated as 100 independent trials, the naive Wilson CI reads as a
+confident **pass** (and separately fires `low_id_diversity`, itself a hint that the "N independent
+trials" assumption doesn't hold):
+
+```console
+$ veridict compare openings.jsonl --metric winrate
+"verdict": "pass",
+"ci_low": 0.0020, "ci_high": 0.1906
+```
+
+With `--cluster-by-id`, the same data honestly reflects that there are really only ~20
+independent units of evidence (which opening you drew, not game-to-game noise, dominates the
+outcome) - a wider CI and the correct **inconclusive**:
+
+```console
+$ veridict compare openings.jsonl --metric winrate --cluster-by-id
+"verdict": "inconclusive",
+"ci_low": -0.0600, "ci_high": 0.2600,
+"cluster_count": 20, "max_cluster_size": 5,
+"effective_sample_size": 30.2, "design_effect": 3.31
+```
+
+`design_effect` (`Var(cluster bootstrap) / Var(i.i.d. bootstrap)` on the same data, both from the
+same bootstrap family so they're directly comparable - see `docs/metrics.md`) is 1.0 when
+clustering has no measurable effect; here it's 3.31, meaning the naive CI would have understated
+the true uncertainty by roughly that factor. `effective_sample_size` (`paired_count /
+design_effect`, the standard Kish 1965 deflation) says the 100 raw trials are worth about 30
+genuinely independent ones. `cluster_count`/`max_cluster_size` are always present alongside these
+(no estimator involved) - the number of distinct clusters and the largest one's size, e.g. how
+repeated the most-replayed opening is.
+
+Only `winrate`/`elo` this round - `mean-diff`/`sign-test`/`quantile-diff` cluster support is
+deferred (see `docs/research-map.md`), a separate piece of wiring since those metrics bootstrap by
+individual record today, not by outcome tally.
 
 ## Verdict logic
 

@@ -13,6 +13,7 @@ use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use statrs::distribution::{ContinuousCDF, Normal};
 
+use crate::Outcome;
 use crate::stats::wilson::inverse_normal_cdf;
 
 pub const DEFAULT_SEED: u64 = 0x5EED;
@@ -87,6 +88,141 @@ pub(crate) fn resample_edge_multinomial(
         }
     }
     (new_lo, new_hi, new_draws)
+}
+
+/// Number of consecutive retries `cluster_bootstrap_outcome_draws`/`iid_bootstrap_outcome_draws`
+/// allow a single resample to redraw when it happens to contain zero decisive (non-draw)
+/// outcomes - only reachable for `winrate`'s statistic on a draw-heavy, small-cluster-count input
+/// (see that function's doc); large enough that hitting the cap at all would mean the real data
+/// itself has essentially no decisive outcomes to resample from, a case `finish()` already rejects
+/// before ever reaching the bootstrap.
+const CLUSTER_RESAMPLE_RETRY_CAP: u32 = 1_000;
+
+/// One resample's `(baseline_wins, candidate_wins, draws)`, drawing `clusters.len()` clusters
+/// with replacement and pooling every outcome each drawn cluster contains. Retries (see
+/// `CLUSTER_RESAMPLE_RETRY_CAP`) if the draw contains no decisive outcome at all - only
+/// `statistic` callers that need at least one decisive outcome (`winrate`'s proportion) are
+/// affected; `elo`'s statistic is well-defined even from an all-draws resample, so its caller
+/// never actually retries in practice.
+fn resample_outcome_pool(clusters: &[Vec<Outcome>], rng: &mut StdRng) -> (u64, u64, u64) {
+    let k = clusters.len();
+    let mut baseline_wins = 0u64;
+    let mut candidate_wins = 0u64;
+    let mut draws = 0u64;
+    for _ in 0..k {
+        let idx = rng.random_range(0..k);
+        for outcome in &clusters[idx] {
+            match outcome {
+                Outcome::BaselineWin => baseline_wins += 1,
+                Outcome::CandidateWin => candidate_wins += 1,
+                Outcome::Draw => draws += 1,
+            }
+        }
+    }
+    (baseline_wins, candidate_wins, draws)
+}
+
+/// Cluster bootstrap over win/loss/draw outcome clusters (e.g. records sharing a `--cluster-by-id`
+/// id, such as the same opening/testcase played several times): resamples whole clusters with
+/// replacement instead of individual records, so trials that share a common source of correlation
+/// don't each count as an independent unit of evidence - the correct nonparametric generalization
+/// of `resample_edge_multinomial`'s per-edge resampling to a multi-record, possibly-correlated
+/// cluster. Returns each resample's `statistic(baseline_wins, candidate_wins, draws)`, sorted -
+/// not itself a CI; callers derive `ci_low`/`ci_high` via `lo_index`/`hi_index` and the point
+/// estimate from the real (unresampled) data, the same "resampled distribution, real-data point
+/// estimate" split every other bootstrap CI in this module already uses. `statistic` is a plain
+/// `fn` pointer (not `impl Fn`), so the exact same value can drive both this and
+/// `iid_bootstrap_outcome_draws` without a closure-capture/lifetime dance.
+pub(crate) fn cluster_bootstrap_outcome_draws(
+    clusters: &[Vec<Outcome>],
+    resamples: usize,
+    seed: u64,
+    statistic: fn(u64, u64, u64) -> f64,
+) -> Vec<f64> {
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut draws_out = Vec::with_capacity(resamples);
+    for _ in 0..resamples {
+        let mut attempt = resample_outcome_pool(clusters, &mut rng);
+        let mut value = statistic(attempt.0, attempt.1, attempt.2);
+        let mut tries = 0;
+        while value.is_nan() && tries < CLUSTER_RESAMPLE_RETRY_CAP {
+            attempt = resample_outcome_pool(clusters, &mut rng);
+            value = statistic(attempt.0, attempt.1, attempt.2);
+            tries += 1;
+        }
+        draws_out.push(value);
+    }
+    draws_out.sort_by(f64::total_cmp);
+    draws_out
+}
+
+/// Same statistic, resampled at the individual-*record* level instead (cluster boundaries
+/// ignored entirely) - i.e. the ordinary i.i.d. bootstrap every closed-form CI in this project
+/// already implicitly assumes. Used only as `--cluster-by-id`'s `design_effect` baseline
+/// (`Var(cluster) / Var(iid)`, both computed from the *same* bootstrap family so the two variance
+/// estimates are directly comparable - not a closed-form binomial variance mixed with a bootstrap
+/// one, which could disagree at small n for reasons that have nothing to do with clustering).
+pub(crate) fn iid_bootstrap_outcome_draws(
+    clusters: &[Vec<Outcome>],
+    resamples: usize,
+    seed: u64,
+    statistic: fn(u64, u64, u64) -> f64,
+) -> Vec<f64> {
+    let records: Vec<Outcome> = clusters.iter().flatten().copied().collect();
+    let singleton_clusters: Vec<Vec<Outcome>> = records.into_iter().map(|o| vec![o]).collect();
+    cluster_bootstrap_outcome_draws(&singleton_clusters, resamples, seed, statistic)
+}
+
+/// `--cluster-by-id`'s full result: a percentile CI from the cluster bootstrap, plus
+/// `design_effect`/`effective_sample_size` derived from comparing that same bootstrap's variance
+/// against an i.i.d. bootstrap on the identical pooled data (see `iid_bootstrap_outcome_draws`'s
+/// doc for why both must come from the same estimator family). `n` is the real total record count
+/// (not a resampled one) - `effective_sample_size = n / design_effect`, the standard Kish (1965)
+/// design-effect deflation of a naive sample size under clustering.
+pub(crate) struct ClusterBootstrapResult {
+    pub ci_low: f64,
+    pub ci_high: f64,
+    pub design_effect: f64,
+    pub effective_sample_size: f64,
+}
+
+pub(crate) fn cluster_bootstrap_ci(
+    clusters: &[Vec<Outcome>],
+    n: u64,
+    confidence: f64,
+    resamples: usize,
+    seed: u64,
+    statistic: fn(u64, u64, u64) -> f64,
+) -> ClusterBootstrapResult {
+    let cluster_draws = cluster_bootstrap_outcome_draws(clusters, resamples, seed, statistic);
+    let iid_draws = iid_bootstrap_outcome_draws(clusters, resamples, seed, statistic);
+
+    let alpha = 1.0 - confidence;
+    let ci_low = cluster_draws[lo_index(alpha / 2.0, resamples)];
+    let ci_high = cluster_draws[hi_index(1.0 - alpha / 2.0, resamples)];
+
+    let var_cluster = sample_variance(&cluster_draws);
+    let var_iid = sample_variance(&iid_draws);
+    // var_iid is 0 only in the degenerate case every i.i.d. resample landed on the exact same
+    // statistic (e.g. a single-record input) - design_effect is undefined there, not infinite;
+    // 1.0 (no inflation/deflation either way) is the honest default, not a fabricated extreme.
+    let design_effect = if var_iid > 0.0 {
+        var_cluster / var_iid
+    } else {
+        1.0
+    };
+    let effective_sample_size = if design_effect > 0.0 {
+        n as f64 / design_effect
+    } else {
+        n as f64
+    };
+
+    ClusterBootstrapResult {
+        ci_low,
+        ci_high,
+        design_effect,
+        effective_sample_size,
+    }
 }
 
 /// 95% (or whatever `confidence` requests) percentile bootstrap CI for the

@@ -5,7 +5,7 @@
   "description": "JSON output of `veridict compare` when multiple --metric flags are given together. A single-metric run instead produces compare-report.schema.json directly - its JSON shape never changes based on how many metrics were requested elsewhere.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "verdict", "reports"],
+  "required": ["schema_version", "verdict", "validity", "promotion", "reports"],
   "properties": {
     "schema_version": {
       "const": 1,
@@ -15,6 +15,16 @@
       "type": "string",
       "enum": ["pass", "fail", "inconclusive"],
       "description": "Aggregated across all reports: any fail sinks the whole run, else any inconclusive holds it back, else pass."
+    },
+    "validity": {
+      "type": "string",
+      "enum": ["valid", "invalid"],
+      "description": "Invalid if any per-metric report's own validity is invalid (a --max-timeouts/--max-crashes/--max-invalid cap breach)."
+    },
+    "promotion": {
+      "type": "string",
+      "enum": ["promoted", "not_promoted"],
+      "description": "Promoted only when validity is valid and verdict is pass."
     },
     "reports": {
       "type": "array",

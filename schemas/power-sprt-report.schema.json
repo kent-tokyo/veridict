@@ -54,10 +54,21 @@
     "method": {
       "const": "wald_asn_approximation"
     },
+    "horizon": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Echoes --horizon when given; omitted entirely (not null) otherwise."
+    },
+    "probability_no_decision_by_horizon": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Monte Carlo estimate (2,000 replications, fixed seed) of P(no decision within `horizon` decisive trials), evaluated at the true strength exactly halfway between elo0/elo1 - the realistic worst case per expected_trials_under_h0/h1's own doc, not either endpoint. Present iff horizon is."
+    },
     "notes": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Always includes the overshoot-approximation caveat (a real run typically needs somewhat more trials than this number - measured empirically in tests/calibration/sprt_asn_calibration.rs) and the decisive-trials-only/draws caveat."
+      "description": "Always includes the overshoot-approximation caveat (a real run typically needs somewhat more trials than this number - measured empirically in tests/calibration/sprt_asn_calibration.rs) and the decisive-trials-only/draws caveat. An additional note is appended when horizon is given, explaining probability_no_decision_by_horizon's Monte Carlo method and that it doesn't change how a real run should be stopped."
     }
   }
 }

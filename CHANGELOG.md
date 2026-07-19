@@ -10,6 +10,61 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.12.0] - 2026-07-19
+
+### Added
+
+- **`validity`/`promotion` report fields, plus `--max-timeouts`/`--max-crashes`/`--max-invalid`
+  hard failure caps** (`compare` and `sprt`). `validity` (`valid`/`invalid`) is a new axis
+  separate from `verdict`: whether this run's data is trustworthy enough to read a verdict off of
+  at all, independent of what that verdict says. Breaching a configured cap forces `verdict` back
+  to `inconclusive` (never a possibly-misleading `pass`/`fail` - concretely, under
+  `--failure-policy loss`, enough crashes can otherwise tip a numeric verdict to `fail` even
+  though the real cause was infrastructure, not candidate strength) and rewrites `reason` to say
+  why. `promotion` (`promoted`/`not_promoted`) collapses `validity`+`verdict` into the one field a
+  deployment pipeline should actually gate on: `promoted` only when both are clean. Unlike
+  `data_quality.high_failure_rate` (a rate-based, purely advisory warning), these caps are
+  absolute counts - zero-tolerance-style gates (`--max-crashes 0`) that matter regardless of how
+  many clean trials surround a single technical failure. Applied as a final pass over an
+  already-built report (`verdict::apply_failure_caps`/`apply_failure_caps_to_multi`,
+  `sprt::apply_failure_caps`), the same "mutate a finished report" shape `--correction` already
+  uses. Unset (the default): uncapped, existing behavior, byte-identical JSON. See
+  [Validity, strength, and promotion](README.md#validity-strength-and-promotion) and
+  `docs/metrics.md`'s `--max-timeouts`/`--max-crashes`/`--max-invalid` section.
+- **`power --sprt --horizon N`**: a Monte Carlo estimate (`probability_no_decision_by_horizon`,
+  2,000 replications, fixed seed) of how often a real `veridict sprt` run still won't have reached
+  a decision after `N` decisive trials, evaluated at the realistic worst-case true strength
+  (halfway between `--elo0`/`--elo1`, not either endpoint - the same peak
+  `expected_trials_under_h0`/`expected_trials_under_h1`'s own doc already establishes). A planning
+  number for the next gate's trial budget/cutoff, not a stopping rule - a real run's own
+  `--alpha`/`--beta` boundaries already fully determine when it stops. Omitted entirely (not
+  null) unless `--horizon` is given. See `docs/metrics.md`'s `power --sprt` section.
+- **`compare --cluster-by-id`** (`--metric winrate`/`--metric elo` only): a cluster bootstrap CI
+  for records sharing a common source of correlation (the same opening/testcase replayed several
+  times), instead of a single pair. Structurally different from `--paired-by-id` (nets exactly two
+  records into one observation) - clustering keeps every record but resamples whole id-groups with
+  replacement instead of individual records, correctly widening the CI when trials aren't truly
+  independent; mutually exclusive with `--paired-by-id`. Adds `cluster_count`/`max_cluster_size`
+  (plain descriptive stats) and `effective_sample_size`/`design_effect` (Kish 1965 - both derived
+  from the *same* cluster-vs-i.i.d. bootstrap comparison, not a separately computed ICC, so the
+  numbers can't silently disagree with the CI they describe) to the report.
+  `mean-diff`/`sign-test`/`quantile-diff` cluster support is deferred (see
+  `docs/research-map.md`) - those metrics bootstrap by individual record today, not by outcome
+  tally, so real support needs separate collector wiring. See
+  [Clustered testcases](README.md#clustered-testcases) and `docs/metrics.md`'s `--cluster-by-id`
+  section, including a worked example where the naive per-game CI reads as a confident `pass` and
+  the cluster-aware one correctly reads `inconclusive` on identical data. `estimated_additional_trials`
+  is always `null` under `--cluster-by-id`, even when `inconclusive` - it would otherwise
+  binary-search wilson/jeffreys/exact against a report whose displayed CI is a cluster bootstrap,
+  and `paired_count` isn't the right `n` to scale from when the independent unit is the cluster.
+
+### Changed
+
+- **Breaking**: `compare_one`/`compare_many` (and the lower-level `metrics::compute`/
+  `compute_many`) each gained a new trailing `cluster_by_id: bool` parameter - this only affects
+  direct library callers, not the CLI or any JSON schema (every new report field above is
+  additive; `schema_version` stays `1`).
+
 ## [0.11.0] - 2026-07-12
 
 Purely additive - no breaking changes since `0.10.0`.
