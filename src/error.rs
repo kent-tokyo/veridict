@@ -194,16 +194,27 @@ pub enum VeridictError {
     ClusterByIdConflictsWithPairedById,
 
     #[error(
-        "--correction is not supported together with --cluster-by-id: achieved_alpha rebuilds a \
-         plain i.i.d. Wilson CI from the raw record count, not the cluster bootstrap CI the report \
-         actually used - under positive intra-cluster correlation that reconstruction is narrower \
-         than the true cluster-robust CI, so correction could under-downgrade a pass instead of \
-         catching it, the opposite of this project's own false-pass-is-worse-than-inconclusive \
-         bias. Rejected outright rather than silently applying a mismatched correction; \
-         cluster-aware correction is a separate, deferred piece of work (see \
-         docs/research-map.md)"
+        "--claim-correction (or its deprecated alias --correction) is not supported together \
+         with --cluster-by-id: achieved_alpha rebuilds a plain i.i.d. Wilson CI from the raw \
+         record count, not the cluster bootstrap CI the report actually used - under positive \
+         intra-cluster correlation that reconstruction is narrower than the true cluster-robust \
+         CI, so correction could under-downgrade a pass instead of catching it, the opposite of \
+         this project's own false-pass-is-worse-than-inconclusive bias. Rejected outright rather \
+         than silently applying a mismatched correction; cluster-aware correction is a separate, \
+         deferred piece of work (see docs/research-map.md)"
     )]
     CorrectionConflictsWithClusterById,
+
+    #[error(
+        "--claim-correction (or its deprecated alias --correction) is not supported for a family \
+         that includes {metric}: there is no closed-form CI-at-a-hypothetical-confidence function \
+         for its bootstrap CI (same reason estimated_additional_trials/power special-case it), so \
+         this metric's own claim can't get a real, method-consistent family-wise guarantee. \
+         Rejected outright rather than leaving it uncorrected while still counting it toward \
+         family_size (today's `--correction` behavior) - bootstrap-aware correction is a \
+         separate, deferred piece of work (see docs/research-map.md)"
+    )]
+    CorrectionRequiresClosedFormCi { metric: &'static str },
 
     #[error(
         "Bradley-Terry MM solver did not converge after {iterations} iterations \

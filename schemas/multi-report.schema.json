@@ -24,7 +24,12 @@
     "promotion": {
       "type": "string",
       "enum": ["promoted", "not_promoted"],
-      "description": "Promoted only when validity is valid and verdict is pass."
+      "description": "Promoted only when validity is valid and verdict is pass. This is the deployment gate - never adjusted by --claim-correction, no matter what's passed; see simultaneous_claims_promotion for the thing correction actually adjusts."
+    },
+    "simultaneous_claims_promotion": {
+      "type": "string",
+      "enum": ["promoted", "not_promoted"],
+      "description": "Present only when `compare --claim-correction bonferroni|holm` (or its deprecated --correction alias) was requested. Promoted only if every report's own family_adjusted_promotion is promoted too - i.e. every metric's improvement claim individually survives being read as part of a simultaneous family, distinct from promotion above (which requiring every metric to pass already makes at least as conservative as a single metric, with no correction needed for that guarantee on its own)."
     },
     "reports": {
       "type": "array",

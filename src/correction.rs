@@ -1,14 +1,21 @@
-//! Multiple-comparison correction for a `compare --metric` run's metric family (`--correction
-//! bonferroni|holm`).
+//! Multiple-comparison correction for a `compare --metric` run's family of *simultaneous
+//! per-metric claims* (`--claim-correction bonferroni|holm`, with `--correction` kept as a
+//! deprecated alias for one release - see `main.rs`'s CLI arg doc).
 //!
-//! **The problem.** `compare --metric elo --metric winrate --metric sign-test` already lets a
-//! user run several metrics against the same candidate in one call, combined via
-//! `verdict::aggregate`. But each metric's own pass/fail decision is made independently at the
+//! **The problem, and what this module does and doesn't protect.** `compare --metric elo
+//! --metric winrate --metric sign-test` already lets a user run several metrics against the same
+//! candidate in one call. Each metric's own pass/fail decision is made independently at the
 //! stated `--confidence` - run enough metrics (or, in a broader campaign, enough candidates) and
-//! the chance that *something* clears its bar by luck alone climbs. That directly undermines this
-//! project's own "a false pass is worse than an inconclusive result" bias (see `verdict`'s doc):
-//! an uncorrected multi-metric family is more likely to produce a lucky pass than any single
-//! metric run alone would be.
+//! the chance that *some individual metric's own* claim clears its bar by luck alone climbs. That
+//! matters for whatever, if anything, reads one metric's own `verdict`/`promotion` as a claim on
+//! its own. It is *not* the same target as `verdict::aggregate`'s combined result
+//! (`Report`/`MultiReport`'s `verdict`/`promotion`): requiring *every* metric to pass is already
+//! an intersection-union rule over level-`alpha/2` tests, itself level `alpha/2` unconditionally
+//! (Berger 1982) - already at least as conservative as a single uncorrected metric, no correction
+//! needed. So this module never touches `verdict`/`promotion` (the deployment-gate fields); it
+//! only ever populates `Report.family_adjusted_verdict`/`family_adjusted_promotion` and, for a
+//! multi-metric run (`apply_correction_to_multi`), `MultiReport.simultaneous_claims_promotion` -
+//! see `docs/metrics.md`'s `--claim-correction` section for the full split.
 //!
 //! **The family-error target.** `compare`'s pass rule already reads a *two-sided*
 //! `(1-confidence)` CI's *lower* bound as a one-sided pass signal - a two-sided interval splits
@@ -43,35 +50,33 @@
 //! CI functions `compare` already uses (`stats::wilson`/`stats::exact`/`stats::jeffreys`) - no
 //! separate math for Bonferroni vs. Holm, one search drives both.
 //!
-//! **`mean-diff` is excluded from its own correction but still counts toward `family_size`.**
-//! There is no closed-form CI-at-a-hypothetical-confidence function for a bootstrap CI without
-//! real resampled data (same reason `verdict::estimate_additional_trials`/`power` both special-
-//! case it) - a mean-diff report's own verdict is left unadjusted. Excluding it from
-//! `family_size` entirely would under-count the real multiplicity risk the *other* metrics in the
-//! same run are actually exposed to, so it still counts - the conservative choice, consistent with
-//! "false pass worse than inconclusive."
-//!
-//! **`--cluster-by-id` is rejected outright, not silently miscorrected.** A cluster-by-id report's
-//! displayed CI comes from a cluster bootstrap, not the closed-form Wilson/Jeffreys/Exact family
-//! `achieved_alpha` searches against. Reconstructing from `successes`/`paired_count` alone (the
-//! only inputs `achieved_alpha` has) rebuilds a plain i.i.d. CI instead - narrower than the true
-//! cluster-robust CI whenever there's positive intra-cluster correlation (the usual case; that
-//! correlation is the whole reason `--cluster-by-id` widens the CI in the first place). A narrower
-//! reconstruction makes `achieved_alpha` read smaller than it truly is, so correction could
-//! under-downgrade a pass it should have caught - leniency in exactly the direction this project's
-//! own bias forbids. `apply_correction` refuses the combination rather than silently computing a
-//! number that doesn't correspond to the report it's supposedly correcting.
+//! **`mean-diff`/`quantile-diff` and `--cluster-by-id` are rejected outright, not silently
+//! miscorrected or partially counted.** Neither bootstrap CI (mean-diff/quantile-diff) nor a
+//! cluster bootstrap CI (`--cluster-by-id`) has a closed-form CI-at-a-hypothetical-confidence
+//! function to search against (same reason `verdict::estimate_additional_trials`/`power` special-
+//! case the bootstrap metrics). Silently leaving such a report uncorrected while still counting
+//! it toward `family_size` - this module's behavior before `family_adjusted_verdict` existed -
+//! meant a "corrected" family's own guarantee was never actually complete. Worse for
+//! `--cluster-by-id`: reconstructing a plain i.i.d. CI from `successes`/`paired_count` alone (the
+//! only inputs `achieved_alpha` has) comes out *narrower* than the true cluster-robust CI whenever
+//! there's positive intra-cluster correlation (the usual case; that correlation is the whole
+//! reason `--cluster-by-id` widens the CI to begin with) - correction could then under-downgrade a
+//! pass it should have caught, leniency in exactly the direction this project's own bias forbids.
+//! Both are now a hard `Err` instead: a family that can't get a real, method-consistent guarantee
+//! for every member doesn't get a `family_adjusted_verdict`/`simultaneous_claims_promotion` result
+//! at all. Bootstrap-aware and cluster-aware correction are both separate, deferred pieces of work
+//! (see `docs/research-map.md`).
 
 use crate::error::VeridictError;
 use crate::metrics;
-use crate::report::Report;
+use crate::report::{MultiReport, Report};
 use crate::stats::elo;
 use crate::stats::{exact, jeffreys, wilson};
-use crate::{CiMethod, MetricConfig, MetricKind, Verdict};
+use crate::{CiMethod, MetricConfig, MetricKind, Promotion, Verdict};
 
-/// Which multiple-comparison correction (if any) `compare --correction` applies to a multi-metric
-/// family. `None` is the default - `apply_correction` returns immediately without touching any
-/// report, so an unrequested run's JSON stays byte-identical to before this existed.
+/// Which multiple-comparison correction (if any) `compare --claim-correction` applies to a
+/// multi-metric family. `None` is the default - `apply_correction` returns immediately without
+/// touching any report, so an unrequested run's JSON stays byte-identical to before this existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Correction {
     None,
@@ -85,15 +90,6 @@ impl Correction {
             Self::None => "none",
             Self::Bonferroni => "bonferroni",
             Self::Holm => "holm",
-        }
-    }
-
-    /// Sentence-initial form of `label`, for appending a new sentence to `Report.reason`.
-    fn title_label(self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Bonferroni => "Bonferroni",
-            Self::Holm => "Holm",
         }
     }
 }
@@ -200,18 +196,24 @@ fn holm_reject(
     (rejected, thresholds)
 }
 
-/// Applies `correction` to `reports` in place: `reports`/`configs` must be the same length and
-/// index-aligned (one `MetricConfig` per `Report`, needed to recover each report's `ci_method` -
-/// not itself stored on `Report`). Only ever adjusts a report whose *unadjusted* verdict is
-/// `Pass` (correction exists to catch a lucky pass among many attempts, not to second-guess a fail
-/// or inconclusive). `family_size = reports.len()` always - a single-metric run degenerates both
-/// Bonferroni and Holm to a no-op (`alpha/1 = alpha`, exactly the report's own existing pass
-/// condition), so callers don't need to special-case it away.
+/// Populates each report's `family_adjusted_verdict`/`family_adjusted_promotion` (and
+/// `correction_method`/`family_size`/`achieved_alpha`/`adjusted_alpha_threshold`) from
+/// `correction`; never touches `report.verdict`/`report.promotion` (see the module doc for why).
+/// `reports`/`configs` must be the same length and index-aligned (one `MetricConfig` per
+/// `Report`, needed to recover each report's `ci_method` - not itself stored on `Report`). Only
+/// ever adjusts a report whose own `verdict` is `Pass` (correction exists to catch a lucky pass
+/// among many attempts, not to second-guess a fail or inconclusive) - call this *after* any
+/// `FailureCaps` have been applied (`verdict::apply_failure_caps`/`apply_failure_caps_to_multi`),
+/// so a report already forced to `Inconclusive` for a technical failure never counts as a
+/// legitimate statistical claim. `family_size = reports.len()` always - a single-metric run
+/// degenerates both Bonferroni and Holm to a no-op (`alpha/1 = alpha`, exactly the report's own
+/// existing pass condition), so callers don't need to special-case it away.
 ///
 /// Returns `Err(VeridictError::CorrectionConflictsWithClusterById)` if any report was built with
-/// `--cluster-by-id` (detected via `report.cluster_count.is_some()` - set only under
-/// `--cluster-by-id`, see `Report`'s doc) and `correction != Correction::None` - see the module
-/// doc's "`--cluster-by-id` is rejected outright" section for why.
+/// `--cluster-by-id` (detected via `report.cluster_count.is_some()`), or
+/// `Err(VeridictError::CorrectionRequiresClosedFormCi)` if any report's metric is `mean-diff`/
+/// `quantile-diff` - both only when `correction != Correction::None` (see the module doc's
+/// "rejected outright" section for why).
 pub fn apply_correction(
     reports: &mut [Report],
     configs: &[MetricConfig],
@@ -223,6 +225,14 @@ pub fn apply_correction(
     }
     if reports.iter().any(|r| r.cluster_count.is_some()) {
         return Err(VeridictError::CorrectionConflictsWithClusterById);
+    }
+    if let Some(report) = reports
+        .iter()
+        .find(|r| matches!(r.metric, MetricKind::MeanDiff | MetricKind::QuantileDiff))
+    {
+        return Err(VeridictError::CorrectionRequiresClosedFormCi {
+            metric: metrics::metric_label(report.metric),
+        });
     }
     let family_size = reports.len();
     let alpha = 1.0 - confidence;
@@ -259,52 +269,50 @@ pub fn apply_correction(
     };
 
     for (i, report) in reports.iter_mut().enumerate() {
-        let unadjusted_verdict = report.verdict;
-
-        let no_closed_form_ci =
-            report.metric == MetricKind::MeanDiff || report.metric == MetricKind::QuantileDiff;
-        if no_closed_form_ci && unadjusted_verdict == Verdict::Pass {
-            report.warnings.push(format!(
-                "excluded from its own {method} multiple-comparison correction ({metric} has no \
-                 closed-form CI at an adjusted confidence level); still counts toward \
-                 family_size={family_size}",
-                method = correction.label(),
-                metric = metrics::metric_label(report.metric),
-            ));
-        }
-
-        if let Some(reject) = rejected[i] {
-            let a = achieved[i].expect("rejected[i] is Some only when achieved[i] is Some");
-            let t = thresholds[i].expect("thresholds[i] is Some whenever rejected[i] is Some");
-            let method = correction.title_label();
-            if reject {
-                report.reason.push_str(&format!(
-                    ". {method} correction (family_size={family_size}) confirms: achieved \
-                     significance {a:.6} <= the corrected threshold {t:.6}."
-                ));
-            } else if a <= t {
-                report.verdict = Verdict::Inconclusive;
-                report.reason.push_str(&format!(
-                    ". {method} correction (family_size={family_size}): achieved significance \
-                     {a:.6} would clear its own threshold {t:.6}, but an earlier-ranked test in \
-                     the family failed, so Holm's sequential rule holds this one back too - \
-                     downgraded from pass to inconclusive."
-                ));
-            } else {
-                report.verdict = Verdict::Inconclusive;
-                report.reason.push_str(&format!(
-                    ". {method} correction (family_size={family_size}): achieved significance \
-                     {a:.6} exceeds the corrected threshold {t:.6} - downgraded from pass to \
-                     inconclusive."
-                ));
-            }
-        }
-
+        // `None` (an already-Fail/Inconclusive report) just mirrors `verdict` - correction never
+        // invents a Fail and never second-guesses a report that wasn't a Pass to begin with.
+        let family_adjusted_verdict = match rejected[i] {
+            Some(true) => Verdict::Pass,
+            Some(false) => Verdict::Inconclusive,
+            None => report.verdict,
+        };
+        report.family_adjusted_verdict = Some(family_adjusted_verdict);
+        report.family_adjusted_promotion =
+            Some(Promotion::decide(report.validity, family_adjusted_verdict));
         report.correction_method = Some(correction.label());
         report.family_size = Some(family_size);
         report.achieved_alpha = achieved[i];
         report.adjusted_alpha_threshold = thresholds[i];
-        report.unadjusted_verdict = Some(unadjusted_verdict);
+        // Deprecated compatibility alias - always equals `verdict` now (see the field's own doc).
+        report.unadjusted_verdict = Some(report.verdict);
+    }
+    Ok(())
+}
+
+/// `apply_correction` for a multi-metric run, plus `MultiReport.simultaneous_claims_promotion`:
+/// `Some(Promoted)` only if every report's `family_adjusted_promotion` is `Promoted` too - every
+/// metric's own improvement claim individually survives being read as part of the family.
+/// `None`/omitted when `correction == Correction::None`, same as every other correction field.
+/// Call *after* `verdict::apply_failure_caps_to_multi` (see `apply_correction`'s doc) -
+/// `multi.verdict`/`multi.promotion` (the deployment gate, already finalized by that point) are
+/// untouched either way.
+pub fn apply_correction_to_multi(
+    multi: &mut MultiReport,
+    configs: &[MetricConfig],
+    correction: Correction,
+    confidence: f64,
+) -> Result<(), VeridictError> {
+    apply_correction(&mut multi.reports, configs, correction, confidence)?;
+    if correction != Correction::None {
+        let promoted = multi
+            .reports
+            .iter()
+            .all(|r| r.family_adjusted_promotion == Some(Promotion::Promoted));
+        multi.simultaneous_claims_promotion = Some(if promoted {
+            Promotion::Promoted
+        } else {
+            Promotion::NotPromoted
+        });
     }
     Ok(())
 }
@@ -361,6 +369,8 @@ mod tests {
             achieved_alpha: None,
             adjusted_alpha_threshold: None,
             unadjusted_verdict: None,
+            family_adjusted_verdict: None,
+            family_adjusted_promotion: None,
         }
     }
 
@@ -486,21 +496,31 @@ mod tests {
         assert_eq!(reports[0].family_size, None);
         assert_eq!(reports[0].achieved_alpha, None);
         assert_eq!(reports[0].unadjusted_verdict, None);
+        assert_eq!(reports[0].family_adjusted_verdict, None);
+        assert_eq!(reports[0].family_adjusted_promotion, None);
     }
 
     #[test]
     fn single_metric_family_degenerates_to_a_no_op() {
         // family_size=1: alpha/1 == alpha, exactly the report's own existing pass condition.
+        // verdict/promotion (the deployment gate) are never touched at all - only the
+        // family_adjusted_* counterpart is populated, and even that degenerates to Pass here.
         let mut reports = vec![winrate_pass(80, 100, 0.02)];
         let configs = vec![winrate_config()];
         apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
+        assert_eq!(reports[0].family_adjusted_verdict, Some(Verdict::Pass));
+        assert_eq!(
+            reports[0].family_adjusted_promotion,
+            Some(Promotion::Promoted)
+        );
         apply_correction(&mut reports, &configs, Correction::Holm, 0.95).unwrap();
         assert_eq!(reports[0].verdict, Verdict::Pass);
+        assert_eq!(reports[0].family_adjusted_verdict, Some(Verdict::Pass));
     }
 
     #[test]
-    fn bonferroni_downgrades_a_marginal_pass_in_a_larger_family() {
+    fn bonferroni_downgrades_a_marginal_claim_without_touching_verdict() {
         // 62/100 is a genuine, bare pass at 95% confidence (ci_low ~= 0.0221, just past
         // pass_above=0.02 - verified against a real `compare` run before writing this test) that
         // survives alone but not split three ways.
@@ -517,8 +537,20 @@ mod tests {
         ];
         let configs = vec![winrate_config(), winrate_config(), winrate_config()];
         apply_correction(&mut family, &configs, Correction::Bonferroni, 0.95).unwrap();
-        assert_eq!(family[0].verdict, Verdict::Inconclusive);
+        // The deployment-gate verdict/promotion are untouched by correction...
+        assert_eq!(family[0].verdict, Verdict::Pass);
+        assert_eq!(family[0].promotion, Promotion::Promoted);
+        // ...unadjusted_verdict is a deprecated compatibility alias that always mirrors verdict...
         assert_eq!(family[0].unadjusted_verdict, Some(Verdict::Pass));
+        // ...but the family-adjusted claim is downgraded.
+        assert_eq!(
+            family[0].family_adjusted_verdict,
+            Some(Verdict::Inconclusive)
+        );
+        assert_eq!(
+            family[0].family_adjusted_promotion,
+            Some(Promotion::NotPromoted)
+        );
         assert_eq!(family[0].family_size, Some(3));
     }
 
@@ -556,6 +588,8 @@ mod tests {
             achieved_alpha: r.achieved_alpha,
             adjusted_alpha_threshold: r.adjusted_alpha_threshold,
             unadjusted_verdict: r.unadjusted_verdict,
+            family_adjusted_verdict: r.family_adjusted_verdict,
+            family_adjusted_promotion: r.family_adjusted_promotion,
         }
     }
 
@@ -587,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn mean_diff_report_counts_toward_family_size_but_keeps_its_own_verdict_and_gets_a_warning() {
+    fn correction_rejects_a_mean_diff_report() {
         let mean_diff = report_with(
             MetricKind::MeanDiff,
             Verdict::Pass,
@@ -607,12 +641,43 @@ mod tests {
             },
             winrate_config(),
         ];
-        apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap();
+        let err =
+            apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::VeridictError::CorrectionRequiresClosedFormCi {
+                metric: "metric mean-diff"
+            }
+        ));
+        assert_eq!(reports[0].correction_method, None);
+    }
 
-        assert_eq!(reports[0].verdict, Verdict::Pass);
-        assert_eq!(reports[0].achieved_alpha, None);
-        assert_eq!(reports[0].family_size, Some(2));
-        assert!(reports[0].warnings.iter().any(|w| w.contains("mean-diff")));
+    #[test]
+    fn correction_rejects_a_quantile_diff_report() {
+        let quantile_diff = report_with(
+            MetricKind::QuantileDiff,
+            Verdict::Pass,
+            0,
+            100,
+            0.05,
+            0.01,
+            0.09,
+            0.0,
+            0.0,
+        );
+        let mut reports = vec![quantile_diff];
+        let configs = vec![MetricConfig::QuantileDiff {
+            quantile: 0.95,
+            bootstrap_method: crate::BootstrapMethod::Percentile,
+        }];
+        let err =
+            apply_correction(&mut reports, &configs, Correction::Bonferroni, 0.95).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::VeridictError::CorrectionRequiresClosedFormCi {
+                metric: "metric quantile-diff"
+            }
+        ));
     }
 
     #[test]
@@ -630,5 +695,64 @@ mod tests {
         // Untouched - the error is returned before any report is mutated.
         assert_eq!(reports[0].verdict, Verdict::Pass);
         assert_eq!(reports[0].correction_method, None);
+    }
+
+    fn multi_report_with(reports: Vec<Report>) -> MultiReport {
+        let verdict = crate::verdict::aggregate(reports.iter().map(|r| r.verdict));
+        MultiReport {
+            schema_version: REPORT_SCHEMA_VERSION,
+            verdict,
+            validity: Validity::Valid,
+            promotion: Promotion::decide(Validity::Valid, verdict),
+            simultaneous_claims_promotion: None,
+            reports,
+        }
+    }
+
+    #[test]
+    fn simultaneous_claims_promotion_is_promoted_only_when_every_claim_survives() {
+        // Both metrics are strong, clean passes - neither should be downgraded even split two
+        // ways, so every family_adjusted claim survives and the family is jointly promoted.
+        let mut multi = multi_report_with(vec![
+            winrate_pass(90, 100, 0.02),
+            winrate_pass(90, 100, 0.02),
+        ]);
+        let configs = vec![winrate_config(), winrate_config()];
+        apply_correction_to_multi(&mut multi, &configs, Correction::Bonferroni, 0.95).unwrap();
+        assert_eq!(
+            multi.simultaneous_claims_promotion,
+            Some(Promotion::Promoted)
+        );
+        // The deployment-gate verdict/promotion are untouched.
+        assert_eq!(multi.verdict, Verdict::Pass);
+        assert_eq!(multi.promotion, Promotion::Promoted);
+    }
+
+    #[test]
+    fn simultaneous_claims_promotion_is_not_promoted_if_any_claim_is_downgraded() {
+        // Same marginal-pass-times-three family as bonferroni_downgrades_a_marginal_claim... -
+        // the deployment gate stays pass, but the joint claim doesn't survive.
+        let single = winrate_pass(62, 100, 0.02);
+        let mut multi = multi_report_with(vec![
+            clone_report(&single),
+            clone_report(&single),
+            clone_report(&single),
+        ]);
+        let configs = vec![winrate_config(), winrate_config(), winrate_config()];
+        apply_correction_to_multi(&mut multi, &configs, Correction::Bonferroni, 0.95).unwrap();
+        assert_eq!(
+            multi.simultaneous_claims_promotion,
+            Some(Promotion::NotPromoted)
+        );
+        assert_eq!(multi.verdict, Verdict::Pass);
+        assert_eq!(multi.promotion, Promotion::Promoted);
+    }
+
+    #[test]
+    fn simultaneous_claims_promotion_stays_none_when_correction_is_none() {
+        let mut multi = multi_report_with(vec![winrate_pass(90, 100, 0.02)]);
+        let configs = vec![winrate_config()];
+        apply_correction_to_multi(&mut multi, &configs, Correction::None, 0.95).unwrap();
+        assert_eq!(multi.simultaneous_claims_promotion, None);
     }
 }

@@ -104,17 +104,17 @@
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
-      "description": "Present only when `compare --correction bonferroni|holm` was requested for this run; omitted entirely (not null) otherwise, so a default run's JSON is byte-identical to before this field existed."
+      "description": "Present only when `compare --claim-correction bonferroni|holm` (or its deprecated --correction alias) was requested for this run; omitted entirely (not null) otherwise, so a default run's JSON is byte-identical to before this field existed."
     },
     "family_size": {
       "type": "integer",
       "minimum": 1,
-      "description": "Number of --metric flags in this run's family; present only alongside correction_method. mean-diff/quantile-diff count toward this even though neither can be individually corrected (see achieved_alpha)."
+      "description": "Number of --metric flags in this run's family; present only alongside correction_method. A family containing mean-diff/quantile-diff (no closed-form CI to correct against) or run with --cluster-by-id is rejected outright as a configuration error instead of being counted with a partial guarantee."
     },
     "achieved_alpha": {
       "type": "number",
       "exclusiveMinimum": 0,
-      "description": "Smallest one-sided significance at which this report's own CI would still pass, in the same units as (1 - confidence). Present only for a report whose unadjusted verdict was pass and whose metric has a closed-form CI (not mean-diff/quantile-diff)."
+      "description": "Smallest one-sided significance at which this report's own CI would still pass, in the same units as (1 - confidence). Present only for a report whose own verdict was pass."
     },
     "adjusted_alpha_threshold": {
       "type": "number",
@@ -123,7 +123,15 @@
     },
     "unadjusted_verdict": {
       "$ref": "#/$defs/verdict",
-      "description": "This report's verdict before correction was applied. Present only alongside correction_method; verdict above already reflects the adjusted value."
+      "description": "Deprecated compatibility alias for verdict, present only alongside correction_method. Before 0.14.0, verdict itself became the *adjusted* value once correction ran, and this field held the pre-correction one alongside it; verdict is never adjusted now, so this always just equals it. New consumers should read verdict directly - see family_adjusted_verdict for the actual corrected claim. Scheduled for removal alongside a future schema_version bump."
+    },
+    "family_adjusted_verdict": {
+      "$ref": "#/$defs/verdict",
+      "description": "This metric's verdict, read as one claim among the family's simultaneous per-metric claims: a pass downgraded to inconclusive if it doesn't clear its corrected significance threshold, otherwise the same value as verdict. Computed after any FailureCaps have already been applied. Present only alongside correction_method; verdict above is never adjusted by correction."
+    },
+    "family_adjusted_promotion": {
+      "$ref": "#/$defs/promotion",
+      "description": "Promotion::decide(validity, family_adjusted_verdict) - whether this metric's improvement claim survives being considered alongside the rest of the family, separate from promotion above (the deployment gate, never touched by correction). Present exactly when family_adjusted_verdict is."
     }
   },
   "$defs": {

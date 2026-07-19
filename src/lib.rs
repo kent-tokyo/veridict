@@ -490,6 +490,7 @@ where
         verdict,
         validity: Validity::Valid,
         promotion: Promotion::decide(Validity::Valid, verdict),
+        simultaneous_claims_promotion: None,
         reports,
     })
 }
@@ -563,6 +564,8 @@ fn build_report(
         achieved_alpha: None,
         adjusted_alpha_threshold: None,
         unadjusted_verdict: None,
+        family_adjusted_verdict: None,
+        family_adjusted_promotion: None,
     }
 }
 

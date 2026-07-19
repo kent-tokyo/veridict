@@ -34,13 +34,15 @@
           "timeout": 0
         }
       },
+      "family_adjusted_promotion": "promoted",
+      "family_adjusted_verdict": "pass",
       "family_size": 2,
       "invalid": 0,
       "metric": "winrate",
       "paired_count": 100,
       "pass_above": 0.02,
       "promotion": "promoted",
-      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.045328 <= the corrected threshold 0.050000.",
+      "reason": "CI lower bound 0.0221 meets the pass threshold 0.0200",
       "schema_version": 1,
       "timeouts": 0,
       "unadjusted_verdict": "pass",
@@ -81,13 +83,15 @@
           "timeout": 0
         }
       },
+      "family_adjusted_promotion": "promoted",
+      "family_adjusted_verdict": "pass",
       "family_size": 2,
       "invalid": 0,
       "metric": "elo",
       "paired_count": 100,
       "pass_above": 0.02,
       "promotion": "promoted",
-      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200. Holm correction (family_size=2) confirms: achieved significance 0.016421 <= the corrected threshold 0.025000.",
+      "reason": "CI lower bound 15.3650 meets the pass threshold 0.0200",
       "schema_version": 1,
       "timeouts": 0,
       "unadjusted_verdict": "pass",
@@ -97,6 +101,7 @@
     }
   ],
   "schema_version": 1,
+  "simultaneous_claims_promotion": "promoted",
   "validity": "valid",
   "verdict": "pass"
 }

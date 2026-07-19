@@ -82,8 +82,8 @@ fn check_golden(name: &str, args: &[&str], expected_code: i32) {
 
 #[test]
 fn correction_none_matches_the_pre_existing_multi_report_shape() {
-    // No --correction flag at all: proves the multi-report's JSON shape is unaffected by this
-    // feature existing, byte-shape-identical to before it shipped.
+    // No --claim-correction flag at all: proves the multi-report's JSON shape is unaffected by
+    // this feature existing, byte-shape-identical to before it shipped.
     check_golden(
         "compare_correction_none",
         &[
@@ -101,9 +101,9 @@ fn correction_none_matches_the_pre_existing_multi_report_shape() {
 }
 
 #[test]
-fn correction_holm_matches_the_corrected_multi_report_shape() {
+fn claim_correction_holm_matches_the_corrected_multi_report_shape() {
     check_golden(
-        "compare_correction_holm",
+        "compare_claim_correction_holm",
         &[
             "compare",
             "tests/fixtures/compare_multi_metric.jsonl",
@@ -113,7 +113,7 @@ fn correction_holm_matches_the_corrected_multi_report_shape() {
             "elo",
             "--min-effect",
             "0.02",
-            "--correction",
+            "--claim-correction",
             "holm",
         ],
         0,

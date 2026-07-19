@@ -141,14 +141,25 @@ struct CompareArgs {
     #[arg(long, value_enum, default_value = "report-only")]
     failure_policy: FailurePolicyArg,
 
-    /// Multiple-comparison correction across this run's metric family (relevant whenever more
-    /// than one --metric is given; a single-metric run is a harmless no-op). `none` (default):
-    /// today's existing behavior, unchanged. `bonferroni`: uniform per-metric significance
-    /// alpha/family_size. `holm`: step-down, uniformly more powerful than Bonferroni for the same
-    /// family-wise guarantee. Either can only downgrade an unadjusted pass to inconclusive, never
-    /// invent a fail - see docs/metrics.md's --correction section.
-    #[arg(long, value_enum, default_value = "none")]
-    correction: CorrectionArg,
+    /// Multiple-comparison correction across this run's metric family of *simultaneous per-metric
+    /// claims* (relevant whenever more than one --metric is given; a single-metric run is a
+    /// harmless no-op) - populates each report's family_adjusted_verdict/family_adjusted_promotion
+    /// and, for a multi-metric run, the overall simultaneous_claims_promotion. Does NOT change
+    /// verdict/promotion above (the deployment gate already requires every metric to pass, which
+    /// needs no correction of its own - see docs/metrics.md's --claim-correction section). `none`
+    /// (default): today's existing behavior, unchanged. `bonferroni`: uniform per-metric
+    /// significance alpha/family_size. `holm`: step-down, uniformly more powerful than Bonferroni
+    /// for the same family-wise guarantee. Rejected as a configuration error for a family that
+    /// includes --metric mean-diff/quantile-diff (no closed-form CI to correct) or was run with
+    /// --cluster-by-id (correction would reconstruct the wrong CI shape).
+    #[arg(long, value_enum, conflicts_with = "correction")]
+    claim_correction: Option<CorrectionArg>,
+
+    /// Deprecated alias for --claim-correction, kept for one release. Prints a deprecation
+    /// warning to stderr and behaves identically; --claim-correction/--correction are mutually
+    /// exclusive.
+    #[arg(long, value_enum, conflicts_with = "claim_correction")]
+    correction: Option<CorrectionArg>,
 
     /// Hard cap on candidate+baseline timeout count. Breaching it forces validity=invalid,
     /// verdict=inconclusive, promotion=not_promoted regardless of the metric's own effect/CI -
@@ -664,12 +675,26 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
         })
         .collect::<Result<_, _>>()?;
 
-    let correction: Correction = args.correction.into();
+    let correction: Correction = match (args.claim_correction, args.correction) {
+        (Some(c), None) => c.into(),
+        (None, Some(c)) => {
+            eprintln!(
+                "warning: --correction is deprecated; use --claim-correction instead \
+                 (--correction will be removed in a future release)"
+            );
+            c.into()
+        }
+        (None, None) => Correction::None,
+        (Some(_), Some(_)) => unreachable!("clap's conflicts_with rejects passing both"),
+    };
     let caps = FailureCaps {
         max_timeouts: args.max_timeouts,
         max_crashes: args.max_crashes,
         max_invalid: args.max_invalid,
     };
+    // Failure caps run first so an invalid report's verdict is already forced to Inconclusive
+    // before claim correction inspects it - an invalid report must never count as a legitimate
+    // statistical claim (see correction::apply_correction's doc).
     let (verdict, json, markdown) = if let [only] = metrics[..] {
         let mut report = veridict::compare_one(
             records,
@@ -681,13 +706,13 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.paired_by_id,
             args.cluster_by_id,
         )?;
+        verdict::apply_failure_caps(&mut report, &caps);
         veridict::correction::apply_correction(
             std::slice::from_mut(&mut report),
             &metrics,
             correction,
             args.confidence,
         )?;
-        verdict::apply_failure_caps(&mut report, &caps);
         (
             report.verdict,
             report.to_json_pretty(),
@@ -704,14 +729,13 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             args.paired_by_id,
             args.cluster_by_id,
         )?;
-        veridict::correction::apply_correction(
-            &mut multi.reports,
+        verdict::apply_failure_caps_to_multi(&mut multi, &caps);
+        veridict::correction::apply_correction_to_multi(
+            &mut multi,
             &metrics,
             correction,
             args.confidence,
         )?;
-        multi.verdict = verdict::aggregate(multi.reports.iter().map(|r| r.verdict));
-        verdict::apply_failure_caps_to_multi(&mut multi, &caps);
         (multi.verdict, multi.to_json_pretty(), multi.to_markdown())
     };
 

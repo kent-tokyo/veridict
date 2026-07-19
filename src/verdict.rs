@@ -661,6 +661,8 @@ mod tests {
             achieved_alpha: None,
             adjusted_alpha_threshold: None,
             unadjusted_verdict: None,
+            family_adjusted_verdict: None,
+            family_adjusted_promotion: None,
         }
     }
 
@@ -712,6 +714,7 @@ mod tests {
             verdict: Verdict::Fail,
             validity: Validity::Valid,
             promotion: Promotion::NotPromoted,
+            simultaneous_claims_promotion: None,
             reports: vec![clean, dirty],
         };
         // Give the second report 5 timeouts directly (report_with's dirty

@@ -1281,7 +1281,31 @@ fn cluster_by_id_rejected_for_mean_diff() {
 }
 
 #[test]
-fn cluster_by_id_conflicts_with_correction() {
+fn cluster_by_id_conflicts_with_claim_correction() {
+    let stdin: String = (0..20)
+        .flat_map(|i| {
+            (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
+        })
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--cluster-by-id",
+            "--claim-correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--claim-correction"))
+        .stderr(predicate::str::contains("--cluster-by-id"));
+}
+
+#[test]
+fn cluster_by_id_conflicts_with_the_deprecated_correction_alias_too() {
     let stdin: String = (0..20)
         .flat_map(|i| {
             (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
@@ -1300,14 +1324,13 @@ fn cluster_by_id_conflicts_with_correction() {
         .write_stdin(stdin)
         .assert()
         .code(3)
-        .stderr(predicate::str::contains("--correction"))
         .stderr(predicate::str::contains("--cluster-by-id"));
 }
 
 #[test]
-fn cluster_by_id_with_explicit_correction_none_still_succeeds() {
-    // --correction none is a no-op (apply_correction returns immediately, same as if the flag
-    // were never passed) - only a real correction method conflicts with --cluster-by-id.
+fn cluster_by_id_with_explicit_claim_correction_none_still_succeeds() {
+    // --claim-correction none is a no-op (apply_correction returns immediately, same as if the
+    // flag were never passed) - only a real correction method conflicts with --cluster-by-id.
     let stdin: String = (0..20)
         .flat_map(|i| {
             (0..5).map(move |_| format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"))
@@ -1320,7 +1343,7 @@ fn cluster_by_id_with_explicit_correction_none_still_succeeds() {
             "--metric",
             "winrate",
             "--cluster-by-id",
-            "--correction",
+            "--claim-correction",
             "none",
             "--min-effect",
             "0.1",
@@ -2029,7 +2052,8 @@ fn marginal_winrate_stdin() -> String {
 fn correction_none_is_the_default_and_produces_no_extra_json_keys() {
     // The concrete proof of "no behavior change when disabled": an exact key-set check, not just
     // "still passes" - correction_method/family_size/achieved_alpha/adjusted_alpha_threshold/
-    // unadjusted_verdict must be entirely absent, not present as null.
+    // unadjusted_verdict/family_adjusted_verdict/family_adjusted_promotion must be entirely
+    // absent, not present as null.
     let output = veridict()
         .args([
             "compare",
@@ -2058,6 +2082,8 @@ fn correction_none_is_the_default_and_produces_no_extra_json_keys() {
         "achieved_alpha",
         "adjusted_alpha_threshold",
         "unadjusted_verdict",
+        "family_adjusted_verdict",
+        "family_adjusted_promotion",
     ] {
         assert!(!keys.contains(&field), "unexpected key {field} in {keys:?}");
     }
@@ -2088,7 +2114,7 @@ fn correction_explicit_none_matches_the_default() {
             "winrate",
             "--min-effect",
             "0.02",
-            "--correction",
+            "--claim-correction",
             "none",
         ])
         .write_stdin(stdin)
@@ -2100,7 +2126,11 @@ fn correction_explicit_none_matches_the_default() {
 }
 
 #[test]
-fn correction_bonferroni_downgrades_a_marginal_pass_in_a_two_metric_family() {
+fn claim_correction_bonferroni_downgrades_a_marginal_claim_but_never_the_overall_verdict() {
+    // The deployment-gate verdict/promotion are an intersection-union rule over every metric -
+    // already at least as conservative as a single metric, so --claim-correction never touches
+    // them: exit code 0/"pass" here, even though winrate's own family_adjusted_verdict is
+    // downgraded.
     veridict()
         .args([
             "compare",
@@ -2111,69 +2141,31 @@ fn correction_bonferroni_downgrades_a_marginal_pass_in_a_two_metric_family() {
             "elo",
             "--min-effect",
             "0.02",
-            "--correction",
+            "--claim-correction",
             "bonferroni",
         ])
         .write_stdin(marginal_winrate_stdin())
         .assert()
-        .code(2)
-        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
         .stdout(predicate::str::contains(
             "\"correction_method\": \"bonferroni\"",
         ))
         .stdout(predicate::str::contains("\"family_size\": 2"))
-        .stdout(predicate::str::contains("\"unadjusted_verdict\": \"pass\""));
+        .stdout(predicate::str::contains("\"unadjusted_verdict\": \"pass\""))
+        .stdout(predicate::str::contains(
+            "\"family_adjusted_verdict\": \"inconclusive\"",
+        ))
+        .stdout(predicate::str::contains(
+            "\"simultaneous_claims_promotion\": \"not_promoted\"",
+        ));
 }
 
 #[test]
-fn correction_holm_is_uniformly_more_powerful_than_bonferroni_on_the_same_family() {
-    // Same input, same family - Holm keeps the overall verdict at pass where Bonferroni (above)
-    // downgrades it to inconclusive, the concrete behavioral proof of Holm's higher power.
-    veridict()
-        .args([
-            "compare",
-            "-",
-            "--metric",
-            "winrate",
-            "--metric",
-            "elo",
-            "--min-effect",
-            "0.02",
-            "--correction",
-            "holm",
-        ])
-        .write_stdin(marginal_winrate_stdin())
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
-        .stdout(predicate::str::contains("\"correction_method\": \"holm\""));
-}
-
-#[test]
-fn correction_on_a_single_metric_run_is_a_no_op() {
-    // family_size=1 degenerates both corrections to the report's own existing pass condition.
-    veridict()
-        .args([
-            "compare",
-            "-",
-            "--metric",
-            "winrate",
-            "--min-effect",
-            "0.02",
-            "--correction",
-            "holm",
-        ])
-        .write_stdin(marginal_winrate_stdin())
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
-        .stdout(predicate::str::contains("\"family_size\": 1"));
-}
-
-#[test]
-fn correction_downgrades_the_multi_report_overall_verdict_too() {
-    // MultiReport.verdict must be re-aggregated post-correction, not just each individual
-    // report's own verdict - it's the field verdict::aggregate/the exit code actually act on.
+fn claim_correction_holm_is_uniformly_more_powerful_than_bonferroni_on_the_same_family() {
+    // Same input, same family - Holm's family_adjusted_verdict stays "pass" for both metrics
+    // where Bonferroni (above) downgrades winrate's, the concrete behavioral proof of Holm's
+    // higher power. The overall verdict was already "pass" either way (see the test above).
     let output = veridict()
         .args([
             "compare",
@@ -2184,22 +2176,84 @@ fn correction_downgrades_the_multi_report_overall_verdict_too() {
             "elo",
             "--min-effect",
             "0.02",
-            "--correction",
-            "bonferroni",
+            "--claim-correction",
+            "holm",
         ])
         .write_stdin(marginal_winrate_stdin())
         .assert()
-        .code(2)
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
+        .stdout(predicate::str::contains("\"correction_method\": \"holm\""))
+        .stdout(predicate::str::contains(
+            "\"simultaneous_claims_promotion\": \"promoted\"",
+        ))
         .get_output()
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["verdict"], "inconclusive");
+    for report in json["reports"].as_array().unwrap() {
+        assert_eq!(report["family_adjusted_verdict"], "pass");
+    }
+}
+
+#[test]
+fn claim_correction_on_a_single_metric_run_is_a_no_op() {
+    // family_size=1 degenerates both corrections to the report's own existing pass condition.
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.02",
+            "--claim-correction",
+            "holm",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("\"verdict\": \"pass\""))
+        .stdout(predicate::str::contains("\"family_size\": 1"))
+        .stdout(predicate::str::contains(
+            "\"family_adjusted_verdict\": \"pass\"",
+        ));
+}
+
+#[test]
+fn claim_correction_never_changes_the_overall_verdict_or_promotion() {
+    // Same marginal family as the bonferroni test above, checked field-by-field: the deployment
+    // gate (verdict/promotion) is untouched even though the family-adjusted claim is downgraded.
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--claim-correction",
+            "bonferroni",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["verdict"], "pass");
+    assert_eq!(json["promotion"], "promoted");
+    assert_eq!(json["simultaneous_claims_promotion"], "not_promoted");
     let reports = json["reports"].as_array().unwrap();
     assert_eq!(reports[0]["metric"], "winrate");
-    assert_eq!(reports[0]["verdict"], "inconclusive");
+    assert_eq!(reports[0]["verdict"], "pass");
+    assert_eq!(reports[0]["family_adjusted_verdict"], "inconclusive");
     assert_eq!(reports[1]["metric"], "elo");
     assert_eq!(reports[1]["verdict"], "pass");
+    assert_eq!(reports[1]["family_adjusted_verdict"], "pass");
 }
 
 #[test]
@@ -2210,13 +2264,158 @@ fn correction_rejects_an_unknown_method() {
             "-",
             "--metric",
             "winrate",
-            "--correction",
+            "--claim-correction",
             "sidak",
         ])
         .write_stdin(marginal_winrate_stdin())
         .assert()
         .code(2)
         .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn claim_correction_rejects_a_mean_diff_family() {
+    let stdin = "{\"id\":\"a\",\"baseline\":1.0,\"candidate\":1.1}\n{\"id\":\"b\",\"baseline\":1.0,\"candidate\":1.2}\n";
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--claim-correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("mean-diff"));
+}
+
+#[test]
+fn claim_correction_rejects_a_quantile_diff_family() {
+    let stdin: String = (0..30)
+        .map(|i| format!("{{\"id\":\"a{i}\",\"baseline\":1.0,\"candidate\":1.1}}\n"))
+        .collect();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "quantile-diff",
+            "--quantile",
+            "0.5",
+            "--claim-correction",
+            "holm",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("quantile-diff"));
+}
+
+#[test]
+fn deprecated_correction_alias_behaves_identically_to_claim_correction() {
+    let stdin = marginal_winrate_stdin();
+    let via_claim_correction = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--claim-correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin.clone())
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let via_deprecated_alias = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.02",
+            "--correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .stderr(predicate::str::contains("--correction is deprecated"))
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(via_claim_correction, via_deprecated_alias);
+}
+
+#[test]
+fn claim_correction_and_deprecated_correction_together_is_a_config_error() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--claim-correction",
+            "holm",
+            "--correction",
+            "holm",
+        ])
+        .write_stdin(marginal_winrate_stdin())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn failure_cap_violation_forces_not_promoted_on_both_raw_and_family_adjusted_promotion() {
+    // A crash cap breach must invalidate the report before claim-correction ever looks at it - an
+    // invalid report must never read as a legitimate simultaneous claim, no matter how strong its
+    // raw numeric verdict looks. winrate's candidate side crashes 3 times (breaching
+    // --max-crashes 0) while every other trial is a clean candidate win; elo has no crashes at
+    // all and should pass its own claim cleanly.
+    let stdin: String = (0..3)
+        .map(|_| "{\"candidate_status\":\"crash\"}\n".to_string())
+        .chain((0..20).map(|_| "{\"result\":\"candidate_win\"}\n".to_string()))
+        .collect();
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "winrate",
+            "--metric",
+            "elo",
+            "--min-effect",
+            "0.1",
+            "--max-crashes",
+            "0",
+            "--claim-correction",
+            "holm",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["promotion"], "not_promoted");
+    assert_eq!(json["simultaneous_claims_promotion"], "not_promoted");
+    let winrate = &json["reports"][0];
+    assert_eq!(winrate["validity"], "invalid");
+    assert_eq!(winrate["promotion"], "not_promoted");
+    assert_eq!(winrate["family_adjusted_promotion"], "not_promoted");
 }
 
 // --- --max-timeouts/--max-crashes/--max-invalid (validity/promotion) ---

@@ -83,12 +83,13 @@ pub struct Report {
     /// data; 1.0 means no measurable clustering effect.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub design_effect: Option<f64>,
-    /// Multiple-comparison correction fields (see `correction` module) - all
-    /// `None`/omitted unless `compare --correction bonferroni|holm` was
-    /// requested, so a default run's JSON is byte-identical to before this
-    /// existed. `verdict` above already reflects the *adjusted* value once
-    /// correction is active; `unadjusted_verdict` keeps the pre-correction
-    /// value visible alongside it.
+    /// Multiple-comparison correction fields (see `correction` module) - all `None`/omitted
+    /// unless `compare --claim-correction bonferroni|holm` (or its deprecated `--correction`
+    /// alias) was requested, so a default run's JSON is byte-identical to before this existed.
+    /// `verdict`/`promotion` above are always the *unadjusted*, per-metric deployment-gate
+    /// values, untouched by correction - see `family_adjusted_verdict`/`family_adjusted_promotion`
+    /// for the corrected counterpart, and `docs/metrics.md`'s `--claim-correction` section for why
+    /// the two are kept apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correction_method: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,8 +98,27 @@ pub struct Report {
     pub achieved_alpha: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adjusted_alpha_threshold: Option<f64>,
+    /// Deprecated compatibility alias for `verdict`, kept only so a pre-0.14.0 consumer of a
+    /// corrected report (back when `verdict` itself became the *adjusted* value) doesn't see a
+    /// field vanish out from under it. Always equals `verdict` now that correction no longer
+    /// adjusts it - new consumers should read `verdict` directly. Stays in `REPORT_SCHEMA_VERSION`
+    /// 1 for that compatibility reason; remove only alongside a schema version bump.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unadjusted_verdict: Option<crate::Verdict>,
+    /// This metric's `verdict`, read as one claim among the family's simultaneous per-metric
+    /// claims: a `Pass` downgraded to `Inconclusive` if it doesn't clear its corrected
+    /// significance threshold, otherwise the same value as `verdict` (correction never invents a
+    /// `Fail`, and never touches an already-`Fail`/`Inconclusive` report). Computed from
+    /// `validity`/`verdict` *after* any `FailureCaps` have already been applied, so an
+    /// invalid report never counts as a legitimate statistical claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_adjusted_verdict: Option<crate::Verdict>,
+    /// `Promotion::decide(validity, family_adjusted_verdict)` - the field to read if "did this
+    /// metric's improvement claim survive being considered alongside the rest of the family"
+    /// matters on its own, separate from `promotion` (the deployment gate above, which correction
+    /// never touches).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family_adjusted_promotion: Option<crate::Promotion>,
 }
 
 /// Machine-checkable data-quality flags, computed together with `warnings`'
@@ -230,6 +250,19 @@ impl Report {
                 design_effect = self.design_effect.unwrap_or(1.0),
             ));
         }
+        if let Some(family_adjusted_verdict) = self.family_adjusted_verdict {
+            body.push_str(&format!(
+                "\n{method} correction (family_size={family_size}): family-adjusted verdict \
+                 {verdict}, family-adjusted promotion {promotion}\n",
+                method = self.correction_method.unwrap_or("?"),
+                family_size = self.family_size.unwrap_or(0),
+                verdict = serde_str(&family_adjusted_verdict),
+                promotion = self
+                    .family_adjusted_promotion
+                    .map(|p| serde_str(&p))
+                    .unwrap_or_default(),
+            ));
+        }
         if !self.warnings.is_empty() {
             body.push_str("\nWarnings:\n");
             for warning in &self.warnings {
@@ -246,13 +279,25 @@ impl Report {
 #[derive(Debug, Serialize)]
 pub struct MultiReport {
     pub schema_version: u32,
+    /// Unadjusted: `verdict::aggregate` over each report's own (post-`FailureCaps`, pre-claim-
+    /// correction) `verdict` - "any fail sinks it, else any inconclusive holds it back, else
+    /// pass". `--claim-correction` never changes this: requiring every metric to pass already
+    /// makes this at least as conservative as a single uncorrected metric, so it needs no
+    /// additional correction of its own (see `simultaneous_claims_promotion` for the thing
+    /// `--claim-correction` actually adjusts).
     pub verdict: Verdict,
     /// `Invalid` if any per-metric report's `validity` is `Invalid` - see
     /// `verdict::apply_failure_caps_to_multi`.
     pub validity: Validity,
-    /// `Promotion::decide(validity, verdict)` above - the one field a
-    /// promotion pipeline should read for a multi-metric run.
+    /// `Promotion::decide(validity, verdict)` above - the deployment-gate field a promotion
+    /// pipeline should read for a multi-metric run, unaffected by `--claim-correction`.
     pub promotion: Promotion,
+    /// `Promoted` only if `--claim-correction` was requested *and* every report's
+    /// `family_adjusted_promotion` is `Promoted` too - i.e. every metric's improvement claim
+    /// individually survives being read as part of a simultaneous family. `None`/omitted unless
+    /// `--claim-correction` (or its deprecated `--correction` alias) was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simultaneous_claims_promotion: Option<Promotion>,
     pub reports: Vec<Report>,
 }
 
@@ -270,6 +315,12 @@ impl MultiReport {
             serde_str(&self.validity),
             serde_str(&self.promotion),
         );
+        if let Some(simultaneous_claims_promotion) = self.simultaneous_claims_promotion {
+            out.push_str(&format!(
+                "Simultaneous claims promotion: {}\n",
+                serde_str(&simultaneous_claims_promotion)
+            ));
+        }
         for report in &self.reports {
             out.push_str("\n---\n\n");
             out.push_str(&report.to_markdown_body());
@@ -316,6 +367,8 @@ mod tests {
             achieved_alpha: None,
             adjusted_alpha_threshold: None,
             unadjusted_verdict: None,
+            family_adjusted_verdict: None,
+            family_adjusted_promotion: None,
         }
     }
 
@@ -336,6 +389,7 @@ mod tests {
             verdict: Verdict::Pass,
             validity: Validity::Valid,
             promotion: Promotion::Promoted,
+            simultaneous_claims_promotion: None,
             reports: vec![sample_report()],
         };
         assert!(multi.to_json_pretty().contains("\"schema_version\": 1"));
@@ -419,6 +473,7 @@ mod tests {
             verdict: Verdict::Fail,
             validity: Validity::Valid,
             promotion: Promotion::NotPromoted,
+            simultaneous_claims_promotion: None,
             reports: vec![sample_report()],
         };
         let md = multi.to_markdown();
