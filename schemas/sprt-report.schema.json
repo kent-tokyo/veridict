@@ -59,7 +59,7 @@
     },
     "llr": {
       "type": "number",
-      "description": "Accumulated log-likelihood ratio. For --sprt-variant pentanomial, this is the LLR at the sequential stopping point (see stopping_pair_count), not a naive recompute over the whole input - the two can differ whenever the true stopping point falls before the input's end."
+      "description": "Accumulated log-likelihood ratio. For --sprt-variant pentanomial, this is the LLR at the sequential stopping point (see stopping_pair_count), not a naive recompute over the whole input - the two can differ whenever the true stopping point falls before the input's end. When stopping_pair_count is null, no stopping point was reached: this is the raw running LLR over all available pairs, never compared against lower_bound/upper_bound, and it can sit past either bound while verdict is still inconclusive. Consumers must read verdict/promotion, never re-derive a decision from llr vs the bounds."
     },
     "lower_bound": { "type": "number" },
     "upper_bound": { "type": "number" },

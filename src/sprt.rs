@@ -148,7 +148,12 @@ pub struct SprtReport {
     /// For `SprtVariant::Pentanomial`, the LLR *at the sequential stopping point* (see the
     /// module doc) - never the value a naive final-aggregate recompute over the whole input
     /// would give, which can differ whenever the true stopping point falls before the input's
-    /// end.
+    /// end. When `stopping_pair_count` is `None` (no stopping point was reached - either the
+    /// input ran out first, or `min_paired_ids` was never satisfied), this is instead the raw
+    /// running LLR over all available pairs, which was **never compared against the bounds** -
+    /// it can sit past `lower_bound`/`upper_bound` while `verdict` is still `Inconclusive`.
+    /// Callers must read `verdict`/`promotion`, never re-derive a decision from `llr` vs the
+    /// bounds directly.
     pub llr: f64,
     pub lower_bound: f64,
     pub upper_bound: f64,
@@ -1547,6 +1552,11 @@ mod tests {
         assert_eq!(gated.stopping_reason, Some("insufficient_data"));
         assert!(gated.reason.contains("200"));
         assert!(gated.reason.contains("250"));
+        // Pin the surprising-looking field state deliberately: llr sits past upper_bound even
+        // though verdict is Inconclusive, because stopping_pair_count is None (never evaluated
+        // against the bounds). A caller that re-derives a decision from llr vs the bounds instead
+        // of reading verdict would get this backwards - see the doc comment on SprtReport::llr.
+        assert!(gated.llr > gated.upper_bound);
     }
 
     #[test]
@@ -1803,6 +1813,32 @@ mod tests {
         assert_eq!(truncated.stopping_pair_count, full.stopping_pair_count);
         assert_eq!(truncated.llr, full.llr);
         assert_eq!(truncated.paired_count, full.paired_count);
+    }
+
+    #[test]
+    fn sequential_walk_decides_fail_at_the_true_lower_crossing_pair_not_the_files_final_state() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records = pentanomial_records_from_buckets(&crosses_lower_then_settles_inconclusive());
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Pentanomial,
+            true,
+            FailurePolicy::ReportOnly,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        // Mirror of the upper-crossing test: a naive final-aggregate recompute over all 600
+        // pairs lands within bounds and would call this Inconclusive. The correct sequential
+        // answer is FAIL, decided the moment the walk first crossed the lower bound.
+        assert_eq!(report.verdict, Verdict::Fail);
+        assert_eq!(report.stopping_pair_count, Some(101));
+        assert_eq!(report.paired_count, Some(101));
+        assert_eq!(report.available_paired_count, Some(600));
+        assert_eq!(report.ignored_pairs_after_stop, Some(600 - 101));
+        assert_eq!(report.stopping_reason, Some("lower_bound_crossed"));
     }
 
     #[test]
