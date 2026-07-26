@@ -1,0 +1,4 @@
+{"id":"op0","global_index":1,"role":"a","experiment_id":"exp-1","dataset_sha256":"d1","binary_sha256":"b1","weight_sha256":"w1","config_sha256":"c1","baseline_status":"ok","candidate_status":"ok"}
+{"id":"op0","global_index":2,"role":"b","experiment_id":"exp-1","dataset_sha256":"d1","binary_sha256":"b1","weight_sha256":"w1","config_sha256":"c1","baseline_status":"ok","candidate_status":"ok"}
+{"id":"op1","global_index":3,"role":"a","experiment_id":"exp-1","dataset_sha256":"d1","binary_sha256":"b1","weight_sha256":"w1","config_sha256":"c1","baseline_status":"ok","candidate_status":"ok"}
+{"id":"op1","global_index":4,"role":"b","experiment_id":"exp-1","dataset_sha256":"d1","binary_sha256":"b1","weight_sha256":"w1","config_sha256":"c1","baseline_status":"ok","candidate_status":"timeout"}

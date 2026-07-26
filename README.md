@@ -756,6 +756,103 @@ This is a planning number for the *next* gate's trial budget/cutoff, not a stopp
 See [`docs/metrics.md`](docs/metrics.md)'s `power --sprt` section for the formula, its citation,
 and the *measured* overshoot bias (not just a cited caveat).
 
+## Verify run
+
+`veridict compare`/`sprt` judge a run's *statistics*; they have no way to check whether the raw
+input those statistics were computed from is itself structurally sound. `veridict verify-run`
+closes that gap: given a declared `manifest.toml` and the actual `games.jsonl`, it checks pairing,
+ordering, contamination, and opaque-identifier consistency *before* you trust any verdict computed
+from the same file.
+
+```console
+$ veridict verify-run examples/manifest.toml examples/games_with_contamination.jsonl
+{
+  "schema_version": 1,
+  "validity": "invalid",
+  "reason": "3 structural violation(s) found; see `violations`.",
+  "violations": [
+    {
+      "check": "experiment_contamination",
+      "id": "stray-op9",
+      "lines": [5],
+      "field": "experiment_id",
+      "detail": "record's experiment_id 'exp-2025-11-02-old-run' does not match manifest's 'exp-2026-07-26-001'"
+    },
+    ...
+  ],
+  ...
+}
+```
+
+**Self-consistency only.** Every hash/identifier field (`dataset_sha256`, `binary_sha256`,
+`weight_sha256`, `config_sha256`, `experiment_id`, and the rest of the shared envelope - see
+below) is an opaque, caller-supplied string: `verify-run` compares `manifest.toml`'s declared
+value against what each record in `games.jsonl` repeats, looking for drift. It never opens,
+hashes, or interprets an actual binary/weight/corpus/config file itself - that stays the caller's
+responsibility, matching this project's domain-agnostic, "judge results, don't produce them"
+design (see [`docs/research-map.md`](docs/research-map.md)).
+
+Six checks run unconditionally over the whole input, collecting *every* violation rather than
+stopping at the first one:
+
+* **`pair_completeness`** - every `id` present in `games.jsonl` must appear in exactly 2 records.
+* **`global_index_uniqueness`** - a caller-declared `global_index` field must not repeat.
+* **`role_consistency`** - the two records sharing an `id` must declare two different `role`
+  values (the domain-agnostic stand-in for "color/side reversed within a pair" - whatever `role`
+  means is the caller's convention, not veridict's), and only one `role`-pairing convention may
+  be used across the whole run.
+* **`schedule_order`** - the actual first-occurrence order of gated (`include_in_gate != false`)
+  pair ids must match `manifest.toml`'s declared `schedule`.
+* **`experiment_contamination`** - a record's `experiment_id`, if present, must match the
+  manifest's - catches games from a different run mixed into this one.
+* **`environment_consistency`** - `dataset_sha256`/`binary_sha256`/`weight_sha256`/
+  `config_sha256`, each checked independently: a record's value, if present, must match the
+  manifest's declared value - catches a binary/weight/dataset swap or a config change mid-run.
+
+A check whose backing field never appears anywhere in the manifest/records is honestly reported
+in `checks_skipped` (and mirrored in `warnings`) - never a silent pass (false reassurance) and
+never a hard failure (which would make the command unusable until every optional field is
+emitted). `baseline_status`/`candidate_status` (the same `ok`/`timeout`/`crash`/`invalid`
+vocabulary every other subcommand uses) are tallied into `failure_breakdown`/`timeouts`/
+`crashes`/`invalid` for visibility, not checked against a cap - that's `compare`/`sprt`'s
+`--max-timeouts`/`--max-crashes`/`--max-invalid` job.
+
+`report.paired_count` is the *formal, gated* pair count: `id`-groups of exactly 2 records,
+excluding burn-in pairs (either record marked `include_in_gate: false`) - a burn-in pair never
+votes on the gated run's pairing convention or counts toward this number, even though
+`pair_completeness`/`role_consistency` still check it like any other pair.
+
+`violations` is sorted deterministically, then capped at 500 entries so a badly corrupted run
+can't produce a report proportional to the whole input; `violation_count` always holds the exact
+total and `violations_truncated` is `true` whenever the array above is a sample, not the full
+list.
+
+**Exit codes are `verify-run`'s own, not the usual verdict-based ones**: `0` if no violation was
+found, `1` if one or more were (`validity: "invalid"` in the report - there's no "inconclusive"
+for a structural invariant; it either holds or it doesn't, so `verdict`'s three-way shape doesn't
+apply here), `3` only for a genuine parse/config error where no report can be produced at all
+(malformed `manifest.toml`, an unsupported `manifest_schema_version`, malformed `games.jsonl`,
+empty input, or a manifest that declares nothing for the three manifest-dependent checks above to
+check against).
+
+**The shared experiment envelope.** `experiment_id`/`candidate_id`/`baseline_id`/`lineage_id`/
+`dataset_sha256`/`split_sha256`/`teacher_manifest_sha256`/`binary_sha256`/`weight_sha256`/
+`init_seed`/`split_seed`/`shuffle_seed`/`schema_version`/`validity` form a cross-repo contract
+(see [`schemas/experiment-envelope.schema.json`](schemas/experiment-envelope.schema.json)),
+meant to be vendored verbatim by any pipeline of tools around veridict so a downstream tool can
+join a verdict back to its own provenance store without needing to understand another tool's
+identifiers. `manifest.toml`'s full shape (the envelope's fields plus `config_sha256`/`schedule`,
+which aren't part of the shared envelope) is
+[`schemas/manifest.schema.json`](schemas/manifest.schema.json); `games.jsonl`'s per-record shape
+for `verify-run` is [`schemas/verify-run-record.schema.json`](schemas/verify-run-record.schema.json)
+(a separate schema from [`schemas/input-record.schema.json`](schemas/input-record.schema.json) -
+`verify-run` computes no metric, so it needs no `baseline`/`candidate`/`result` fields, and needs
+several fields those other subcommands have no room for).
+
+Note the same caveat as everywhere else in this codebase: CSV line numbers are record indices, not
+physical file lines, if a quoted field embeds a newline - since "point me at the bad record" is
+this command's entire deliverable, prefer JSONL for `games.jsonl`.
+
 ## Paired testcases
 
 `--paired-by-id` (on `compare`, `sprt`, and `matrix`) treats two records

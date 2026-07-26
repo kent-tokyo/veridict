@@ -1,0 +1,14 @@
+# veridict verify-run manifest: declares this run's expected identifiers/hashes/schedule.
+# See schemas/manifest.schema.json and schemas/experiment-envelope.schema.json.
+manifest_schema_version = 1
+
+experiment_id = "exp-2026-07-26-001"
+candidate_id = "candidate-v3"
+baseline_id = "baseline-v2"
+dataset_sha256 = "b2c3d4e5f60718293a4b5c6d7e8f9012345678901234567890abcdef012345"
+binary_sha256 = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80"
+config_sha256 = "9f8e7d6c5b4a3928170695847362514031f2e3d4c5b6a798877665544332211"
+
+# Declared order of gated pair ids - `verify-run` checks games.jsonl's actual first-occurrence
+# order against this exactly.
+schedule = ["op0", "op1", "op2"]

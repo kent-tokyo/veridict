@@ -14,11 +14,12 @@ pub mod report;
 pub mod sprt;
 pub mod stats;
 pub mod verdict;
+pub mod verify_run;
 
 pub use error::VeridictError;
 pub use report::{MultiReport, Report};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Final decision returned for a comparison run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -39,7 +40,7 @@ pub enum Verdict {
 /// cap (possible under `--failure-policy loss`, where a crash can tip the
 /// numeric verdict) must never be reported as a clean `Pass`/`Fail` - see
 /// `verdict::apply_failure_caps`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Validity {
     Valid,

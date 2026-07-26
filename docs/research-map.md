@@ -286,20 +286,33 @@ for linking `veridict`'s verdicts to upstream training/checkpoint provenance - c
 training recipe, dataset hash, selector rule, checkpoint-selection reason, weight/binary hash -
 and rendering a lineage tree from failed candidates back to their source).
 
-**Why not shipped:** this is squarely the "Deliberately out of scope" list below, not a "not yet"
-item - lineage storage/tracking is an experiment-database concern, and a lineage *tree* display is
-a dashboard concern; both are explicitly one-way-dependency integrations `veridict` itself must
-not become. `veridict` judges results; it doesn't track how they were produced. An opaque
-pass-through of caller-supplied identifiers (so a downstream tracker can join a verdict back to
-its own provenance store) would fit `veridict`'s existing domain-agnostic `id` field without
-`veridict` needing to understand or store what a `checkpoint_id`/`model_id` means - not attempted
-this round since no concrete consumer has asked for it yet.
+**Update (2026-07-26): the opaque-passthrough half of this shipped, as `verify-run`.** A concrete
+downstream pipeline (multiple tools around `veridict`, coordinating a shared "experiment
+envelope" of opaque identifiers - `experiment_id`/`candidate_id`/`baseline_id`/`lineage_id`/
+`dataset_sha256`/`binary_sha256`/`weight_sha256`/seeds/`schema_version`/`validity`) needed exactly
+what the "What would change this" paragraph below described: a way for `veridict` to carry those
+identifiers through untouched and check them for consistency, without understanding what any of
+them mean. `veridict verify-run manifest.toml games.jsonl` is that - see the README's "Verify
+run" section and `schemas/experiment-envelope.schema.json`. It only ever compares caller-supplied
+opaque strings for equality/no-drift between a declared `manifest.toml` and the actual
+`games.jsonl`; it never opens, hashes, or interprets an actual binary/weight/corpus file, and it
+does not store or track lineage across runs itself.
 
-**What would change this:** a concrete downstream tool that already tracks
-checkpoints/experiments and needs `veridict`'s JSON report to carry an opaque identifier through
-untouched for that tool to join on - at that point, the design question is which field(s) and
-whether `Record`/`Report` should gain a generic passthrough `metadata` field, not whether
-`veridict` should start owning lineage storage itself (it shouldn't).
+**What's still out of scope, unchanged:** lineage *storage* across many runs (an
+experiment-database concern) and a lineage *tree* display (a dashboard concern) remain explicitly
+one-way-dependency integrations `veridict` itself must not become - `verify-run` checks one run's
+internal consistency, it doesn't track history across runs. Original reasoning kept below for
+context.
+
+**Why not shipped (as a lineage-tracking *system*, still true):** this is squarely the
+"Deliberately out of scope" list below, not a "not yet" item - lineage storage/tracking is an
+experiment-database concern, and a lineage *tree* display is a dashboard concern; both are
+explicitly one-way-dependency integrations `veridict` itself must not become. `veridict` judges
+results; it doesn't track how they were produced.
+
+**What would change this (historical - already acted on above):** a concrete downstream tool that
+already tracks checkpoints/experiments and needs `veridict`'s JSON report to carry an opaque
+identifier through untouched for that tool to join on.
 
 ## Deliberately out of scope
 

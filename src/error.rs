@@ -231,4 +231,27 @@ pub enum VeridictError {
         threshold: f64,
         worst_competitor: usize,
     },
+
+    #[error("invalid TOML in '{path}': {source}")]
+    InvalidToml {
+        path: String,
+        #[source]
+        source: toml::de::Error,
+    },
+
+    #[error(
+        "manifest_schema_version {found} is not supported by this build (supports {supported}); \
+         regenerate the manifest with a matching veridict version rather than trusting an \
+         unrecognized shape"
+    )]
+    UnsupportedManifestSchemaVersion { found: u32, supported: u32 },
+
+    #[error(
+        "manifest declares nothing for verify-run to check: schedule, experiment_id, and all of \
+         dataset_sha256/binary_sha256/weight_sha256/config_sha256 are absent. The three \
+         manifest-independent checks (pair completeness, global index uniqueness, role \
+         consistency) still ran regardless and don't count toward this - populate at least one \
+         manifest-dependent field, or there is nothing meaningful for this command to verify"
+    )]
+    ManifestDeclaresNothingToVerify,
 }

@@ -46,6 +46,15 @@ enum Command {
     /// except `--metric mean-diff --pilot FILE`, which reads real pilot data to estimate a
     /// standard deviation from (the one input file this subcommand takes).
     Power(PowerArgs),
+    /// Checks that a run's raw data is structurally sound before its statistics (`compare`/
+    /// `sprt`) are trusted: pairing, ordering, contamination, and opaque-identifier consistency
+    /// between a declared `manifest.toml` and the actual `games.jsonl`. Not verdict-shaped (no
+    /// pass/fail/inconclusive) - its own binary judgment instead: exit 0 if no structural
+    /// violation was found, exit 1 if one or more were, exit 3 only for a genuine parse/config
+    /// error (malformed manifest, unsupported manifest schema version, malformed games file,
+    /// empty input, or a manifest that declares nothing to verify) where no report can be
+    /// produced at all.
+    VerifyRun(VerifyRunArgs),
 }
 
 #[derive(clap::Args)]
@@ -509,6 +518,28 @@ struct PowerArgs {
     report_md: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct VerifyRunArgs {
+    /// Path to the manifest.toml declaring this run's expected identifiers/hashes/schedule.
+    manifest: PathBuf,
+
+    /// Path to the games.jsonl (or CSV) of per-record observations. Use "-" to read from stdin.
+    games: PathBuf,
+
+    /// Input format for `games`. Defaults to sniffing the file extension (.csv vs everything
+    /// else); pass explicitly when reading CSV from stdin.
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    /// Also write the JSON report to this file.
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PowerMetricArg {
     Winrate,
@@ -658,6 +689,7 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
         Command::Matrix(args) => run_matrix(args),
         Command::Plan(args) => run_plan(args),
         Command::Power(args) => run_power(args),
+        Command::VerifyRun(args) => run_verify_run(args),
     }
 }
 
@@ -1086,6 +1118,35 @@ fn run_power(args: PowerArgs) -> Result<ExitCode, VeridictError> {
     Ok(ExitCode::from(0))
 }
 
+/// Unlike every other subcommand, `verify_run::run` needs the whole record set at once (pairing/
+/// ordering/dedup checks are inherently cross-record - see `verify_run`'s own doc), so records
+/// are collected into a `Vec` here rather than streamed the way `read_records`/`read_match_records`
+/// are for `compare`/`sprt`/`matrix`.
+fn run_verify_run(args: VerifyRunArgs) -> Result<ExitCode, VeridictError> {
+    let manifest_text =
+        std::fs::read_to_string(&args.manifest).map_err(|source| VeridictError::Io {
+            path: args.manifest.display().to_string(),
+            source,
+        })?;
+    let manifest =
+        veridict::verify_run::parse_manifest(&args.manifest.display().to_string(), &manifest_text)?;
+
+    let format = resolve_format(&args.games, args.format);
+    let records: Vec<_> =
+        read_verify_run_records(&args.games, format)?.collect::<Result<_, _>>()?;
+
+    let report = veridict::verify_run::run(&manifest, records)?;
+    let json = report.to_json_pretty();
+    let markdown = report.to_markdown();
+
+    println!("{json}");
+    write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
+    Ok(match report.validity {
+        veridict::Validity::Valid => ExitCode::from(0),
+        veridict::Validity::Invalid => ExitCode::from(1),
+    })
+}
+
 fn write_reports(
     json: &str,
     markdown: &str,
@@ -1142,6 +1203,23 @@ type MatchRecordIter = Box<dyn Iterator<Item = Result<(usize, input::MatchRecord
 
 /// Same lazy-streaming shape as `read_records`, for `matrix --matches`.
 fn read_match_records(path: &PathBuf, format: FormatArg) -> Result<MatchRecordIter, VeridictError> {
+    let reader = open_input(path)?;
+    Ok(match format {
+        FormatArg::Jsonl => Box::new(input::parse_jsonl(reader)),
+        FormatArg::Csv => Box::new(input::parse_csv(reader)),
+    })
+}
+
+type VerifyRunRecordIter =
+    Box<dyn Iterator<Item = Result<(usize, veridict::verify_run::VerifyRunRecord), VeridictError>>>;
+
+/// Same lazy-parsing shape as `read_records`/`read_match_records`; `run_verify_run` still
+/// collects the result into a `Vec` (see its own doc) since `verify_run::run`'s checks are
+/// cross-record, unlike `compare`/`sprt`/`matrix`'s incremental tallies.
+fn read_verify_run_records(
+    path: &PathBuf,
+    format: FormatArg,
+) -> Result<VerifyRunRecordIter, VeridictError> {
     let reader = open_input(path)?;
     Ok(match format {
         FormatArg::Jsonl => Box::new(input::parse_jsonl(reader)),

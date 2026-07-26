@@ -1,0 +1,4 @@
+manifest_schema_version = 1
+experiment_id = "exp-1"
+binary_sha256 = "b1"
+schedule = ["op0", "op1"]

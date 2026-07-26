@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/experiment-envelope.schema.json",
+  "title": "Sekirei experiment envelope",
+  "description": "A shared, cross-repo contract of opaque identifiers/hashes/seeds - not veridict-specific. Meant to be vendored verbatim (copied, not imported as a library) into each of a pipeline's tools (e.g. a teacher-observation generator, a stability/calibration tool, a gate-priority predictor, and veridict as the final judgment layer), so a downstream tool can join a verdict back to its own provenance store without any tool needing to understand what another tool's identifiers mean. veridict treats every field here as an opaque string/scalar: compared for consistency (equality/no-drift) where a check exists for it, never computed, never interpreted, never assigned domain meaning. `manifest.schema.json` embeds these same field names directly (Sekirei's veridict manifest is a flat document, not a nested one) plus its own additional, non-envelope fields - see that file. A repo wanting fields beyond this contract should define its own extended schema alongside a verbatim copy of this one, not modify this file in place.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "experiment_id": {
+      "type": ["string", "null"],
+      "description": "Opaque identifier for this experiment/run. veridict's verify-run compares this against every record's own experiment_id to catch other-run contamination."
+    },
+    "candidate_id": {
+      "type": ["string", "null"],
+      "description": "Opaque identifier for the candidate side. Echoed, not interpreted."
+    },
+    "baseline_id": {
+      "type": ["string", "null"],
+      "description": "Opaque identifier for the baseline side. Echoed, not interpreted."
+    },
+    "lineage_id": {
+      "type": ["string", "null"],
+      "description": "Opaque identifier linking this experiment back to upstream training/checkpoint provenance. Echoed, not interpreted or stored beyond this report."
+    },
+    "dataset_sha256": {
+      "type": ["string", "null"],
+      "description": "Opaque hash of the dataset used. veridict's verify-run compares this against any per-record dataset_sha256 for drift, never computes it."
+    },
+    "split_sha256": {
+      "type": ["string", "null"],
+      "description": "Opaque hash of the train/eval split. Passthrough only - veridict has no per-record counterpart to check this against yet."
+    },
+    "teacher_manifest_sha256": {
+      "type": ["string", "null"],
+      "description": "Opaque hash of the upstream teacher-observation manifest. Passthrough only - veridict has no per-record counterpart to check this against yet."
+    },
+    "binary_sha256": {
+      "type": ["string", "null"],
+      "description": "Opaque hash of the binary under test. veridict's verify-run compares this against any per-record binary_sha256 for drift, never opens or hashes the actual file."
+    },
+    "weight_sha256": {
+      "type": ["string", "null"],
+      "description": "Opaque hash of the model/engine weights under test. Same drift-only treatment as binary_sha256."
+    },
+    "init_seed": {
+      "type": ["integer", "null"],
+      "description": "Opaque scalar seed. Never arithmetic'd by veridict, only echoed."
+    },
+    "split_seed": {
+      "type": ["integer", "null"],
+      "description": "Opaque scalar seed. Never arithmetic'd by veridict, only echoed."
+    },
+    "shuffle_seed": {
+      "type": ["integer", "null"],
+      "description": "Opaque scalar seed. Never arithmetic'd by veridict, only echoed."
+    },
+    "schema_version": {
+      "type": ["string", "null"],
+      "description": "The envelope contract's own version tag - distinct from veridict's own manifest_schema_version (which versions manifest.schema.json's veridict-specific fields) and from a report's own schema_version (which versions that report's output shape). Pure passthrough; veridict never validates this value."
+    },
+    "validity": {
+      "type": ["string", "null"],
+      "enum": ["valid", "invalid", null],
+      "description": "Pure passthrough echo of whatever upstream stage populated this - e.g. a prior gate's own validity claim. Deliberately never feeds veridict's own computed validity in a VerifyRunReport (that field is purely `violations.is_empty()`); this is someone else's claim, not veridict's."
+    }
+  }
+}

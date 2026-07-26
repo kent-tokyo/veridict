@@ -1,0 +1,133 @@
+{
+  "checks_skipped": [
+    {
+      "check": "environment_consistency",
+      "field": "dataset_sha256",
+      "reason": "manifest.dataset_sha256 not declared"
+    },
+    {
+      "check": "environment_consistency",
+      "field": "weight_sha256",
+      "reason": "manifest.weight_sha256 not declared"
+    },
+    {
+      "check": "environment_consistency",
+      "field": "config_sha256",
+      "reason": "manifest.config_sha256 not declared"
+    }
+  ],
+  "crashes": 1,
+  "failure_breakdown": {
+    "baseline": {
+      "crash": 1,
+      "invalid": 0,
+      "timeout": 0
+    },
+    "candidate": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    }
+  },
+  "invalid": 0,
+  "manifest": {
+    "baseline_id": null,
+    "binary_sha256": "b1",
+    "candidate_id": null,
+    "config_sha256": null,
+    "dataset_sha256": null,
+    "experiment_id": "exp-1",
+    "init_seed": null,
+    "lineage_id": null,
+    "manifest_schema_version": 1,
+    "schedule": [
+      "op0",
+      "op1"
+    ],
+    "schema_version": null,
+    "shuffle_seed": null,
+    "split_seed": null,
+    "split_sha256": null,
+    "teacher_manifest_sha256": null,
+    "validity": null,
+    "weight_sha256": null
+  },
+  "paired_count": 1,
+  "reason": "7 structural violation(s) found; see `violations`.",
+  "record_count": 4,
+  "schema_version": 1,
+  "timeouts": 0,
+  "validity": "invalid",
+  "violation_count": 7,
+  "violations": [
+    {
+      "check": "global_index_uniqueness",
+      "detail": "global_index 1 appears on more than one record",
+      "field": "global_index",
+      "id": null,
+      "lines": [
+        1,
+        2
+      ]
+    },
+    {
+      "check": "role_consistency",
+      "detail": "pair 'op0' has the same role ('a') on both records; a valid pair requires two different roles",
+      "field": "role",
+      "id": "op0",
+      "lines": [
+        1,
+        2
+      ]
+    },
+    {
+      "check": "pair_completeness",
+      "detail": "id 'op1' appears 1 time(s); pairing requires exactly 2 records per id",
+      "field": "id",
+      "id": "op1",
+      "lines": [
+        3
+      ]
+    },
+    {
+      "check": "environment_consistency",
+      "detail": "record's binary_sha256 'different' does not match manifest's declared 'b1'",
+      "field": "binary_sha256",
+      "id": "contaminant",
+      "lines": [
+        4
+      ]
+    },
+    {
+      "check": "experiment_contamination",
+      "detail": "record's experiment_id 'WRONG' does not match manifest's 'exp-1'",
+      "field": "experiment_id",
+      "id": "contaminant",
+      "lines": [
+        4
+      ]
+    },
+    {
+      "check": "pair_completeness",
+      "detail": "id 'contaminant' appears 1 time(s); pairing requires exactly 2 records per id",
+      "field": "id",
+      "id": "contaminant",
+      "lines": [
+        4
+      ]
+    },
+    {
+      "check": "schedule_order",
+      "detail": "actual gated pair order diverges from manifest.schedule at position 2 (expected <end of list>, got 'contaminant'); full expected order: [\"op0\", \"op1\"], full actual order: [\"op0\", \"op1\", \"contaminant\"]",
+      "field": "schedule",
+      "id": null,
+      "lines": []
+    }
+  ],
+  "violations_truncated": false,
+  "warnings": [
+    "environment_consistency: manifest.dataset_sha256 not declared",
+    "environment_consistency: manifest.weight_sha256 not declared",
+    "environment_consistency: manifest.config_sha256 not declared"
+  ]
+}

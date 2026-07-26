@@ -1,0 +1,4 @@
+{"id":"op0","global_index":1,"role":"a","experiment_id":"exp-1","binary_sha256":"b1"}
+{"id":"op0","global_index":1,"role":"a","experiment_id":"exp-1","binary_sha256":"b1"}
+{"id":"op1","global_index":3,"role":"a","experiment_id":"exp-1","binary_sha256":"b1"}
+{"id":"contaminant","global_index":4,"role":"a","experiment_id":"WRONG","binary_sha256":"different","baseline_status":"crash"}

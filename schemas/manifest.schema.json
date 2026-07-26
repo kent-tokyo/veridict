@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/manifest.schema.json",
+  "title": "veridict verify-run manifest",
+  "description": "manifest.toml's full shape, the first argument to `veridict verify-run manifest.toml games.jsonl`. Embeds experiment-envelope.schema.json's 14 shared fields directly (this is a flat document, not nested - Sekirei's other tools vendor experiment-envelope.schema.json's field names verbatim, this file additionally declares veridict-specific fields for verify-run's own checks). Every field is an opaque declared expectation - veridict compares it against games.jsonl's per-record values (see verify-run-record.schema.json), it never computes, opens, or interprets any of them itself. additionalProperties is false deliberately: a typo'd key here must not silently skip the check it was meant to enable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_schema_version"],
+  "properties": {
+    "manifest_schema_version": {
+      "type": "integer",
+      "description": "Versions this manifest's own (non-envelope) shape. A mismatch against the version this veridict build supports is a hard error (exit 3, no report produced) - distinct from a violation, since an unrecognized manifest shape can't be safely checked at all. Currently 1."
+    },
+    "experiment_id": {
+      "type": ["string", "null"],
+      "description": "See experiment-envelope.schema.json. Drives the experiment_contamination check."
+    },
+    "candidate_id": { "type": ["string", "null"], "description": "See experiment-envelope.schema.json." },
+    "baseline_id": { "type": ["string", "null"], "description": "See experiment-envelope.schema.json." },
+    "lineage_id": { "type": ["string", "null"], "description": "See experiment-envelope.schema.json." },
+    "dataset_sha256": {
+      "type": ["string", "null"],
+      "description": "See experiment-envelope.schema.json. Drives one independent sub-check of environment_consistency."
+    },
+    "split_sha256": { "type": ["string", "null"], "description": "See experiment-envelope.schema.json. Passthrough only." },
+    "teacher_manifest_sha256": { "type": ["string", "null"], "description": "See experiment-envelope.schema.json. Passthrough only." },
+    "binary_sha256": {
+      "type": ["string", "null"],
+      "description": "See experiment-envelope.schema.json. Drives one independent sub-check of environment_consistency."
+    },
+    "weight_sha256": {
+      "type": ["string", "null"],
+      "description": "See experiment-envelope.schema.json. Drives one independent sub-check of environment_consistency."
+    },
+    "init_seed": { "type": ["integer", "null"], "description": "See experiment-envelope.schema.json." },
+    "split_seed": { "type": ["integer", "null"], "description": "See experiment-envelope.schema.json." },
+    "shuffle_seed": { "type": ["integer", "null"], "description": "See experiment-envelope.schema.json." },
+    "validity": {
+      "type": ["string", "null"],
+      "enum": ["valid", "invalid", null],
+      "description": "See experiment-envelope.schema.json. Pure passthrough echo; never feeds this run's own computed validity."
+    },
+    "schema_version": {
+      "type": ["string", "null"],
+      "description": "The shared envelope contract's own version tag (see experiment-envelope.schema.json) - distinct from manifest_schema_version above."
+    },
+    "config_sha256": {
+      "type": ["string", "null"],
+      "description": "Not part of the shared envelope - veridict-specific. Opaque hash of whatever run configuration doesn't live in a hashed artifact file (time control, thread count, search depth, etc.). Drives one independent sub-check of environment_consistency, closing the 'no mid-run config change' check."
+    },
+    "schedule": {
+      "type": ["array", "null"],
+      "items": { "type": "string" },
+      "description": "Declared first-occurrence order of gated pair ids. Drives the schedule_order check against games.jsonl's actual order (excluding any record with include_in_gate: false)."
+    }
+  }
+}

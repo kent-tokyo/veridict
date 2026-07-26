@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/verify-run-record.schema.json",
+  "title": "veridict verify-run record",
+  "description": "One JSONL line (or CSV row) of games.jsonl, the second argument to `veridict verify-run manifest.toml games.jsonl`. A genuinely separate schema from input-record.schema.json: verify-run computes no metric (no baseline/candidate/result numeric fields), and needs several fields input-record.schema.json has no room for. Every field is optional at the schema level; a check whose backing field never appears anywhere in the file is honestly reported as skipped (VerifyRunReport.checks_skipped), not silently passed. additionalProperties is NOT restricted here (unlike manifest.schema.json): an unknown key on a data record is harmless extra caller metadata.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": ["string", "null"],
+      "description": "Pairing key. A non-paired record (e.g. a burn-in game with no partner) simply omits it. Drives pair_completeness/role_consistency."
+    },
+    "global_index": {
+      "type": ["integer", "null"],
+      "description": "Caller-declared per-record sequence number, unique across the whole run. Drives global_index_uniqueness."
+    },
+    "role": {
+      "type": ["string", "null"],
+      "description": "Opaque orientation tag - the domain-agnostic stand-in for 'color/side reversed within a pair' (e.g. which side moved first in a chess/shogi engine match, expressed as an opaque caller-defined value, not as 'white'/'black'). The two records sharing an id must declare two different role values. Drives role_consistency."
+    },
+    "include_in_gate": {
+      "type": ["boolean", "null"],
+      "description": "null/true = this record counts toward the gated schedule order; false = a burn-in/warm-up record, excluded from schedule_order's comparison (but still subject to pair_completeness/role_consistency if it carries an id)."
+    },
+    "experiment_id": {
+      "type": ["string", "null"],
+      "description": "Compared against manifest.experiment_id by experiment_contamination to catch other-run contamination."
+    },
+    "dataset_sha256": {
+      "type": ["string", "null"],
+      "description": "Compared against manifest.dataset_sha256 by environment_consistency for mid-run drift."
+    },
+    "binary_sha256": {
+      "type": ["string", "null"],
+      "description": "Compared against manifest.binary_sha256 by environment_consistency for mid-run drift."
+    },
+    "weight_sha256": {
+      "type": ["string", "null"],
+      "description": "Compared against manifest.weight_sha256 by environment_consistency for mid-run drift."
+    },
+    "config_sha256": {
+      "type": ["string", "null"],
+      "description": "Compared against manifest.config_sha256 by environment_consistency for mid-run drift."
+    },
+    "baseline_status": {
+      "type": ["string", "null"],
+      "enum": ["ok", "timeout", "crash", "invalid", null],
+      "description": "Same TrialStatus vocabulary as input-record.schema.json. Tallied into failure_breakdown/timeouts/crashes/invalid; 'protocol error' maps onto invalid rather than a separate domain-specific status."
+    },
+    "candidate_status": {
+      "type": ["string", "null"],
+      "enum": ["ok", "timeout", "crash", "invalid", null]
+    }
+  }
+}

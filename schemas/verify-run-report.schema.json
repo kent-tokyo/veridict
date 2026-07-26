@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kent-tokyo/veridict/schemas/verify-run-report.schema.json",
+  "title": "veridict verify-run report",
+  "description": "JSON output of `veridict verify-run manifest.toml games.jsonl`. Not verdict-shaped (no pass/fail/inconclusive) - its own binary judgment instead, reusing the existing Validity enum directly: valid iff violations is empty. Exit code 0 for valid, 1 for invalid (one or more violations found); exit 3 (no report produced) is reserved for a genuine parse/config error - malformed manifest.toml, an unsupported manifest_schema_version, a manifest declaring nothing to verify, malformed games.jsonl, or empty input.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "validity",
+    "reason",
+    "violations",
+    "violation_count",
+    "violations_truncated",
+    "checks_skipped",
+    "warnings",
+    "record_count",
+    "paired_count",
+    "timeouts",
+    "crashes",
+    "invalid",
+    "failure_breakdown",
+    "manifest"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Same REPORT_SCHEMA_VERSION every other report uses - stays 1 across additive changes."
+    },
+    "validity": {
+      "type": "string",
+      "enum": ["valid", "invalid"],
+      "description": "Valid iff violations is empty. No verdict-shaped three-way concept applies here - a structural invariant either holds or it doesn't, there's no 'inconclusive'."
+    },
+    "reason": { "type": "string" },
+    "violations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/violation" },
+      "description": "Sorted deterministically, then capped at 500 entries - see violation_count/violations_truncated for the exact total when this list was cut short."
+    },
+    "violation_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Exact total violation count, even when violations above was truncated. validity/reason are derived from this, never from violations.length."
+    },
+    "violations_truncated": {
+      "type": "boolean",
+      "description": "true iff violation_count exceeds the 500-entry cap on violations above, i.e. that array is a deterministic (first-500-after-sort) sample, not the full list."
+    },
+    "checks_skipped": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/skipped_check" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-readable mirror of checks_skipped, same 'one computation, two representations' idiom Report.data_quality/warnings already use."
+    },
+    "record_count": { "type": "integer", "minimum": 0 },
+    "paired_count": { "type": "integer", "minimum": 0, "description": "Count of id-groups with exactly 2 records, excluding burn-in pairs (either record marked include_in_gate: false) - the formal, gated pair count. Distinct from sprt-report.schema.json's paired_count, which counts pairs a pentanomial LLR walk actually analyzed." },
+    "timeouts": { "type": "integer", "minimum": 0 },
+    "crashes": { "type": "integer", "minimum": 0 },
+    "invalid": { "type": "integer", "minimum": 0 },
+    "failure_breakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate"],
+      "properties": {
+        "baseline": { "$ref": "#/$defs/failure_counts" },
+        "candidate": { "$ref": "#/$defs/failure_counts" }
+      }
+    },
+    "manifest": {
+      "description": "The whole manifest.toml, echoed back verbatim - see manifest.schema.json.",
+      "$ref": "manifest.schema.json"
+    }
+  },
+  "$defs": {
+    "failure_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timeout", "crash", "invalid"],
+      "properties": {
+        "timeout": { "type": "integer", "minimum": 0 },
+        "crash": { "type": "integer", "minimum": 0 },
+        "invalid": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check", "id", "lines", "field", "detail"],
+      "properties": {
+        "check": {
+          "type": "string",
+          "enum": [
+            "pair_completeness",
+            "global_index_uniqueness",
+            "role_consistency",
+            "schedule_order",
+            "experiment_contamination",
+            "environment_consistency"
+          ]
+        },
+        "id": { "type": ["string", "null"] },
+        "lines": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "description": "1+ offending line numbers - plural because most violations here are relational (implicating two or more records), unlike a single-line schema-mismatch error."
+        },
+        "field": { "type": ["string", "null"] },
+        "detail": { "type": "string" }
+      }
+    },
+    "skipped_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["check", "field", "reason"],
+      "properties": {
+        "check": { "type": "string" },
+        "field": { "type": ["string", "null"] },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

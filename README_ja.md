@@ -511,6 +511,108 @@ elo0/elo1/alpha/betaでどちらの端点よりも約1.6倍、`tests/calibration
 計算式・出典・*測定済みの*オーバーシュートバイアス(単なる引用ではなく)については
 [`docs/metrics_ja.md`](docs/metrics_ja.md) の `power --sprt` セクションを参照してください。
 
+## Verify run
+
+`veridict compare`/`sprt` が判定するのは run の*統計*であり、その統計の計算元となった生の入力
+自体が構造的に健全かどうかを確認する手段はありません。`veridict verify-run` はそのギャップを
+埋めます: 宣言された `manifest.toml` と実際の `games.jsonl` を受け取り、同じファイルから計算
+される判定を信頼する*前に*、ペアリング・順序・混入・不透明な識別子の一貫性をチェックします。
+
+```console
+$ veridict verify-run examples/manifest.toml examples/games_with_contamination.jsonl
+{
+  "schema_version": 1,
+  "validity": "invalid",
+  "reason": "3 structural violation(s) found; see `violations`.",
+  "violations": [
+    {
+      "check": "experiment_contamination",
+      "id": "stray-op9",
+      "lines": [5],
+      "field": "experiment_id",
+      "detail": "record's experiment_id 'exp-2025-11-02-old-run' does not match manifest's 'exp-2026-07-26-001'"
+    },
+    ...
+  ],
+  ...
+}
+```
+
+**自己整合性のみを見ます。** `dataset_sha256`/`binary_sha256`/`weight_sha256`/`config_sha256`/
+`experiment_id`(および後述の共有envelopeの残りのフィールド)を含むすべてのハッシュ・識別子
+フィールドは、呼び出し側が与える不透明な文字列です: `verify-run` は `manifest.toml` が宣言する
+値と、`games.jsonl` の各レコードが繰り返す値を比較し、ドリフトがないかを見るだけです。実際の
+バイナリ・重み・コーパス・設定ファイルを開いたりハッシュを計算したり解釈したりすることは一切
+ありません - それは呼び出し側の責任のままです。これはこのプロジェクトのドメイン非依存な
+「結果を判定するが、結果を生成しない」という設計方針([`docs/research-map_ja.md`](docs/research-map_ja.md)
+参照)に一致します。
+
+6つのチェックが入力全体に対して無条件に実行され、最初の1件で止まらずに*すべて*の不整合を
+収集します:
+
+* **`pair_completeness`** - `games.jsonl` に現れるすべての `id` は、ちょうど2レコードに出現
+  しなければなりません。
+* **`global_index_uniqueness`** - 呼び出し側が宣言する `global_index` フィールドは重複して
+  はいけません。
+* **`role_consistency`** - 同じ `id` を共有する2レコードは、異なる2つの `role` 値を宣言しな
+  ければなりません(「ペア内での色/先後反転」のドメイン非依存な代替表現です - `role` が何を
+  意味するかは呼び出し側の規約次第であり、veridict自身は関知しません)。また、run全体を通じて
+  使われる `role` のペアリングの組み合わせは1種類でなければなりません。
+* **`schedule_order`** - ゲート対象(`include_in_gate != false`)のペアidの実際の初出順序は、
+  `manifest.toml` が宣言する `schedule` と一致しなければなりません。
+* **`experiment_contamination`** - レコードの `experiment_id`(存在する場合)はmanifestの
+  ものと一致しなければなりません - 別のrunのゲームが混入していないかを検出します。
+* **`environment_consistency`** - `dataset_sha256`/`binary_sha256`/`weight_sha256`/
+  `config_sha256` を、それぞれ独立に検証します: レコードの値(存在する場合)はmanifestが
+  宣言する値と一致しなければなりません - バイナリ・重み・データセットの入れ替わりや、
+  run途中の設定変更を検出します。
+
+裏付けとなるフィールドがmanifest/レコードのどこにも一度も現れないチェックは、正直に
+`checks_skipped`(`warnings` にも反映)として報告されます - 黙って通過させる(誤った安心感を
+与える)ことも、ハードエラーにする(すべてのオプションフィールドが揃うまでコマンドが使えなく
+なる)こともありません。`baseline_status`/`candidate_status`(他のすべてのサブコマンドと同じ
+`ok`/`timeout`/`crash`/`invalid` の語彙)は、可視化のために `failure_breakdown`/`timeouts`/
+`crashes`/`invalid` に集計されるだけで、上限との照合はされません - それは `compare`/`sprt` の
+`--max-timeouts`/`--max-crashes`/`--max-invalid` の役割です。
+
+`report.paired_count` は*正式な、ゲート対象の*ペア数です: ちょうど2レコードの `id`-グループの
+うち、burn-in ペア(いずれかのレコードが `include_in_gate: false`)を除いたものです - burn-in
+ペアは `pair_completeness`/`role_consistency` では他のペアと同様にチェックされますが、この数値
+には数えられず、ゲート対象runのペアリング規約にも投票しません。
+
+`violations` は決定的な順序でソートされたのち500件で打ち切られます - 深刻に破損したrunが入力
+全体に比例した量のレポートを生成しないようにするためです。`violation_count` は常に正確な合計を
+保持し、上の配列がサンプルにすぎない(全件ではない)場合は `violations_truncated` が `true` に
+なります。
+
+**終了コードは通常の判定ベースのものではなく、`verify-run` 独自のものです**: 不整合が見つから
+なければ `0`、1件以上見つかれば `1`(レポートの `validity` は `"invalid"` - 構造的な不変条件は
+成立するかしないかのどちらかで「inconclusive」は存在しないため、`verdict` の3値の形は
+ここには当てはまりません)、report自体が生成できない本当のパース/設定エラー(不正な
+`manifest.toml`、未対応の `manifest_schema_version`、不正な `games.jsonl`、空の入力、または
+上記3つのmanifest依存チェックが検証すべき対象を何も宣言していないmanifest)の場合にのみ `3`
+です。
+
+**共有experiment envelope。** `experiment_id`/`candidate_id`/`baseline_id`/`lineage_id`/
+`dataset_sha256`/`split_sha256`/`teacher_manifest_sha256`/`binary_sha256`/`weight_sha256`/
+`init_seed`/`split_seed`/`shuffle_seed`/`schema_version`/`validity` は複数リポジトリにまたがる
+共有契約を構成します([`schemas/experiment-envelope.schema.json`](schemas/experiment-envelope.schema.json)
+参照)。veridictを取り巻くツール群のどれもがこのファイルをそのまま(verbatim)vendorすることを
+想定しており、あるツールが別のツールの識別子の意味を理解する必要なく、下流のツールが判定結果を
+自身のプロビナンスストアと突き合わせられるようにします。`manifest.toml` の全体像(envelopeの
+フィールドに加えて、共有envelopeには含まれない `config_sha256`/`schedule` を持つ)は
+[`schemas/manifest.schema.json`](schemas/manifest.schema.json)、`verify-run` 用の
+`games.jsonl` のレコード単位のスキーマは
+[`schemas/verify-run-record.schema.json`](schemas/verify-run-record.schema.json) です
+([`schemas/input-record.schema.json`](schemas/input-record.schema.json) とは別のスキーマです -
+`verify-run` は指標を一切計算しないため `baseline`/`candidate`/`result` フィールドは不要で、
+他のサブコマンドには存在しない複数のフィールドが必要になります)。
+
+このコードベースの他の箇所と同じ注意点があります: 引用符付きフィールドに改行が含まれる場合、
+CSVの行番号は物理的なファイル行ではなくレコードのインデックスになります - 「どのレコードが
+悪いのかを指し示す」ことがこのコマンドの提供価値そのものなので、`games.jsonl` にはJSONLを
+使うことを推奨します。
+
 ## ペアテストケース(paired testcases)
 
 `--paired-by-id`(`compare`、`sprt`、`matrix` で使用可能)は、同じ `id` を持つ2つのレコードを「同じテストケースを2回実行したもの」(例: そのテストケース固有のバイアスを打ち消すために役割を入れ替えて再実行したもの)とみなし、2つの独立した観測ではなく1つの正味の観測として結合します:

@@ -1,0 +1,49 @@
+{
+  "checks_skipped": [],
+  "crashes": 0,
+  "failure_breakdown": {
+    "baseline": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    },
+    "candidate": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 1
+    }
+  },
+  "invalid": 0,
+  "manifest": {
+    "baseline_id": "base-1",
+    "binary_sha256": "b1",
+    "candidate_id": "cand-1",
+    "config_sha256": "c1",
+    "dataset_sha256": "d1",
+    "experiment_id": "exp-1",
+    "init_seed": null,
+    "lineage_id": null,
+    "manifest_schema_version": 1,
+    "schedule": [
+      "op0",
+      "op1"
+    ],
+    "schema_version": null,
+    "shuffle_seed": null,
+    "split_seed": null,
+    "split_sha256": null,
+    "teacher_manifest_sha256": null,
+    "validity": null,
+    "weight_sha256": "w1"
+  },
+  "paired_count": 2,
+  "reason": "No structural violations found.",
+  "record_count": 4,
+  "schema_version": 1,
+  "timeouts": 1,
+  "validity": "valid",
+  "violation_count": 0,
+  "violations": [],
+  "violations_truncated": false,
+  "warnings": []
+}
