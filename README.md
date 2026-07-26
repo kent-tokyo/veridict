@@ -454,8 +454,16 @@ naming the breached cap. A multi-metric `compare` run's overall `validity`/`prom
 
 `veridict sprt` is a separate mode from `compare`: instead of an effect
 size and a confidence interval checked against a threshold, it accumulates
-a log-likelihood ratio and stops as soon as the evidence crosses one of two
-boundaries derived from `--alpha`/`--beta`. `pass` means "confident the
+a log-likelihood ratio and becomes decisive as soon as the evidence
+crosses one of two boundaries derived from `--alpha`/`--beta`. For
+`wald`/`trinomial` this means: re-invoke `sprt` on a growing input and it
+recomputes the LLR fresh from the whole file each time, so a caller
+stopping as soon as a call returns `pass`/`fail` gets sequential-test
+behavior across that *sequence* of invocations. `--sprt-variant
+pentanomial` goes further and needs no such caller discipline: a *single*
+call replays completed pairs in the order they complete and stops
+internally at the first pair that decides, so feeding it a file that
+keeps going past that point changes nothing (see below). `pass` means "confident the
 candidate is at least `--elo1` points stronger"; `fail` means "confident
 it's at most `--elo0` points stronger"; `inconclusive` means "keep
 collecting data". `--alpha`/`--beta` are its actual guaranteed false
@@ -491,8 +499,12 @@ positive/negative rates, not tunable knobs on a report - there's no
   hurts it in the other) - see [`docs/metrics.md`](docs/metrics.md) for why
   that correlation, not just draw-awareness, is what lets it converge in
   fewer pairs on real paired-game data. The report adds `sprt_variant`,
-  `pentanomial_counts` (the 5-bucket breakdown), `raw_trial_count`, and
-  `paired_count`.
+  `pentanomial_counts` (the 5-bucket breakdown), `raw_trial_count`,
+  `paired_count` (pairs actually analyzed, up to the sequential stopping
+  point), `available_paired_count` (total pairs present in the input),
+  `stopping_pair_count`/`stopping_reason` (where and why the walk
+  stopped), and `ignored_pairs_after_stop` (pairs present in the input but
+  completed after the stopping point, and so never analyzed).
 
 See [`docs/metrics.md`](docs/metrics.md) for the full mechanics of all
 three variants, including the BayesElo/logistic-Elo unit conversion.
@@ -501,6 +513,27 @@ three variants, including the BayesElo/logistic-Elo unit conversion.
 `report-only`/`exclude`/`loss` semantics) - applies identically across all three
 `--sprt-variant` choices, including `pentanomial`: a `loss`-synthesized outcome nets
 against its pair partner the same way any other outcome would.
+
+`--sprt-variant pentanomial` also accepts:
+
+* **`--min-paired-ids`** (must be `>= 1`) - the walk never even evaluates a boundary crossing
+  before this many pairs have completed, so an early crossing on too little data can't be
+  "remembered" once the minimum is reached: the decision is always the LLR at whichever pair the
+  walk actually stops on, using every pair completed up to and including that point. Below the
+  minimum, `verdict` is `inconclusive` regardless of where the accumulated LLR sits; `validity` is
+  untouched (this is "not enough data yet," not "the run was corrupt").
+* **`--max-paired-ids`** (must be `>= --min-paired-ids` when both are given) - if the walk reaches
+  this many completed pairs without a boundary crossing, it stops there with an `inconclusive`
+  verdict (no truncated-SPRT decision rule) and `reason`/`stopping_reason` note the cap was hit.
+  Pairs completed after this point, even if present in the input, never affect the verdict, LLR,
+  or bucket counts.
+* **`--require-complete-pairs`** - extends `pentanomial`'s existing unconditional "every id
+  appears exactly twice, no exceptions" pairing to `wald`/`trinomial` too (requires
+  `--paired-by-id`; a lone id is normally tolerated there as an ordinary unpaired sample). A
+  documented no-op for `pentanomial` itself, which is already this strict regardless of the flag.
+
+The report echoes `--min-paired-ids`/`--max-paired-ids`/`--require-complete-pairs` as
+`min_paired_ids`, `max_paired_ids`, and `require_complete_pairs`.
 
 ## Comparison matrix
 

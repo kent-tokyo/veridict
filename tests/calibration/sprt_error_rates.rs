@@ -165,6 +165,9 @@ fn simulate_trinomial_stream(
             SprtVariant::Trinomial,
             false,
             FailurePolicy::ReportOnly,
+            false,
+            None,
+            None,
         )
         .unwrap();
         if report.verdict != Verdict::Inconclusive {
@@ -338,10 +341,14 @@ fn outcome_record(id: Option<&str>, outcome: Outcome) -> Record {
     }
 }
 
-/// Grows a simulated stream of correlated pairs, checking `sprt::run` with
-/// `SprtVariant::Pentanomial` every `CHECK_STRIDE` *pairs* (not games) - same
-/// striding-for-tractable-runtime rationale as `simulate_trinomial_stream` above. Returns
-/// `(verdict_at_stop, pairs_used)`.
+/// Generates `max_pairs` correlated pairs up front and calls `sprt::run` exactly *once* -
+/// unlike `simulate_trinomial_stream` above, there's no need to grow the stream in strided
+/// prefixes and re-check: for `SprtVariant::Pentanomial`, `sprt::run` already replays pairs one
+/// at a time internally (see its module doc), so a single call over the full stream yields the
+/// exact stopping pair, not a strided approximation of one. `min_paired_ids` (when `Some`) is
+/// passed straight through and folded into that same internal walk. Returns
+/// `(verdict, pairs_analyzed)` - `pairs_analyzed` is `report.paired_count`: the exact stopping
+/// pair when decisive, or `max_pairs` when the walk consumed the whole stream without deciding.
 fn simulate_pentanomial_pair_stream(
     rng: &mut StdRng,
     base_p: f64,
@@ -349,36 +356,33 @@ fn simulate_pentanomial_pair_stream(
     elo0: f64,
     elo1: f64,
     max_pairs: usize,
+    min_paired_ids: Option<u64>,
 ) -> (Verdict, usize) {
     let config = SprtConfig::new(elo0, elo1, ALPHA, BETA).unwrap();
     let mut stream: Vec<Result<(usize, Record), VeridictError>> = Vec::with_capacity(max_pairs * 2);
-    let mut pairs = 0;
-    while pairs < max_pairs {
-        for _ in 0..CHECK_STRIDE {
-            if pairs >= max_pairs {
-                break;
-            }
-            let id = format!("pair{pairs}");
-            let (g1, g2) = simulate_correlated_pair(rng, base_p, bias);
-            let l1 = stream.len() + 1;
-            stream.push(Ok((l1, outcome_record(Some(&id), g1))));
-            let l2 = stream.len() + 1;
-            stream.push(Ok((l2, outcome_record(Some(&id), g2))));
-            pairs += 1;
-        }
-        let report = run(
-            stream.iter().map(|r| r.as_ref().unwrap()).cloned().map(Ok),
-            &config,
-            SprtVariant::Pentanomial,
-            true,
-            FailurePolicy::ReportOnly,
-        )
-        .unwrap();
-        if report.verdict != Verdict::Inconclusive {
-            return (report.verdict, pairs);
-        }
+    for i in 0..max_pairs {
+        let id = format!("pair{i}");
+        let (g1, g2) = simulate_correlated_pair(rng, base_p, bias);
+        let l1 = stream.len() + 1;
+        stream.push(Ok((l1, outcome_record(Some(&id), g1))));
+        let l2 = stream.len() + 1;
+        stream.push(Ok((l2, outcome_record(Some(&id), g2))));
     }
-    (Verdict::Inconclusive, max_pairs)
+    let report = run(
+        stream.iter().map(|r| r.as_ref().unwrap()).cloned().map(Ok),
+        &config,
+        SprtVariant::Pentanomial,
+        true,
+        FailurePolicy::ReportOnly,
+        false,
+        min_paired_ids,
+        None,
+    )
+    .unwrap();
+    (
+        report.verdict,
+        report.paired_count.unwrap_or(max_pairs as u64) as usize,
+    )
 }
 
 // Pentanomial's false-accept-H1 rate under true H0, on data with real within-pair correlation
@@ -395,7 +399,7 @@ fn pentanomial_false_accept_h1_rate_tracks_alpha_under_true_h0_with_correlated_p
     let max_pairs = 1500;
     let false_accepts = (0..simulations)
         .filter(|_| {
-            simulate_pentanomial_pair_stream(&mut rng, base_p, bias, elo0, elo1, max_pairs).0
+            simulate_pentanomial_pair_stream(&mut rng, base_p, bias, elo0, elo1, max_pairs, None).0
                 == Verdict::Pass
         })
         .count();
@@ -404,6 +408,55 @@ fn pentanomial_false_accept_h1_rate_tracks_alpha_under_true_h0_with_correlated_p
         rate < ALPHA * 1.5,
         "pentanomial false-accept-H1 rate {rate:.4} too high for alpha={ALPHA} under true H0"
     );
+}
+
+// The actual requirement `--min-paired-ids` exists for, on realistic (randomly generated,
+// correlated) data rather than the hand-constructed fixture `sprt.rs`'s own unit tests use: even
+// though the same seeded stream's LLR crosses a boundary well before `min_paired_ids` pairs have
+// completed (confirmed below via the ungated call), a single gated `sprt::run` call over that
+// same stream never reports a decisive verdict before `min_paired_ids` pairs - and once the
+// minimum is satisfied, reaches the same verdict the ungated call did.
+#[test]
+fn no_prefix_below_min_paired_ids_is_ever_decisive() {
+    let (elo0, elo1) = (0.0, 10.0);
+    let base_p = 0.98; // strongly candidate-favored: crosses H1 within the first few checkpoints
+    let bias = 0.0;
+    let max_pairs = 600;
+    let min_paired_ids = 300u64;
+
+    // First, confirm the premise on this exact seeded stream: ungated, it really does cross a
+    // boundary well before `min_paired_ids` pairs - otherwise the assertion below would hold
+    // vacuously (nothing to gate).
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (ungated_verdict, ungated_pairs) =
+        simulate_pentanomial_pair_stream(&mut rng, base_p, bias, elo0, elo1, max_pairs, None);
+    assert_ne!(ungated_verdict, Verdict::Inconclusive);
+    assert!(
+        (ungated_pairs as u64) < min_paired_ids,
+        "test setup didn't produce an early crossing (crossed at {ungated_pairs} pairs) - \
+         strengthen base_p so the premise actually holds"
+    );
+
+    // Same seed => the same underlying pair outcomes are drawn in the same order; only the gate
+    // differs, isolating its effect.
+    let mut rng = StdRng::seed_from_u64(SEED);
+    let (gated_verdict, gated_pairs) = simulate_pentanomial_pair_stream(
+        &mut rng,
+        base_p,
+        bias,
+        elo0,
+        elo1,
+        max_pairs,
+        Some(min_paired_ids),
+    );
+    assert!(
+        (gated_pairs as u64) >= min_paired_ids,
+        "gated stream decided at {gated_pairs} pairs, below --min-paired-ids {min_paired_ids} - \
+         an early LLR crossing was allowed to decide the verdict"
+    );
+    // Once the minimum is satisfied, the gate defers to the same decision the LLR already
+    // reached - it withholds a premature verdict, it doesn't invent a different one.
+    assert_eq!(gated_verdict, ungated_verdict);
 }
 
 /// Grows ONE shared stream of correlated pairs and checks both `pentanomial` (paired) and
@@ -459,6 +512,9 @@ fn simulate_pentanomial_and_trinomial_streams(
                 SprtVariant::Pentanomial,
                 true,
                 FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
             )
             .unwrap();
             if report.verdict != Verdict::Inconclusive {
@@ -476,6 +532,9 @@ fn simulate_pentanomial_and_trinomial_streams(
                 SprtVariant::Trinomial,
                 false,
                 FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
             )
             .unwrap();
             if report.verdict != Verdict::Inconclusive {

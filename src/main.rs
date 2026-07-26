@@ -242,6 +242,31 @@ struct SprtArgs {
     #[arg(long)]
     paired_by_id: bool,
 
+    /// Minimum completed pairs before a boundary crossing counts as decisive. Must be >= 1.
+    /// Requires --sprt-variant pentanomial (the only variant with a paired_count). `sprt::run`
+    /// walks completed pairs in the order they complete (see its module doc) and never even
+    /// evaluates a boundary crossing before this many pairs have completed - so a crossing seen
+    /// only in the first few pairs is never "remembered" once the minimum is reached; the
+    /// decision is always based on the LLR at the pair where the walk actually stops.
+    #[arg(long)]
+    min_paired_ids: Option<u64>,
+
+    /// Reached-without-a-decision marker: if the sequential walk reaches this many completed
+    /// pairs without a boundary crossing, it stops there with an inconclusive verdict (no
+    /// truncated-SPRT decision rule) and `reason`/`stopping_reason` note the cap was hit. Pairs
+    /// completed after this point, even if present in the input, never affect the verdict, LLR,
+    /// or bucket counts. Requires --sprt-variant pentanomial, same as --min-paired-ids.
+    #[arg(long)]
+    max_paired_ids: Option<u64>,
+
+    /// Require every id to appear in exactly 2 records instead of tolerating a lone id as an
+    /// ordinary unpaired sample. Requires --paired-by-id. Extends --sprt-variant pentanomial's
+    /// existing unconditional "exactly 2, no exceptions" pairing to wald/trinomial too; a
+    /// documented no-op for pentanomial itself, which is already this strict regardless of this
+    /// flag.
+    #[arg(long)]
+    require_complete_pairs: bool,
+
     /// How a failed trial affects the LLR. See `compare --failure-policy` for the exact
     /// semantics (applies identically here, across all three --sprt-variant choices - a `loss`-
     /// synthesized outcome nets against its pair partner the same way for --sprt-variant
@@ -751,8 +776,16 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     let records = read_records(&args.input, format)?;
     let failure_policy: FailurePolicy = args.failure_policy.into();
 
-    let mut report =
-        veridict::sprt::run(records, &config, variant, args.paired_by_id, failure_policy)?;
+    let mut report = veridict::sprt::run(
+        records,
+        &config,
+        variant,
+        args.paired_by_id,
+        failure_policy,
+        args.require_complete_pairs,
+        args.min_paired_ids,
+        args.max_paired_ids,
+    )?;
     let caps = FailureCaps {
         max_timeouts: args.max_timeouts,
         max_crashes: args.max_crashes,
@@ -772,6 +805,35 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
 /// ignore invalid data", a wald run given `--belo0` (or vice versa) is a
 /// user mistake worth a clear error, not a silently-dropped flag.
 fn resolve_sprt_hypotheses(args: &SprtArgs) -> Result<(f64, f64, SprtVariant), VeridictError> {
+    if args.require_complete_pairs && !args.paired_by_id {
+        return Err(VeridictError::InvalidThreshold(
+            "--require-complete-pairs requires --paired-by-id".to_string(),
+        ));
+    }
+    if (args.min_paired_ids.is_some() || args.max_paired_ids.is_some())
+        && !matches!(args.sprt_variant, SprtVariantArg::Pentanomial)
+    {
+        return Err(VeridictError::InvalidThreshold(
+            "--min-paired-ids/--max-paired-ids require --sprt-variant pentanomial (the only \
+             variant with a paired_count)"
+                .to_string(),
+        ));
+    }
+    if let Some(min) = args.min_paired_ids
+        && min < 1
+    {
+        return Err(VeridictError::InvalidThreshold(
+            "--min-paired-ids must be >= 1".to_string(),
+        ));
+    }
+    if let (Some(min), Some(max)) = (args.min_paired_ids, args.max_paired_ids)
+        && min > max
+    {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "--min-paired-ids ({min}) must be <= --max-paired-ids ({max})"
+        )));
+    }
+
     let wald_flags_given = args.elo0.is_some() || args.elo1.is_some();
     let trinomial_flags_given = args.belo0.is_some() || args.belo1.is_some();
     match args.sprt_variant {

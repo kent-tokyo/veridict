@@ -51,6 +51,9 @@ fn bench_pentanomial_sprt_large_jsonl(c: &mut Criterion) {
                 SprtVariant::Pentanomial,
                 true,
                 FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
             )
             .unwrap()
         });

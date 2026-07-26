@@ -1424,7 +1424,11 @@ fn sprt_pentanomial_clear_h1_stream_passes() {
         .stdout(predicate::str::contains(
             "\"sprt_variant\": \"pentanomial\"",
         ))
-        .stdout(predicate::str::contains("\"score_2_0\": 200"));
+        // The sequential walk stops as soon as it crosses the upper bound (pair 104 for this
+        // unanimous, elo0=0/elo1=10 stream) - it never analyzes the remaining 96 of the 200
+        // input pairs. See sprt.rs's module doc.
+        .stdout(predicate::str::contains("\"score_2_0\": 104"))
+        .stdout(predicate::str::contains("\"available_paired_count\": 200"));
 }
 
 #[test]
@@ -1508,6 +1512,125 @@ fn sprt_pentanomial_rejects_triple_id() {
         .assert()
         .code(3)
         .stderr(predicate::str::contains("pentanomial"));
+}
+
+#[test]
+fn sprt_min_paired_ids_forces_inconclusive_below_minimum() {
+    let stdin: String = (0..200)
+        .flat_map(|i| {
+            [
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+                format!("{{\"id\":\"op{i}\",\"result\":\"candidate_win\"}}\n"),
+            ]
+        })
+        .collect();
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+            "--min-paired-ids",
+            "300",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("\"min_paired_ids\": 300"))
+        .stdout(predicate::str::contains("\"validity\": \"valid\""));
+}
+
+#[test]
+fn sprt_min_paired_ids_requires_pentanomial_variant() {
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--min-paired-ids",
+            "300",
+        ])
+        .write_stdin("{\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "require --sprt-variant pentanomial",
+        ));
+}
+
+#[test]
+fn sprt_min_paired_ids_must_not_exceed_max_paired_ids() {
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--sprt-variant",
+            "pentanomial",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+            "--min-paired-ids",
+            "500",
+            "--max-paired-ids",
+            "100",
+        ])
+        .write_stdin("{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "--min-paired-ids (500) must be <= --max-paired-ids (100)",
+        ));
+}
+
+#[test]
+fn sprt_require_complete_pairs_rejects_lone_wald_id() {
+    let stdin = "{\"id\":\"op1\",\"result\":\"candidate_win\"}\n{\"id\":\"op1\",\"result\":\"baseline_win\"}\n{\"id\":\"op2\",\"result\":\"candidate_win\"}\n";
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--paired-by-id",
+            "--require-complete-pairs",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "requires exactly 2 records per id",
+        ));
+}
+
+#[test]
+fn sprt_require_complete_pairs_requires_paired_by_id() {
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--require-complete-pairs",
+        ])
+        .write_stdin("{\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("requires --paired-by-id"));
 }
 
 #[test]

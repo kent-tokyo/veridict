@@ -36,7 +36,7 @@ impl EloAggregator {
         seed: u64,
     ) -> Self {
         Self {
-            collector: OutcomeCollector::new(paired_by_id, cluster_by_id),
+            collector: OutcomeCollector::new(paired_by_id, cluster_by_id, false),
             confidence,
             failure_policy,
             cluster_by_id,

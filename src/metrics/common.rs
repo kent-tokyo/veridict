@@ -27,6 +27,10 @@ use crate::error::VeridictError;
 pub(crate) struct OutcomeCollector {
     paired_by_id: bool,
     cluster_by_id: bool,
+    /// Upgrades a lone id under `paired_by_id` from a tolerated unpaired sample into a hard
+    /// error - see `finish`. Set by `sprt --require-complete-pairs`; `compare`'s call sites
+    /// always pass `false` (not requested there).
+    require_complete_pairs: bool,
     baseline_wins: u64,
     candidate_wins: u64,
     draws: u64,
@@ -37,10 +41,15 @@ pub(crate) struct OutcomeCollector {
 }
 
 impl OutcomeCollector {
-    pub(crate) fn new(paired_by_id: bool, cluster_by_id: bool) -> Self {
+    pub(crate) fn new(
+        paired_by_id: bool,
+        cluster_by_id: bool,
+        require_complete_pairs: bool,
+    ) -> Self {
         Self {
             paired_by_id,
             cluster_by_id,
+            require_complete_pairs,
             baseline_wins: 0,
             candidate_wins: 0,
             draws: 0,
@@ -93,9 +102,22 @@ impl OutcomeCollector {
 
     /// Returns `(baseline_wins, candidate_wins, draws)`.
     pub(crate) fn finish(mut self) -> Result<(u64, u64, u64), VeridictError> {
+        let require_complete_pairs = self.require_complete_pairs;
         for (id, group) in std::mem::take(&mut self.groups) {
             match group.as_slice() {
-                [(_, outcome)] => self.tally(*outcome),
+                [(line, outcome)] => {
+                    if require_complete_pairs {
+                        return Err(VeridictError::SchemaMismatch {
+                            line: *line,
+                            context: "paired-by-id",
+                            detail: format!(
+                                "id '{id}' appears once; --require-complete-pairs requires \
+                                 exactly 2 records per id"
+                            ),
+                        });
+                    }
+                    self.tally(*outcome)
+                }
                 [(_, a), (_, b)] => {
                     let points = |o: &Outcome| match o {
                         Outcome::CandidateWin => 1.0,

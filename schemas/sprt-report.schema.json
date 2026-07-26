@@ -29,7 +29,14 @@
     "sprt_variant",
     "pentanomial_counts",
     "raw_trial_count",
-    "paired_count"
+    "paired_count",
+    "available_paired_count",
+    "stopping_pair_count",
+    "stopping_reason",
+    "ignored_pairs_after_stop",
+    "min_paired_ids",
+    "max_paired_ids",
+    "require_complete_pairs"
   ],
   "properties": {
     "schema_version": {
@@ -50,7 +57,10 @@
       "enum": ["promoted", "not_promoted"],
       "description": "The single go/no-go field: promoted only when validity is valid and verdict is pass."
     },
-    "llr": { "type": "number", "description": "Accumulated log-likelihood ratio." },
+    "llr": {
+      "type": "number",
+      "description": "Accumulated log-likelihood ratio. For --sprt-variant pentanomial, this is the LLR at the sequential stopping point (see stopping_pair_count), not a naive recompute over the whole input - the two can differ whenever the true stopping point falls before the input's end."
+    },
     "lower_bound": { "type": "number" },
     "upper_bound": { "type": "number" },
     "elo0": {
@@ -115,12 +125,46 @@
     "raw_trial_count": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Some only for --sprt-variant pentanomial: total input records before pairing (always 2 * paired_count, since an incomplete pair is rejected before a report is produced)."
+      "description": "Some only for --sprt-variant pentanomial: total input records before pairing (always 2 * available_paired_count, since an incomplete pair is rejected before a report is produced)."
     },
     "paired_count": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Some only for --sprt-variant pentanomial: number of complete pairs the LLR was computed over."
+      "description": "Some only for --sprt-variant pentanomial: number of complete pairs actually analyzed, i.e. folded into llr/pentanomial_counts up to the sequential stopping point. May be less than available_paired_count when the walk stopped early - see stopping_pair_count/ignored_pairs_after_stop."
+    },
+    "available_paired_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Some only for --sprt-variant pentanomial: total complete pairs present in the input, before any sequential truncation. Equal to paired_count unless the walk stopped early."
+    },
+    "stopping_pair_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Some only for --sprt-variant pentanomial, and then only if the sequential walk actually stopped (a decisive verdict or a --max-paired-ids cutoff). null means the walk consumed every available pair without either (the ordinary 'keep testing' state); in that case paired_count == available_paired_count."
+    },
+    "stopping_reason": {
+      "type": ["string", "null"],
+      "enum": ["upper_bound_crossed", "lower_bound_crossed", "max_paired_ids_reached", "insufficient_data", null],
+      "description": "Some only for --sprt-variant pentanomial."
+    },
+    "ignored_pairs_after_stop": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Some only for --sprt-variant pentanomial: available_paired_count - paired_count - pairs present in the input but never folded into the analysis because they completed after the sequential stopping point. 0 (not null) when nothing was ignored; null means this isn't a pentanomial run at all."
+    },
+    "min_paired_ids": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "Echoes --min-paired-ids, Some only when it was passed (requires --sprt-variant pentanomial). The sequential walk never evaluates a boundary crossing before this many pairs have completed."
+    },
+    "max_paired_ids": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Echoes --max-paired-ids, Some only when it was passed (requires --sprt-variant pentanomial). If the walk reaches this many completed pairs without a boundary crossing, it stops there with an inconclusive verdict; pairs completed after this point never affect the verdict, llr, or bucket counts."
+    },
+    "require_complete_pairs": {
+      "type": "boolean",
+      "description": "Echoes --require-complete-pairs. For wald/trinomial with --paired-by-id, upgrades a lone id from a tolerated unpaired sample into a hard error. A no-op for pentanomial, which already enforces this unconditionally."
     }
   },
   "$defs": {

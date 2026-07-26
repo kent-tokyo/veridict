@@ -191,17 +191,48 @@ that goes *into* the estimate, rather than changing how the interval is computed
 
   The report adds `sprt_variant` (present for every variant), and, only for `pentanomial`:
   `pentanomial_counts` (the 5-bucket breakdown the LLR was computed from), `raw_trial_count`
-  (total input records before pairing), and `paired_count` (number of complete pairs). The
-  existing `candidate_wins`/`baseline_wins`/`draws` fields stay populated too, netted from the same
-  5 buckets by the standard "paired game" convention (`>1` net candidate win, `<1` net baseline
-  win, exactly `1` net draw) for compatibility with tooling that only understands the 3-outcome
-  shape.
+  (total input records before pairing), `paired_count` (pairs actually analyzed, up to the
+  sequential stopping point - see below), `available_paired_count` (total pairs present in the
+  input), `stopping_pair_count`/`stopping_reason` (where and why the walk stopped), and
+  `ignored_pairs_after_stop` (pairs present in the input but completed after the stopping point,
+  and so never analyzed). The existing `candidate_wins`/`baseline_wins`/`draws` fields stay
+  populated too, netted from the same 5 buckets by the standard "paired game" convention (`>1` net
+  candidate win, `<1` net baseline win, exactly `1` net draw) for compatibility with tooling that
+  only understands the 3-outcome shape - and, like `pentanomial_counts` itself, reflect only the
+  analyzed pairs, not the full input.
 
   **Not (yet) implemented:** Fishtest's newer *normalized-Elo* pentanomial (`LLR_normalized`,
   a `t`-value-constrained MLE with its own iterative solve) and the Siegmund discrete-time bound
   correction some engine-testing tools apply on top of the base LLR - both real refinements, not
   needed to get a statistically valid pentanomial test, deferred rather than rejected (see
   `docs/research-map.md`).
+
+  **Sequential replay, not a final-aggregate recompute:** unlike `wald`/`trinomial` (whose LLR is
+  a fixed-per-trial-delta sum, so the *shape* of the final win/loss/draw totals is all that ever
+  mattered), `pentanomial`'s generalized LLR re-tilts its whole empirical pair-outcome
+  distribution from the counts seen so far - a genuinely non-additive computation. A single
+  aggregate check at the end of a file is therefore not equivalent to a real sequential test: the
+  LLR could have crossed a boundary well before the file's end and drifted back within bounds by
+  the time all pairs are counted, and a naive final-aggregate check would misreport that as
+  `inconclusive`. `sprt::run` avoids this for `pentanomial` by walking completed pairs in the
+  order they complete (there is no separate `schedule` field the way `verify-run`'s manifest has
+  one, so input order *is* the schedule), recomputing the LLR from the cumulative bucket counts
+  after every pair, and stopping at the first pair that satisfies the stopping rule - the same
+  method Fishtest itself uses for live monitoring. `--min-paired-ids`/`--max-paired-ids` are
+  folded into that same walk, not applied afterward: a boundary crossed before `--min-paired-ids`
+  pairs have completed is never evaluated at all (so there is nothing to "remember" once the
+  minimum is reached), and if the walk reaches `--max-paired-ids` completed pairs without a
+  crossing, it stops there with `inconclusive` - pairs completed later, even if present in the
+  input, never affect the verdict, LLR, or bucket counts. **This makes the test strictly more
+  conservative, never less**: deferring the decision until `--min-paired-ids` pairs exist cannot
+  raise the realized false-positive/false-negative rate above the nominal `--alpha`/`--beta` the
+  report echoes - it can only delay a correct decision that would otherwise have arrived on too
+  little data, at the cost of a higher average sample number before that decision is reached.
+  `--require-complete-pairs` extends `pentanomial`'s existing unconditional "every id appears
+  exactly twice" pairing to `wald`/`trinomial`'s `--paired-by-id` mode (which otherwise tolerates a
+  lone id as an ordinary unpaired sample) - a data-integrity check, not a statistical one; `wald`/
+  `trinomial` are otherwise unaffected by any of this and remain a final-aggregate computation, as
+  before.
 
 Neither `wald` nor `trinomial` is a heuristic, and `pentanomial` isn't either - all three are the
 referenced sequential test, evaluated exactly (mod the numerical `secular`-equation solve
