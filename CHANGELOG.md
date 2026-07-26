@@ -10,6 +10,78 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.15.0] - 2026-07-26
+
+### Added
+
+- **`sprt --sprt-variant pentanomial` now performs genuine sequential replay, not a
+  final-aggregate recompute.** `sprt::run` walks completed pairs in the order they complete and
+  recomputes the LLR from cumulative bucket counts after every pair, stopping at the first pair
+  that decides - the same method Fishtest itself uses for live monitoring. This closes a
+  look-ahead gap in a single static input file: a boundary crossed mid-file and drifted back
+  within bounds by the file's end used to be reported as `inconclusive` (a naive final-aggregate
+  check can't tell the two apart); it is now correctly `pass`/`fail`, decided at the true stopping
+  pair. `llr`/`pentanomial_counts`/`candidate_wins`/`baseline_wins`/`draws` now reflect only the
+  pairs analyzed up to that point, never the full input. New report fields:
+  `available_paired_count` (total pairs present in the input), `stopping_pair_count`/
+  `stopping_reason` (where and why the walk stopped, one of `upper_bound_crossed`/
+  `lower_bound_crossed`/`max_paired_ids_reached`/`insufficient_data`), and
+  `ignored_pairs_after_stop` (pairs present in the input but completed after the stopping point).
+  `paired_count` now means pairs actually analyzed (may be less than `available_paired_count`).
+  **Known limitation, not addressed this round:** `wald`/`trinomial` still compute their LLR from
+  the final aggregate only, and carry the same theoretical look-ahead gap (their per-trial LLR
+  delta is a fixed constant, which only means the *final total* is order-independent, not that a
+  final check is equivalent to true sequential stopping) - upgrade them the same way if this is
+  ever reported as an issue for those variants.
+- **`sprt --min-paired-ids`/`--max-paired-ids`** (`--sprt-variant pentanomial` only, folded into
+  the sequential walk above): `--min-paired-ids` (must be `>= 1`) means the walk never evaluates a
+  boundary crossing before this many pairs have completed, so a crossing seen on too little data
+  can never decide the verdict once the minimum is reached - the decision is always the LLR at
+  the pair the walk actually stops on. `--max-paired-ids` (must be `>= --min-paired-ids` when both
+  are given) stops the walk with `inconclusive` if reached without a crossing; later pairs, even
+  if present in the input, never affect the verdict. Strictly conservative relative to the
+  nominal `--alpha`/`--beta`, never less so (see `docs/metrics.md`). Both echoed on the report as
+  `min_paired_ids`/`max_paired_ids`.
+- **`sprt --require-complete-pairs`** (requires `--paired-by-id`): extends `pentanomial`'s
+  existing unconditional "every id appears exactly twice" pairing to `wald`/`trinomial`, which
+  otherwise tolerate a lone id as an ordinary unpaired sample. A documented no-op for
+  `pentanomial`, which is already this strict regardless of the flag. Echoed as
+  `require_complete_pairs`.
+- **`veridict verify-run manifest.toml games.jsonl`**: checks that a run's raw data is
+  structurally sound *before* `compare`/`sprt`'s statistics are trusted on it. Six checks run
+  unconditionally, collecting every violation rather than stopping at the first:
+  `pair_completeness` (every id appears exactly twice), `global_index_uniqueness` (a
+  caller-declared per-record sequence number never repeats), `role_consistency` (the two records
+  sharing an id declare two different `role` values - the domain-agnostic stand-in for
+  "color/side reversed within a pair" - and only one `role`-pairing convention is used across the
+  run), `schedule_order` (the actual gated pair order matches a declared `manifest.toml`
+  schedule), `experiment_contamination` (no record's `experiment_id` disagrees with the
+  manifest's - catches a different run's games mixed in), and `environment_consistency`
+  (`dataset_sha256`/`binary_sha256`/`weight_sha256`/`config_sha256` each checked independently
+  for drift between the manifest's declared value and what records repeat). Self-consistency
+  only: every hash/identifier is an opaque caller-supplied string, compared for equality/no-drift
+  - `verify-run` never opens, hashes, or interprets an actual binary/weight/corpus/config file.
+  A check whose backing field never appears anywhere is honestly reported as skipped
+  (`checks_skipped`/`warnings`), never a silent pass or a hard failure. Its own exit-code
+  contract, not the usual verdict-based one: `0` (no violation), `1` (one or more violations,
+  `validity: "invalid"` - there's no "inconclusive" for a structural invariant), `3` only for a
+  genuine parse/config error (malformed manifest, unsupported `manifest_schema_version`,
+  malformed `games.jsonl`, empty input, or a manifest declaring nothing to verify) where no
+  report can be produced at all. `paired_count` is the formal, *gated* pair count: burn-in pairs
+  (either record marked `include_in_gate: false`) are excluded, though they're still checked like
+  any other pair by `pair_completeness`/`role_consistency`. `violations` is sorted
+  deterministically, then capped at 500 entries so a badly corrupted run can't produce a report
+  proportional to the whole input; `violation_count`/`violations_truncated` carry the exact total
+  and whether the array above was cut short.
+- **`schemas/experiment-envelope.schema.json`**: a standalone, cross-repo contract of 14 opaque
+  identifier/hash/seed fields (`experiment_id`, `candidate_id`, `baseline_id`, `lineage_id`,
+  `dataset_sha256`, `split_sha256`, `teacher_manifest_sha256`, `binary_sha256`, `weight_sha256`,
+  `init_seed`, `split_seed`, `shuffle_seed`, `schema_version`, `validity`), meant to be vendored
+  verbatim by other tools around veridict so a downstream tool can join a verdict back to its own
+  provenance store without any tool needing to understand another tool's identifiers.
+  `schemas/manifest.schema.json`/`schemas/verify-run-record.schema.json`/
+  `schemas/verify-run-report.schema.json` document `verify-run`'s own input/output shapes.
+
 ## [0.14.0] - 2026-07-20
 
 ### Changed
