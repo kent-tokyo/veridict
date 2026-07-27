@@ -10,6 +10,17 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.16.1] - 2026-07-27
+
+### Changed
+
+- `Cargo.toml`: added `mathematics`, `science`, and `algorithms` to `categories` (crates.io
+  discoverability only, no code change) - `command-line-utilities`/`development-tools::testing`
+  alone undersold the statistical/algorithmic core (SPRT, Bradley-Terry MM, bootstrap resampling,
+  Bellman value iteration). `science` matches the convention `statrs` (a direct dependency) itself
+  uses; `algorithms` matches `rand`'s. `visualization`/`simulation`/`command-line-interface` were
+  considered and rejected as not actually describing what this crate does.
+
 ## [0.16.0] - 2026-07-27
 
 ### Added
