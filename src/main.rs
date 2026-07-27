@@ -13,7 +13,7 @@ use veridict::stats::bootstrap::{DEFAULT_SEED, sample_sd};
 use veridict::verdict::{self, Thresholds};
 use veridict::{
     BootstrapMethod, CiMethod, FailureCaps, FailurePolicy, MetricConfig, MetricKind, Verdict,
-    VeridictError, input, matrix, power,
+    VeridictError, input, matrix, power, time_sensitive,
 };
 
 #[derive(Parser)]
@@ -55,6 +55,14 @@ enum Command {
     /// empty input, or a manifest that declares nothing to verify) where no report can be
     /// produced at all.
     VerifyRun(VerifyRunArgs),
+    /// Time-sensitive anytime-valid testing (Bernoulli simple-vs-simple only): rather than only
+    /// asking whether the candidate is decisively better, choose a betting policy that maximizes
+    /// expected reward under a reward-schedule that favors an *early* rejection. Independent of
+    /// `sprt` - see `veridict::time_sensitive`'s module doc. One-sided: exit 0 (pass) once wealth
+    /// crosses 1/alpha, exit 2 (inconclusive) if the reward schedule's horizon is reached first
+    /// (never a statistical fail - there is no lower rejection boundary in this model), exit 3
+    /// for a genuine parse/config error.
+    TimeSensitive(TimeSensitiveArgs),
 }
 
 #[derive(clap::Args)]
@@ -540,6 +548,93 @@ struct VerifyRunArgs {
     report_md: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct TimeSensitiveArgs {
+    /// Input file. Use "-" to read from stdin.
+    input: PathBuf,
+
+    /// Input format. Defaults to sniffing the file extension (.csv vs
+    /// everything else); pass explicitly when reading CSV from stdin.
+    #[arg(long, value_enum)]
+    format: Option<FormatArg>,
+
+    /// H0: the candidate's decisive-observation-conditional success probability. Must satisfy
+    /// 0 < p0 < p1 < 1.
+    #[arg(long)]
+    p0: f64,
+
+    /// H1: the candidate's decisive-observation-conditional success probability.
+    #[arg(long)]
+    p1: f64,
+
+    /// False-positive rate: probability of crossing the wealth threshold when H0 is true.
+    #[arg(long, default_value_t = 0.05)]
+    alpha: f64,
+
+    /// Betting policy. `gro`: patient, classical anytime-valid baseline (bets p1 every trial,
+    /// ignores the reward schedule). `bellman`: numerical grid approximation of the time-
+    /// sensitive-optimal policy for the given reward schedule. `edo`: closed-form stationary
+    /// approximation, valid only for `--reward exponential`.
+    #[arg(long, value_enum)]
+    policy: TimeSensitivePolicyArg,
+
+    /// Reward schedule shape. Exactly one of --reward/--reward-schedule is required.
+    #[arg(long, value_enum, conflicts_with = "reward_schedule")]
+    reward: Option<RewardKindArg>,
+
+    /// Deadline for --reward hard-deadline: reward is 1 for a rejection at or before this trial,
+    /// 0 after.
+    #[arg(long, requires = "reward")]
+    deadline: Option<u64>,
+
+    /// Time scale for --reward exponential: reward decays as exp(-t/time_scale).
+    #[arg(long, requires = "reward")]
+    time_scale: Option<f64>,
+
+    /// Finite backward-induction truncation horizon for --reward exponential.
+    #[arg(long, requires = "reward")]
+    horizon: Option<u64>,
+
+    /// Path to a custom reward-schedule JSON file: {"rewards": [{"until": N, "value": V}, ...,
+    /// {"after": N, "value": 0.0}]}. Exactly one of --reward/--reward-schedule is required.
+    #[arg(long, conflicts_with_all = ["reward", "deadline", "time_scale", "horizon"])]
+    reward_schedule: Option<PathBuf>,
+
+    /// Action-grid resolution. Only meaningful for --policy bellman; still validated (>= 2) for
+    /// every policy.
+    #[arg(long, default_value_t = 101)]
+    action_grid_size: usize,
+
+    /// Log-wealth grid resolution.
+    #[arg(long, default_value_t = 200)]
+    wealth_grid_size: usize,
+
+    /// How a failed trial affects the wealth process. See `compare --failure-policy` for the
+    /// exact semantics.
+    #[arg(long, value_enum, default_value = "report-only")]
+    failure_policy: FailurePolicyArg,
+
+    /// Hard cap on candidate+baseline timeout count. See `compare --max-timeouts`.
+    #[arg(long)]
+    max_timeouts: Option<u64>,
+
+    /// Hard cap on candidate+baseline crash count. See `compare --max-timeouts`.
+    #[arg(long)]
+    max_crashes: Option<u64>,
+
+    /// Hard cap on candidate+baseline invalid-result count. See `compare --max-timeouts`.
+    #[arg(long)]
+    max_invalid: Option<u64>,
+
+    /// Also write the JSON report to this file.
+    #[arg(long)]
+    report_json: Option<PathBuf>,
+
+    /// Also write a human-readable Markdown report to this file.
+    #[arg(long)]
+    report_md: Option<PathBuf>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PowerMetricArg {
     Winrate,
@@ -671,6 +766,29 @@ enum SprtVariantArg {
     Pentanomial,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum TimeSensitivePolicyArg {
+    Bellman,
+    Edo,
+    Gro,
+}
+
+impl From<TimeSensitivePolicyArg> for time_sensitive::TimeSensitivePolicyKind {
+    fn from(p: TimeSensitivePolicyArg) -> Self {
+        match p {
+            TimeSensitivePolicyArg::Bellman => time_sensitive::TimeSensitivePolicyKind::BellmanGrid,
+            TimeSensitivePolicyArg::Edo => time_sensitive::TimeSensitivePolicyKind::Edo,
+            TimeSensitivePolicyArg::Gro => time_sensitive::TimeSensitivePolicyKind::Gro,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RewardKindArg {
+    HardDeadline,
+    Exponential,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli.command) {
@@ -690,6 +808,7 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
         Command::Plan(args) => run_plan(args),
         Command::Power(args) => run_power(args),
         Command::VerifyRun(args) => run_verify_run(args),
+        Command::TimeSensitive(args) => run_time_sensitive(args),
     }
 }
 
@@ -1145,6 +1264,104 @@ fn run_verify_run(args: VerifyRunArgs) -> Result<ExitCode, VeridictError> {
         veridict::Validity::Valid => ExitCode::from(0),
         veridict::Validity::Invalid => ExitCode::from(1),
     })
+}
+
+fn run_time_sensitive(args: TimeSensitiveArgs) -> Result<ExitCode, VeridictError> {
+    let reward = resolve_time_sensitive_reward(&args)?;
+    let config = time_sensitive::TimeSensitiveConfig {
+        hypotheses: time_sensitive::BernoulliHypotheses {
+            p0: args.p0,
+            p1: args.p1,
+        },
+        alpha: args.alpha,
+        reward,
+        policy: args.policy.into(),
+        action_grid_size: args.action_grid_size,
+        wealth_grid_size: args.wealth_grid_size,
+    };
+    let format = resolve_format(&args.input, args.format);
+    let records = read_records(&args.input, format)?;
+    let failure_policy: FailurePolicy = args.failure_policy.into();
+
+    let mut report = time_sensitive::run(records, config, failure_policy)?;
+    let caps = FailureCaps {
+        max_timeouts: args.max_timeouts,
+        max_crashes: args.max_crashes,
+        max_invalid: args.max_invalid,
+    };
+    time_sensitive::apply_failure_caps(&mut report, &caps);
+    let json = report.to_json_pretty();
+    let markdown = report.to_markdown();
+
+    println!("{json}");
+    write_reports(&json, &markdown, &args.report_json, &args.report_md)?;
+    Ok(exit_code_for(report.verdict))
+}
+
+/// Picks the reward schedule from exactly one of `--reward`(`--deadline`/`--time-scale`/
+/// `--horizon`)/`--reward-schedule`, and rejects a flag that doesn't belong to the chosen
+/// `--reward` variant (e.g. `--time-scale` with `--reward hard-deadline`) - clap's declarative
+/// `requires`/`conflicts_with` can express "at least one of --reward/--reward-schedule" and "not
+/// both `--reward` and `--reward-schedule`" but not "exactly this flag combination for exactly
+/// this enum value," the same gap `resolve_sprt_hypotheses` fills for `--sprt-variant`.
+fn resolve_time_sensitive_reward(
+    args: &TimeSensitiveArgs,
+) -> Result<time_sensitive::RewardSchedule, VeridictError> {
+    if let Some(path) = &args.reward_schedule {
+        let text = std::fs::read_to_string(path).map_err(|source| VeridictError::Io {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let file: time_sensitive::reward::RewardScheduleFile = serde_json::from_str(&text)
+            .map_err(|source| VeridictError::InvalidJsonFile {
+                path: path.display().to_string(),
+                source,
+            })?;
+        return time_sensitive::reward::expand_schedule_file(&file);
+    }
+    match args.reward {
+        Some(RewardKindArg::HardDeadline) => {
+            if args.time_scale.is_some() || args.horizon.is_some() {
+                return Err(VeridictError::InvalidThreshold(
+                    "--time-scale/--horizon are only used with --reward exponential; pass \
+                     --deadline for --reward hard-deadline"
+                        .to_string(),
+                ));
+            }
+            let deadline = args.deadline.ok_or_else(|| {
+                VeridictError::InvalidThreshold(
+                    "--reward hard-deadline requires --deadline".to_string(),
+                )
+            })?;
+            Ok(time_sensitive::RewardSchedule::HardDeadline { deadline })
+        }
+        Some(RewardKindArg::Exponential) => {
+            if args.deadline.is_some() {
+                return Err(VeridictError::InvalidThreshold(
+                    "--deadline is only used with --reward hard-deadline; pass --time-scale/\
+                     --horizon for --reward exponential"
+                        .to_string(),
+                ));
+            }
+            let time_scale = args.time_scale.ok_or_else(|| {
+                VeridictError::InvalidThreshold(
+                    "--reward exponential requires --time-scale".to_string(),
+                )
+            })?;
+            let horizon = args.horizon.ok_or_else(|| {
+                VeridictError::InvalidThreshold(
+                    "--reward exponential requires --horizon".to_string(),
+                )
+            })?;
+            Ok(time_sensitive::RewardSchedule::ExponentialDecay {
+                time_scale,
+                horizon,
+            })
+        }
+        None => Err(VeridictError::InvalidThreshold(
+            "exactly one of --reward or --reward-schedule is required".to_string(),
+        )),
+    }
 }
 
 fn write_reports(

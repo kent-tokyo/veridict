@@ -13,6 +13,7 @@ pub mod power;
 pub mod report;
 pub mod sprt;
 pub mod stats;
+pub mod time_sensitive;
 pub mod verdict;
 pub mod verify_run;
 

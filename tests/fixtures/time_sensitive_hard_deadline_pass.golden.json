@@ -1,0 +1,51 @@
+{
+  "action_grid_size": 101,
+  "alpha": 0.2,
+  "crashes": 0,
+  "decisive_count": 3,
+  "draw_count": 0,
+  "failure_breakdown": {
+    "baseline": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    },
+    "candidate": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    }
+  },
+  "invalid": 0,
+  "log_wealth": 1.7633599947063572,
+  "method": "gro",
+  "notes": [
+    "simple-vs-simple Bernoulli model: fixed null p0 and alternative p1, one-sided rejection only (0 < p0 < p1 < 1)",
+    "p0/p1 are decisive-observation-conditional success probabilities; a Draw advances trial_count and the reward-schedule clock without being a Bernoulli(p0)/Bernoulli(p1) observation at all - see TimeSensitiveTest::update's doc",
+    "hard-deadline reward is exact: R(t) = 0 for t > 10 by construction, not a truncation approximation",
+    "anytime-validity (the alpha-level type-I error guarantee) is exact for any action sequence; only the *choice* of action (bellman/edo) is a numerical approximation of the growth-optimal policy - see this module's own doc for why the two are provably separable",
+    "optimality assumes the true alternative matches p1; a misspecified p1 changes which policy is actually growth-optimal, never the alpha-level validity guarantee, which is a statement about p0 alone",
+    "planned_expected_reward_under_p1 is computed under an all-decisive idealization: the value recursion has only success/failure transitions weighted by p1 and no draw-rate input, so on a draw-heavy stream the realized reward will lag this number - draws consume reward-schedule time the recursion never modeled",
+    "gro ignores the reward schedule entirely (it is the classical anytime-valid, patient baseline) - it is the large-time-scale limit of edo, not a competing time-sensitive optimization"
+  ],
+  "numerical_tolerance": 0.25125628140703515,
+  "p0": 0.5,
+  "p1": 0.9,
+  "planned_expected_reward_under_p1": 0.9101076259891362,
+  "policy_kind": "gro",
+  "promotion": "promoted",
+  "reason": "log_wealth 1.7634 crossed log_threshold 1.6094 (wealth >= 1/alpha = 5.000) at trial 3: reject H0 (p <= 0.5000), accept H1 (p >= 0.9000)",
+  "rejection_time": 3,
+  "reward_at_rejection": 1.0,
+  "reward_kind": "hard_deadline",
+  "reward_parameters": {
+    "deadline": 10
+  },
+  "schema_version": 1,
+  "timeouts": 0,
+  "trial_count": 3,
+  "validity": "valid",
+  "verdict": "pass",
+  "wealth_grid_size": 200,
+  "wealth_threshold": 5.0
+}

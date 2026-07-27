@@ -44,6 +44,10 @@ spreadsheet and guess:
   `veridict` exit code (see [Regression gate](#usage) below).
 * **Ranking more than two variants** - several prompts/configs against the
   same shared baseline -> `veridict matrix`.
+* **A deadline or decaying value on how soon you learn the answer** - a
+  fixed compute/time budget where an early decisive result is worth more
+  than a late one -> `veridict time-sensitive` (Bernoulli simple-vs-simple;
+  see [Time-sensitive testing](#time-sensitive-testing)).
 
 ## Install / build
 
@@ -534,6 +538,148 @@ against its pair partner the same way any other outcome would.
 
 The report echoes `--min-paired-ids`/`--max-paired-ids`/`--require-complete-pairs` as
 `min_paired_ids`, `max_paired_ids`, and `require_complete_pairs`.
+
+## Time-sensitive testing
+
+`veridict sprt` answers "is the candidate decisively better?" `veridict time-sensitive` answers a
+different question: given a reward that favors an *early* rejection (a deadline, a decaying value
+of waiting), which betting policy maximizes expected reward under the alternative - while keeping
+the exact same type-I error guarantee `sprt` has, for *any* betting choice? It's an independent
+addition, not a replacement: `sprt`/`compare`/`power`'s behavior, JSON, and public API are
+unchanged by this feature existing.
+
+> This implementation is independently derived from the mathematical framework in:
+>
+> E. Clerico, T. Wegel, I. Azangulov, and P. Rebeschini, "Time-sensitive anytime-valid testing,"
+> arXiv:2605.06521v1, 2026. Paper licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+>
+> The implementation is modified and independent. The paper's authors do not endorse or maintain
+> this software.
+
+**v1 scope is deliberately narrow: Bernoulli simple-vs-simple only** - a fixed null `p0` and
+alternative `p1` (`0 < p0 < p1 < 1`), one-sided rejection. `p0`/`p1` are *decisive-observation-
+conditional* success probabilities, the same convention `sprt --sprt-variant wald` uses for
+`elo0`/`elo1` under the hood: a `draw` result advances the trial count and the reward-schedule
+clock, but carries no information about which hypothesis is true, so it never moves the wealth
+process. Trinomial/pentanomial (draw-aware) time-sensitive policies, composite hypotheses, and
+online `p1` estimation are out of scope for this round - see
+[`docs/research-map.md`](docs/research-map.md).
+
+Three policies (`--policy`):
+
+* **`gro`** (growth-rate-optimal) - the classical anytime-valid baseline: bet `p1` every trial,
+  ignoring the reward schedule entirely. Betting-equivalent to `sprt`'s own Wald log-likelihood-
+  ratio walk (both bet the exact likelihood ratio each trial), though implemented independently
+  (`sprt`'s batch/aggregate-count API has no notion of time-stamped rejection - see
+  `veridict::time_sensitive`'s module doc). `gro` is the large-`time_scale` limit of `edo`.
+* **`bellman`** - a numerical approximation of the time-sensitive-optimal policy on a finite
+  `(action_grid_size, wealth_grid_size)` grid, for any reward schedule. Reported as
+  `bellman_grid_approximation`, never "optimal": it's a grid approximation, not a proof of
+  optimality on the continuous action/wealth space.
+* **`edo`** (exponential-decay-optimal) - a closed-form *stationary* (time-independent)
+  approximation, valid only for `--reward exponential`. Cheap (no grid at all), and more
+  aggressive than `gro` the tighter `--time-scale` is. Reported as `edo_stationary_approximation`,
+  never "Bellman-optimal": ignoring how close `t` is to a wealth-dependent effective horizon is
+  exactly what makes it stationary and cheap, not exact.
+
+**Why the approximation in `bellman`/`edo` never weakens the guarantee.** Every policy here
+reduces to picking an action `a` in `(0,1)` each trial and multiplying wealth by a Bernoulli
+e-variable that is valid under H0 for *every* `a`, not just the "correct" one - so grid
+resolution, floor truncation, and closed-form approximation error can only ever change how *fast*
+wealth grows under the true alternative (optimality), never whether crossing `1/alpha` under the
+null happens at rate `<= alpha` (validity). This separation is proved exactly (not simulated) for
+small horizons by exhaustive `2^T`-path enumeration, and checked at realistic scale (`T=400`) by
+Monte Carlo calibration - see `time_sensitive`'s own test suite.
+
+Reward schedules (`--reward`, or `--reward-schedule FILE` for a custom one):
+
+```console
+$ veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
+    --p0 0.50 --p1 0.55 --alpha 0.05 \
+    --policy bellman --reward hard-deadline --deadline 400
+{
+  "schema_version": 1,
+  "verdict": "pass",
+  "validity": "valid",
+  "promotion": "promoted",
+  "method": "bellman_grid_approximation",
+  "policy_kind": "bellman",
+  "p0": 0.5,
+  "p1": 0.55,
+  "alpha": 0.05,
+  "reward_kind": "hard_deadline",
+  "reward_parameters": { "deadline": 400 },
+  "trial_count": 313,
+  "rejection_time": 313,
+  "reward_at_rejection": 1.0,
+  "planned_expected_reward_under_p1": 0.645940711706933,
+  ...
+}
+```
+
+```console
+$ veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
+    --p0 0.50 --p1 0.55 --alpha 0.05 \
+    --policy edo --reward exponential --time-scale 800 --horizon 3200
+{
+  "verdict": "pass",
+  "method": "edo_stationary_approximation",
+  "reward_kind": "exponential_decay",
+  "reward_parameters": { "time_scale": 800.0, "horizon": 3200 },
+  "trial_count": 218,
+  "rejection_time": 218,
+  "reward_at_rejection": 0.7614734291752052,
+  ...
+}
+```
+
+A custom schedule (`examples/time_sensitive_reward_schedule.json`) declares reward tiers by
+trial-count breakpoint; the tail (`after`) value must be `0.0` - `R(t) -> 0` as `t -> infinity` is
+part of what makes this a well-posed finite-horizon problem, not a value this format can encode
+otherwise:
+
+```json
+{
+  "rewards": [
+    {"until": 400,  "value": 1.0},
+    {"until": 1600, "value": 0.4},
+    {"until": 3200, "value": 0.1},
+    {"after": 3200, "value": 0.0}
+  ]
+}
+```
+
+```console
+$ veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
+    --p0 0.50 --p1 0.55 --alpha 0.05 \
+    --policy bellman --reward-schedule examples/time_sensitive_reward_schedule.json
+{
+  "verdict": "pass",
+  "reward_kind": "tabulated",
+  "reward_parameters": { "horizon": 3200, "entries": 3201 },
+  "trial_count": 312,
+  "rejection_time": 312,
+  "reward_at_rejection": 1.0,
+  ...
+}
+```
+
+**Decision semantics are one-sided.** `pass` means wealth crossed `1/alpha`; `inconclusive` means
+the reward schedule's horizon was reached first - never read as a statistical fail, since there is
+no lower rejection boundary in this model (a non-crossing is an absence of evidence for H1, not
+evidence for H0). `promotion` is `promoted` only when `validity: "valid"` and `verdict: "pass"`,
+the same rule every other subcommand uses. `--failure-policy`/`--max-timeouts`/`--max-crashes`/
+`--max-invalid` (see [Metrics](#metrics)) work exactly as they do for `sprt`, forcing
+`validity: "invalid"` and `verdict: "inconclusive"` on a cap breach.
+
+**Exit codes are `0` (pass) / `2` (inconclusive) / `3` (config/input error) - never `1`.** There is
+no two-sided fail in this model, so exit code `1` is never returned by this subcommand.
+
+`reward_parameters`/`planned_expected_reward_under_p1` deserve one caveat: the latter is computed
+*exactly* (via the same grid the policy itself was built on, not simulated) under an all-decisive
+idealization - the value recursion has no draw-rate input, so on a draw-heavy stream the realized
+reward will lag this number, since draws consume reward-schedule time the recursion never modeled.
+`notes` in every report spells this out alongside the scope/approximation caveats above.
 
 ## Comparison matrix
 

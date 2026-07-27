@@ -40,6 +40,9 @@
   (下記の[使い方](#使い方)のリグレッションゲート例を参照)。
 * **3つ以上の案を比較** - 同じ共有ベースラインに対する複数のプロンプト/設定 →
   `veridict matrix`。
+* **締切や、時間とともに減衰する価値がある場合** - 早期の決定的な結果ほど価値が高い、
+  固定の計算/時間予算のもとでの検定 → `veridict time-sensitive`(Bernoulliの
+  simple-vs-simpleのみ。[時間価値付き検定](#時間価値付き検定time-sensitive-testing)参照)。
 
 ## インストール / ビルド
 
@@ -364,6 +367,129 @@ inconclusiveに格下げすることしかできず、failを新たに作り出�
 
 レポートにはこの3つがそれぞれ `min_paired_ids`、`max_paired_ids`、`require_complete_pairs`
 として追加されます。
+
+## 時間価値付き検定(time-sensitive testing)
+
+`veridict sprt` が答えるのは「候補は決定的に優れているか?」ですが、`veridict time-sensitive` は
+別の問いに答えます: 早期の棄却ほど価値が高くなる報酬(締切、あるいは時間とともに減衰する価値)を
+与えたとき、対立仮説のもとで期待報酬を最大化する賭け方はどれか? - しかも `sprt` とまったく同じ
+第一種過誤の保証を、どんな賭け方を選んでも維持したまま。これは独立した追加機能であり、既存機能の
+置き換えではありません: この機能が存在することによって `sprt`/`compare`/`power` の挙動・JSON・
+公開APIが変わることはありません。
+
+> 本実装は、以下の数理的枠組みから独立に導出されたものです:
+>
+> E. Clerico, T. Wegel, I. Azangulov, and P. Rebeschini, "Time-sensitive anytime-valid testing,"
+> arXiv:2605.06521v1, 2026. 論文は [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) の
+> もとでライセンスされています。
+>
+> 本実装は改変された独立の実装であり、論文の著者はこのソフトウェアを公認・保守するものでは
+> ありません。
+
+**v1のスコープは意図的に狭く、Bernoulliのsimple-vs-simple(単純仮説同士)のみに限定しています** -
+固定の帰無仮説 `p0` と対立仮説 `p1`(`0 < p0 < p1 < 1`)、一方向の棄却のみです。`p0`/`p1` は
+*decisive-observation-conditional*(決着のついた観測に条件づけた)成功確率です - これは
+`sprt --sprt-variant wald` が内部で `elo0`/`elo1` に使っているのと同じ規約です: `draw`(引き分け)
+はtrial数と報酬スケジュールの時計を進めますが、どちらの仮説が正しいかについての情報は持たないため、
+wealthプロセスを一切動かしません。trinomial/pentanomial(引き分けを考慮した)時間価値付きポリシー、
+複合仮説、オンラインな `p1` 推定は今回のスコープ外です - [`docs/research-map.md`](docs/research-map.md)
+を参照してください。
+
+3つのポリシー(`--policy`):
+
+* **`gro`**(growth-rate-optimal) - 古典的なanytime-validのベースライン: 報酬スケジュールを無視して
+  毎回 `p1` に賭けます。`sprt` 自身のWald対数尤度比の歩みとbetting的に等価です(どちらも毎回、
+  厳密な尤度比に賭けています)が、実装は独立しています(`sprt` のバッチ/集計カウント型APIには、
+  時刻付きの棄却という概念がありません - 詳細は `veridict::time_sensitive` のモジュールdoc参照)。
+  `gro` は `edo` の `time_scale` を大きくした極限に一致します。
+* **`bellman`** - 任意の報酬スケジュールに対して、有限の `(action_grid_size, wealth_grid_size)`
+  グリッド上で時間価値付き最適ポリシーを数値的に近似します。レポート上は
+  `bellman_grid_approximation` と表記され、「最適」とは決して呼びません - あくまでグリッド上の
+  数値近似であり、連続なaction/wealth空間での最適性の証明ではありません。
+* **`edo`**(exponential-decay-optimal) - 閉じた形の*定常*(時間に依存しない)近似で、
+  `--reward exponential` のときのみ有効です。グリッドを一切使わないため計算コストが低く、
+  `--time-scale` が短いほど `gro` より積極的に賭けます。レポート上は `edo_stationary_approximation`
+  と表記され、「Bellman最適」とは呼びません - 時刻`t`がwealthに依存する実効的な締切にどれだけ
+  近いかを無視することが、まさに定常で安価であることの代償です。
+
+**`bellman`/`edo` の近似が、なぜ保証を一切弱めないのか。** このモジュールのどのポリシーも、
+最終的には各trialでaction `a`(`(0,1)` 区間)を選び、H0のもとで*どんな*`a`でも有効なBernoulli
+e-variableをwealthに掛け合わせているだけです。したがってグリッド解像度・フロアの打ち切り・
+閉じた形の近似誤差は、真の対立仮説のもとでwealthが*どれだけ速く*成長するか(最適性)にしか影響
+せず、帰無仮説のもとで `1/alpha` を超える確率が `<= alpha` に収まるかどうか(validity)には
+一切影響しません。この分離は、小さいホライズンについては `2^T` 通りの全経路列挙によって厳密に
+(シミュレーションではなく)証明されており、現実的な規模(`T=400`)ではモンテカルロによる較正で
+確認しています - 詳細は `time_sensitive` 自体のテストスイートを参照してください。
+
+報酬スケジュール(`--reward`、独自スケジュールなら `--reward-schedule FILE`):
+
+```console
+$ veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
+    --p0 0.50 --p1 0.55 --alpha 0.05 \
+    --policy bellman --reward hard-deadline --deadline 400
+{
+  "verdict": "pass",
+  "method": "bellman_grid_approximation",
+  "reward_kind": "hard_deadline",
+  "reward_parameters": { "deadline": 400 },
+  "trial_count": 313,
+  "rejection_time": 313,
+  "reward_at_rejection": 1.0,
+  "planned_expected_reward_under_p1": 0.645940711706933,
+  ...
+}
+```
+
+```console
+$ veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
+    --p0 0.50 --p1 0.55 --alpha 0.05 \
+    --policy edo --reward exponential --time-scale 800 --horizon 3200
+{
+  "verdict": "pass",
+  "method": "edo_stationary_approximation",
+  "reward_kind": "exponential_decay",
+  "reward_parameters": { "time_scale": 800.0, "horizon": 3200 },
+  "trial_count": 218,
+  "rejection_time": 218,
+  ...
+}
+```
+
+独自スケジュール(`examples/time_sensitive_reward_schedule.json`)はtrial数の区切りごとに報酬の
+階層を宣言します。末尾(`after`)の値は必ず `0.0` にする必要があります - `t -> infinity` で
+`R(t) -> 0` となることは、有限ホライズン問題として well-posed であるための条件そのものであり、
+この形式で他の値を表現することはできません:
+
+```json
+{
+  "rewards": [
+    {"until": 400,  "value": 1.0},
+    {"until": 1600, "value": 0.4},
+    {"until": 3200, "value": 0.1},
+    {"after": 3200, "value": 0.0}
+  ]
+}
+```
+
+**判定の意味論は一方向です。** `pass` はwealthが `1/alpha` を超えたことを意味し、`inconclusive`
+は棄却前に報酬スケジュールのホライズンに達したことを意味します - このモデルには下側の棄却境界が
+存在しないため、統計的な失敗としては決して解釈しません(棄却が起きなかったことはH0の証拠ではなく、
+単にH1の証拠がまだ無いというだけです)。`promotion` は `validity: "valid"` かつ
+`verdict: "pass"` のときだけ `promoted` になります - 他のすべてのサブコマンドと同じルールです。
+`--failure-policy`/`--max-timeouts`/`--max-crashes`/`--max-invalid`([メトリクス](#メトリクス)参照)
+は `sprt` と全く同じように動作し、上限超過時に `validity: "invalid"` と `verdict: "inconclusive"`
+を強制します。
+
+**終了コードは `0`(pass)/`2`(inconclusive)/`3`(設定/入力エラー)のみで、`1` は返しません。**
+このモデルには両側の失敗という概念がないため、このサブコマンドが終了コード `1` を返すことは
+ありません。
+
+`planned_expected_reward_under_p1` には1つ注意点があります: これはシミュレーションではなく、
+ポリシー自体が構築されたのと同じグリッドを使って*厳密に*計算されますが、全trialが決着すると
+仮定した理想化のもとでの値です - 価値の漸化式にはdraw率の入力がないため、drawの多い入力
+ストリームでは実際に得られる報酬はこの数値より低くなります(drawは報酬スケジュールの時間を
+消費しますが、この漸化式はdrawを一切モデル化していません)。各レポートの `notes` に、上記の
+スコープ・近似に関する注意点とあわせて明記されています。
 
 ## 比較マトリクス(comparison matrix)
 

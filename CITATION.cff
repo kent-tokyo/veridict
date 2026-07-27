@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: veridict
+type: software
+version: 0.15.0
+license: MIT OR Apache-2.0
+repository-code: "https://github.com/kent-tokyo/veridict"
+abstract: >-
+  A small, domain-agnostic evaluation gate: decide whether a candidate is
+  actually better than a baseline, from a file of trial results.
+authors:
+  - name: "kent-tokyo"
+references:
+  - type: article
+    title: "Time-sensitive anytime-valid testing"
+    authors:
+      - family-names: Clerico
+        given-names: Eugenio
+      - family-names: Wegel
+        given-names: Tobias
+      - family-names: Azangulov
+        given-names: Iskander
+      - family-names: Rebeschini
+        given-names: Patrick
+    year: 2026
+    identifiers:
+      - type: other
+        value: "arXiv:2605.06521v1"
+        description: "arXiv identifier"
+    url: "https://arxiv.org/abs/2605.06521"
+    license: CC-BY-4.0
+    notes: >-
+      Mathematical framework this repository's `time_sensitive` module
+      (src/time_sensitive/) is independently derived from. The
+      implementation is modified and independent; the paper's authors do
+      not endorse or maintain this software. See src/time_sensitive/mod.rs
+      and the README's "Time-sensitive testing" section for details.

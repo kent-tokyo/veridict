@@ -1,0 +1,8 @@
+{
+  "rewards": [
+    {"until": 400,  "value": 1.0},
+    {"until": 1600, "value": 0.4},
+    {"until": 3200, "value": 0.1},
+    {"after": 3200, "value": 0.0}
+  ]
+}

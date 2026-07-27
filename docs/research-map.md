@@ -314,6 +314,101 @@ results; it doesn't track how they were produced.
 already tracks checkpoints/experiments and needs `veridict`'s JSON report to carry an opaque
 identifier through untouched for that tool to join on.
 
+### Trinomial/pentanomial policies for `time_sensitive`
+
+**What it is:** `time_sensitive` (see the README's "Time-sensitive testing" section) ships v1
+scoped to Bernoulli simple-vs-simple only - a fixed null `p0`/alternative `p1`, draws advance the
+reward-schedule clock but carry no information (see `time_sensitive`'s module doc). Extending the
+same time-sensitive-reward idea to `sprt`'s trinomial (draw-rate-aware) or pentanomial
+(paired-game) models - the actual shape of Sekirei's chess/shogi draw-heavy data - is a real,
+separate piece of work.
+
+**Why not yet:** the Bellman/EDO math in this round is derived specifically for a two-outcome
+(success/failure) transition weighted by `p1` (see `time_sensitive::grid`'s recursion and
+`time_sensitive::edo`'s moment equation). A trinomial/pentanomial version needs a draw-rate
+nuisance parameter folded into that same transition, which changes the state space, the moment
+equation EDO solves, and the exact-enumeration/martingale-identity proof this round's tests rely
+on - not a mechanical copy of `stats::trinomial_sprt`/`stats::pentanomial_sprt`'s own
+draw-modeling onto the new grid.
+
+**What would change this:** a concrete request to apply time-sensitive rewards to draw-heavy
+data (the Sekirei pipeline is the motivating case), once the Bernoulli version has had real usage
+to validate the reward-schedule/policy design choices against.
+
+### Composite hypotheses and online `p1` estimation for `time_sensitive`
+
+**What it is:** `time_sensitive` takes `p0`/`p1` as fixed, caller-supplied constants (simple-vs-
+simple). A composite alternative (a range or prior over `p1` rather than one fixed value) or
+online estimation of the true alternative from the data being collected are both real extensions
+the underlying paper's framework doesn't rule out.
+
+**Why not yet:** both change what "the alternative" means to the Bellman/EDO recursion
+mid-stream, which interacts with the anytime-validity argument in a way this round's tests don't
+cover (`time_sensitive`'s validity proof holds for *any* action sequence chosen independently of
+knowledge of the true `p0`/`p1` under test - updating the alternative from the same data the
+wealth process is betting on needs its own, separate justification, not an assumed extension of
+the fixed-`p1` case). No concrete design exists yet.
+
+**What would change this:** a concrete workflow where a fixed `p1` guess is known to be
+unreliable enough that adapting it mid-run would meaningfully change outcomes, with enough detail
+to shape whether a composite-prior or an online-estimation approach fits better.
+
+### `--elo0`/`--elo1` input for `time-sensitive`
+
+**What it is:** `sprt --elo0`/`--elo1` (logistic Elo, via `stats::sprt::score_from_elo`) is a
+natural-looking input `time-sensitive --p0`/`--p1` could plausibly also accept.
+
+**Why not yet:** `score_from_elo` returns an Elo-implied *expected score*, where a draw counts as
+half a win - not the decisive-observation-conditional success probability `time_sensitive`'s
+`p0`/`p1` are defined as (see `time_sensitive::e_variable::BernoulliHypotheses`'s doc). Wiring
+`--elo0`/`--elo1` straight through `score_from_elo` would silently mix those two definitions on
+any input with a nonzero draw rate. A correct version needs a draw-rate input to convert between
+the two, which doesn't exist yet - the same real blocker "Draw-aware `power --metric elo`" above
+describes for a different subcommand.
+
+**What would change this:** a concrete request for Elo-scale input to `time-sensitive`, paired
+with a decision on where the draw-rate parameter that conversion needs comes from (a new
+`--assume-draw-rate`-style flag, most plausibly, mirroring the `power --metric elo` entry above).
+
+### Boundary-aware capped EDO, matrix/multi-metric support, and other `time_sensitive` refinements
+
+**What it is:** several smaller, independent extensions to `time_sensitive`, none started: a
+boundary-aware correction to EDO's stationary approximation near the wealth threshold (the paper's
+own EDO derivation is a stationary/interior approximation - see `time_sensitive::edo`'s module
+doc - and doesn't correct for the boundary effect close to `1/alpha`); comparing several
+candidates against one baseline (`matrix`'s shape) under a time-sensitive reward; running several
+simultaneous time-sensitive claims with multiple-comparison correction (the same open question
+`sprt`'s own multiplicity has, see "Multiple-comparison correction for multi-metric runs" above);
+and reinforcement-learning-based policies as an alternative to the grid/closed-form approximations
+this round ships.
+
+**Why not yet:** none has a concrete workflow asking for it yet, and each is a genuinely separate
+design question (a boundary correction changes EDO's own derivation; matrix support needs
+`time_sensitive`'s per-candidate shape designed the way "Matrix verdict semantics" above is still
+open for `compare`; multi-claim correction needs the same family-wise design work as `sprt`'s).
+Building any of them speculatively, with no concrete request behind it, is exactly the
+over-engineering this project avoids (see `AGENTS.md`).
+
+**What would change this:** a concrete workflow for each - most plausibly, real usage of the
+Bernoulli v1 surfacing which of these actually matters in practice, rather than guessing up front.
+
+### Sekirei preset schedules (400/3200-game gates) for `time_sensitive`
+
+**What it is:** the Sekirei pipeline's own gate design uses specific game-count checkpoints (e.g.
+400/1600/3200) as reward-schedule breakpoints - `time_sensitive`'s `--reward-schedule` JSON format
+(see the README) already expresses exactly this shape.
+
+**Why not yet, and why probably never as a core feature:** this is caller-side configuration, not
+a core-library concern - `veridict` stays domain-agnostic (see `AGENTS.md`'s "no game/engine-
+specific presets baked into core APIs" rule, the same reason `verify-run` never hashes an actual
+binary/weight/corpus file). A Sekirei-specific preset belongs in a Sekirei-side config file or
+wrapper script that calls `veridict time-sensitive --reward-schedule sekirei-gate.json`, not in
+`veridict` itself.
+
+**What would change this:** nothing changes this by design, short of a genuinely domain-agnostic
+generalization of "a common shape of tiered reward schedule" that several unrelated callers would
+plausibly want - unlikely, since `--reward-schedule` already covers the general case.
+
 ## Deliberately out of scope
 
 veridict judges results; it does not produce them. These are not "not yet" items - they're

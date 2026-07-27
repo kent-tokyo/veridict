@@ -1,0 +1,52 @@
+{
+  "action_grid_size": 101,
+  "alpha": 0.05,
+  "crashes": 0,
+  "decisive_count": 10,
+  "draw_count": 0,
+  "failure_breakdown": {
+    "baseline": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    },
+    "candidate": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    }
+  },
+  "invalid": 0,
+  "log_wealth": -0.2010079840064921,
+  "method": "edo_stationary_approximation",
+  "notes": [
+    "simple-vs-simple Bernoulli model: fixed null p0 and alternative p1, one-sided rejection only (0 < p0 < p1 < 1)",
+    "p0/p1 are decisive-observation-conditional success probabilities; a Draw advances trial_count and the reward-schedule clock without being a Bernoulli(p0)/Bernoulli(p1) observation at all - see TimeSensitiveTest::update's doc",
+    "exponential-decay reward truncated at horizon=10: R(horizon) = 9.512e-1 against R(0) = 1.0 is discarded for t > horizon; judge negligibility against your own horizon-to-time_scale ratio before trusting planned_expected_reward_under_p1 at a small ratio",
+    "anytime-validity (the alpha-level type-I error guarantee) is exact for any action sequence; only the *choice* of action (bellman/edo) is a numerical approximation of the growth-optimal policy - see this module's own doc for why the two are provably separable",
+    "optimality assumes the true alternative matches p1; a misspecified p1 changes which policy is actually growth-optimal, never the alpha-level validity guarantee, which is a statement about p0 alone",
+    "planned_expected_reward_under_p1 is computed under an all-decisive idealization: the value recursion has only success/failure transitions weighted by p1 and no draw-rate input, so on a draw-heavy stream the realized reward will lag this number - draws consume reward-schedule time the recursion never modeled",
+    "edo is a stationary (time-independent) approximation valid specifically for exponential-decay rewards, not the true (generally time-varying) Bellman-optimal policy; solved eta*=0.501255 (see time_sensitive::edo's module doc for the moment equation this solves)"
+  ],
+  "numerical_tolerance": 0.25125628140703515,
+  "p0": 0.5,
+  "p1": 0.55,
+  "planned_expected_reward_under_p1": 0.0,
+  "policy_kind": "edo",
+  "promotion": "not_promoted",
+  "reason": "reached horizon (10) without crossing log_threshold 2.9957 (log_wealth=-0.2010): inconclusive - not evidence for H0, just an absence of evidence for H1 within the allotted trials/reward-schedule budget",
+  "rejection_time": null,
+  "reward_at_rejection": null,
+  "reward_kind": "exponential_decay",
+  "reward_parameters": {
+    "horizon": 10,
+    "time_scale": 200.0
+  },
+  "schema_version": 1,
+  "timeouts": 0,
+  "trial_count": 10,
+  "validity": "valid",
+  "verdict": "inconclusive",
+  "wealth_grid_size": 200,
+  "wealth_threshold": 20.0
+}

@@ -239,6 +239,16 @@ pub enum VeridictError {
         source: toml::de::Error,
     },
 
+    /// Whole-file JSON config parse failure - distinct from `InvalidJson` (which is line-
+    /// oriented, for JSONL trial records): a `--reward-schedule` file is one JSON document, not
+    /// one record per line, the same distinction `InvalidToml` already draws for `manifest.toml`.
+    #[error("invalid JSON in '{path}': {source}")]
+    InvalidJsonFile {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error(
         "manifest_schema_version {found} is not supported by this build (supports {supported}); \
          regenerate the manifest with a matching veridict version rather than trusting an \
@@ -254,4 +264,33 @@ pub enum VeridictError {
          manifest-dependent field, or there is nothing meaningful for this command to verify"
     )]
     ManifestDeclaresNothingToVerify,
+
+    #[error(
+        "no EDO stationary action exists for time_scale={time_scale}: the moment equation \
+         sup_a E_p1[phi(a,x)^eta] = exp(1/time_scale) has a solution eta in (0,1) only when \
+         exp(1/time_scale) < p1/p0 = {ratio:.6}, i.e. time_scale > {min_time_scale:.6}; the \
+         requested time_scale decays too fast for any bet to be more informative on average \
+         than the null itself - use --policy gro, or increase --time-scale"
+    )]
+    EdoRootDoesNotExist {
+        p0: f64,
+        p1: f64,
+        time_scale: f64,
+        ratio: f64,
+        min_time_scale: f64,
+    },
+
+    #[error(
+        "estimated Bellman grid cost (horizon={horizon} * wealth_grid_size={wealth_grid_size} * \
+         action_grid_size={action_grid_size} = {estimated_ops}) exceeds the configured cap of \
+         {cap}; this would silently run for a long time rather than fail fast - lower \
+         --horizon/--deadline, --wealth-grid-size, or --action-grid-size"
+    )]
+    TimeSensitiveGridTooLarge {
+        horizon: u64,
+        wealth_grid_size: usize,
+        action_grid_size: usize,
+        estimated_ops: u128,
+        cap: u128,
+    },
 }
