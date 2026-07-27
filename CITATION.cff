@@ -2,7 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: veridict
 type: software
-version: 0.15.0
+version: 0.16.0
+date-released: "2026-07-27"
 license: MIT OR Apache-2.0
 repository-code: "https://github.com/kent-tokyo/veridict"
 abstract: >-

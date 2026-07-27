@@ -10,6 +10,80 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [0.16.0] - 2026-07-27
+
+### Added
+
+- **`veridict time-sensitive`**: time-sensitive anytime-valid testing, an experimental Bernoulli
+  specialization of a betting-policy framework that maximizes expected reward under a schedule
+  favoring an *early* rejection (a deadline, or a decaying value of waiting), while keeping the
+  exact same alpha-level type-I error guarantee `sprt` has, for any betting choice. Independent
+  addition, not a replacement: `sprt`/`compare`/`power`'s behavior, JSON, and public API are
+  unchanged.
+
+  This implementation is independently derived from the mathematical framework in E. Clerico,
+  T. Wegel, I. Azangulov, and P. Rebeschini, "Time-sensitive anytime-valid testing,"
+  arXiv:2605.06521v1, 2026 (CC BY 4.0) - see `src/time_sensitive/mod.rs`'s module doc and the
+  README's "Time-sensitive testing" section for the full attribution. The EDO policy in
+  particular is an independently derived Bernoulli specialization based on the paper's moment
+  characterization: a first reading of the paper's general-case formula was internally
+  inconsistent with its own stated limits, so the closed form actually shipped here was
+  re-derived by hand from the moment equation and checked against both boundary conditions
+  (`eta -> 0` recovers GRO; `eta` in `(0,1)` bets more aggressively than GRO), not transcribed
+  from the paper's notation verbatim. It is not claimed to reproduce every notation or
+  implementation detail of the paper.
+
+  **Scope is deliberately narrow: Bernoulli simple-vs-simple only** (a fixed null `p0` and
+  alternative `p1`, `0 < p0 < p1 < 1`, one-sided rejection). Three policies (`--policy`), with
+  different, explicitly-labeled guarantees:
+  - `gro` (growth-rate-optimal) - the classical anytime-valid baseline, betting-equivalent to
+    (but implemented independently of) `sprt`'s own Wald log-likelihood-ratio walk. Ignores the
+    reward schedule; the large-`time_scale` limit of `edo`.
+  - `bellman` - a numerical approximation of the time-sensitive-optimal policy on a finite
+    `(action_grid_size, wealth_grid_size)` grid, for any reward schedule. Reported as
+    `bellman_grid_approximation`, never claimed optimal - a grid approximation, not a proof of
+    optimality on the continuous action/wealth space.
+  - `edo` (exponential-decay-optimal) - a closed-form *stationary* approximation, valid only for
+    `--reward exponential`. Reported as `edo_stationary_approximation`, never claimed
+    Bellman-optimal.
+
+  Anytime-validity (the alpha-level guarantee) is exact regardless of which policy is chosen or
+  how coarse its grid/approximation is: every policy reduces to picking an action in `(0,1)` each
+  trial and multiplying wealth by a Bernoulli e-variable that is valid under H0 for *every*
+  action, not just the "correct" one - approximation error can only ever cost optimality, never
+  validity. This separation is proved exactly (not simulated) for small horizons via exhaustive
+  `2^T`-path enumeration, and checked at realistic scale (`T=400`) via Monte Carlo calibration.
+  Optimality (which policy actually maximizes reward) does depend on the configured alternative
+  `p1` matching reality and on the numerical approximation settings (`--action-grid-size`/
+  `--wealth-grid-size`) - a separate claim from anytime-validity, documented as such in every
+  report's `notes`.
+
+  Reward schedules: `--reward hard-deadline --deadline N` (reward 1 up to trial `N`, 0 after),
+  `--reward exponential --time-scale T --horizon N` (`R(t) = exp(-t/T)`, truncated at `N`), or a
+  custom `--reward-schedule FILE.json` (sparse trial-count breakpoints, expanded internally; the
+  tail value must be `0.0`). `Draw` results advance the trial count and the reward-schedule clock
+  without moving the wealth process - a draw is a consumed trial, not a free one, and `p0`/`p1`
+  are decisive-observation-conditional probabilities, the same convention `sprt --sprt-variant
+  wald` uses.
+
+  Reuses `Outcome`/`FailurePolicy`/`FailureCaps`/`Verdict`/`Validity`/`Promotion` unchanged - no
+  parallel types. `--failure-policy`/`--max-timeouts`/`--max-crashes`/`--max-invalid` work exactly
+  as they do for `sprt`. Exit codes are `0` (pass) / `2` (inconclusive) / `3` (config/input error)
+  - never `1`: there is no two-sided fail in this model, so a horizon reached without crossing is
+  never read as a statistical fail.
+
+  **Known limitation, not addressed this round:** `planned_expected_reward_under_p1` is computed
+  under an all-decisive idealization (the value recursion has no draw-rate input), so on a
+  draw-heavy stream the realized reward will lag this number. Trinomial/pentanomial (draw-aware)
+  time-sensitive policies, composite hypotheses, online `p1` estimation, `--elo0`/`--elo1` input,
+  and a boundary-aware correction to EDO near the wealth threshold are all out of scope this round
+  - see `docs/research-map.md` for what would change each of these.
+
+### Changed
+
+- `CITATION.cff` now references arXiv:2605.06521 (CC BY 4.0) as the mathematical source for
+  `time_sensitive`, alongside veridict's own citation metadata.
+
 ## [0.15.0] - 2026-07-26
 
 ### Added
