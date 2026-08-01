@@ -2952,6 +2952,165 @@ fn relative_diff_multi_metric_with_mean_diff_runs_in_a_single_pass_with_correct_
     assert!((reports[1]["effect"].as_f64().unwrap() - 0.10).abs() < 1e-9);
 }
 
+/// Consistent +5% per pair: sign-test sees an unambiguous positive sign every time, relative-diff
+/// sees a stable 0.05 ratio - both metrics agree loudly regardless of threshold, so these tests
+/// isolate whether the *right number* reached each metric's own `pass_above`/`fail_below`, not
+/// whether the run happens to pass or fail.
+fn min_effect_multi_metric_stdin() -> String {
+    (0..20)
+        .map(|i| {
+            let b = 10.0 + i as f64;
+            format!("{{\"baseline\":{b},\"candidate\":{}}}\n", b * 1.05)
+        })
+        .collect()
+}
+
+#[test]
+fn min_effect_per_metric_overrides_apply_independently() {
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "sign-test=0.01,relative-diff=0.005",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reports = json["reports"].as_array().unwrap();
+    assert_eq!(reports[0]["metric"], "sign-test");
+    assert_eq!(reports[0]["pass_above"], 0.01);
+    assert_eq!(reports[0]["fail_below"], -0.01);
+    assert_eq!(reports[1]["metric"], "relative-diff");
+    assert_eq!(reports[1]["pass_above"], 0.005);
+    assert_eq!(reports[1]["fail_below"], -0.005);
+}
+
+#[test]
+fn min_effect_mixes_bare_default_and_metric_override() {
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.01,relative-diff=0.005",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let reports = json["reports"].as_array().unwrap();
+    assert_eq!(reports[0]["metric"], "sign-test");
+    assert_eq!(
+        reports[0]["pass_above"], 0.01,
+        "sign-test falls back to the bare default"
+    );
+    assert_eq!(reports[1]["metric"], "relative-diff");
+    assert_eq!(
+        reports[1]["pass_above"], 0.005,
+        "relative-diff keeps its own override"
+    );
+}
+
+#[test]
+fn min_effect_override_for_unrequested_metric_exits_three() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--min-effect",
+            "relative-diff=0.1",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--min-effect"));
+}
+
+#[test]
+fn min_effect_duplicate_bare_default_exits_three() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--min-effect",
+            "0.01,0.02",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--min-effect"));
+}
+
+#[test]
+fn min_effect_duplicate_metric_override_exits_three() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "sign-test=0.01,sign-test=0.02",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("more than once"));
+}
+
+#[test]
+fn min_effect_unknown_metric_name_exits_two() {
+    // A clap-level parse failure (exit 2), not run_compare's own semantic check (exit 3) - and 2
+    // also happens to be this project's own "inconclusive" exit code, so assert the stderr text
+    // too rather than trusting the exit code alone to prove a parse failure actually happened.
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--min-effect",
+            "foo=0.1",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn min_effect_override_violating_threshold_order_exits_three_and_names_metric() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--min-effect",
+            "sign-test=-0.5",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("sign-test"));
+}
+
 #[test]
 fn claim_correction_rejects_a_relative_diff_family() {
     let stdin = "{\"id\":\"a\",\"baseline\":100.0,\"candidate\":110.0}\n{\"id\":\"b\",\"baseline\":200.0,\"candidate\":220.0}\n";

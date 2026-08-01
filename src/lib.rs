@@ -468,18 +468,20 @@ where
     ))
 }
 
-/// Runs several metrics against the same records and thresholds in a single
-/// pass over `records` (see `metrics::compute_many`), and combines them into
-/// one overall verdict: `Fail` if any metric fails, else `Inconclusive` if
-/// any metric is inconclusive, else `Pass`. Matches the "a false pass is
-/// worse than an inconclusive result" rule: one metric failing sinks the
-/// whole run.
+/// Runs several metrics against the same records in a single pass over
+/// `records` (see `metrics::compute_many`), each against its own threshold
+/// (`thresholds[i]` for `metrics[i]` - a per-metric CLI override, or the same
+/// value repeated if the caller wants one threshold shared across all of
+/// them), and combines them into one overall verdict: `Fail` if any metric
+/// fails, else `Inconclusive` if any metric is inconclusive, else `Pass`.
+/// Matches the "a false pass is worse than an inconclusive result" rule: one
+/// metric failing sinks the whole run.
 #[allow(clippy::too_many_arguments)]
 pub fn compare_many<I>(
     records: I,
     metrics: &[MetricConfig],
     confidence: f64,
-    thresholds: &verdict::Thresholds,
+    thresholds: &[verdict::Thresholds],
     resamples: usize,
     seed: u64,
     paired_by_id: bool,
@@ -489,6 +491,7 @@ where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
+    debug_assert_eq!(metrics.len(), thresholds.len());
     let outs = metrics::compute_many(
         records,
         metrics,
@@ -500,8 +503,9 @@ where
     )?;
     let reports: Vec<Report> = metrics
         .iter()
+        .zip(thresholds)
         .zip(outs)
-        .map(|(&config, out)| {
+        .map(|((&config, thresholds), out)| {
             build_report(
                 config.kind(),
                 confidence,
@@ -902,7 +906,10 @@ mod tests {
                 )
             })
             .collect();
-        let thresholds = Thresholds::symmetric(0.1).unwrap();
+        let thresholds = [
+            Thresholds::symmetric(0.1).unwrap(),
+            Thresholds::symmetric(0.1).unwrap(),
+        ];
         let report = compare_many(
             records.iter().cloned(),
             &[
@@ -946,7 +953,10 @@ mod tests {
                 )
             })
             .collect();
-        let thresholds = Thresholds::symmetric(0.1).unwrap();
+        let thresholds = [
+            Thresholds::symmetric(0.1).unwrap(),
+            Thresholds::symmetric(0.1).unwrap(),
+        ];
         let report = compare_many(
             records.iter().cloned(),
             &[

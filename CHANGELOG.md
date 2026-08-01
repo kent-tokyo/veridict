@@ -12,6 +12,17 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
 
 ## [Unreleased]
 
+### Added
+
+- **`compare --min-effect` per-metric overrides**: a multi-metric run can now give each metric its
+  own threshold instead of sharing one number across metrics whose effect sizes live on different
+  scales (`sign-test`/`winrate`: a win-rate margin off 0.5; `relative-diff`: a relative ratio;
+  `mean-diff`/`quantile-diff`/`elo`: raw units) - e.g. `--min-effect
+  sign-test=0.01,relative-diff=0.005`. The existing bare-number form (`--min-effect 0.005`) still
+  works unchanged as the run's default, and can be mixed with overrides in the same flag value
+  (`--min-effect 0.01,relative-diff=0.005`). A `metric=value` entry naming a metric that wasn't
+  requested via `--metric` is a config error (exit 3), not a silent no-op.
+
 ### Changed
 
 - `README.md`/`README_ja.md`: dropped the crates.io downloads and GitHub-stars badges added in

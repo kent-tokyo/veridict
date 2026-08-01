@@ -83,9 +83,16 @@ struct CompareArgs {
     #[arg(long, default_value_t = 0.95)]
     confidence: f64,
 
-    /// Symmetric effect-size threshold: pass if the CI lower bound is >= this, fail if the CI upper bound is <= -this. Ignored if --pass-above/--fail-below are given.
-    #[arg(long)]
-    min_effect: Option<f64>,
+    /// Symmetric effect-size threshold: pass if the CI lower bound is >= this, fail if the CI
+    /// upper bound is <= -this. A bare number (e.g. `0.005`) applies to every requested metric;
+    /// `metric=value` (e.g. `sign-test=0.01`) overrides just that metric - comma-separate or
+    /// repeat the flag to mix both, since different metrics' effect sizes live on different
+    /// scales (sign-test/winrate: win-rate margin off 0.5; relative-diff: relative ratio;
+    /// mean-diff/quantile-diff/elo: raw units) and sharing one number across mixed metrics in a
+    /// multi-metric run is only coincidentally correct. Ignored if --pass-above/--fail-below are
+    /// given.
+    #[arg(long, value_delimiter = ',', value_parser = parse_min_effect_entry)]
+    min_effect: Vec<MinEffectEntry>,
 
     /// Explicit pass threshold. Requires --fail-below.
     #[arg(long, requires = "fail_below", allow_hyphen_values = true)]
@@ -684,6 +691,43 @@ enum MetricArg {
     RelativeDiff,
 }
 
+/// One comma-delimited `--min-effect` entry: either a bare number (the run's default) or
+/// `metric=value` (an override for just that metric). See `CompareArgs::min_effect`'s doc.
+#[derive(Clone, Copy)]
+enum MinEffectEntry {
+    Default(f64),
+    Metric(MetricArg, f64),
+}
+
+fn parse_min_effect_entry(s: &str) -> Result<MinEffectEntry, String> {
+    match s.split_once('=') {
+        None => s
+            .parse::<f64>()
+            .map(MinEffectEntry::Default)
+            .map_err(|e| format!("invalid --min-effect value '{s}': {e}")),
+        Some((name, value)) => {
+            let metric = <MetricArg as ValueEnum>::from_str(name, false).map_err(|_| {
+                format!(
+                    "invalid --min-effect metric '{name}' (expected one of: {})",
+                    MetricArg::value_variants()
+                        .iter()
+                        .map(|v| v.to_possible_value().unwrap().get_name().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            let value: f64 = value
+                .parse()
+                .map_err(|e| format!("invalid --min-effect value '{value}': {e}"))?;
+            Ok(MinEffectEntry::Metric(metric, value))
+        }
+    }
+}
+
+fn metric_arg_label(m: MetricArg) -> String {
+    m.to_possible_value().unwrap().get_name().to_string()
+}
+
 impl From<MetricArg> for MetricKind {
     fn from(m: MetricArg) -> Self {
         match m {
@@ -812,6 +856,79 @@ fn main() -> ExitCode {
     }
 }
 
+/// Builds one `Thresholds` per requested metric, parallel to `metrics` (see `compare_many`'s
+/// `thresholds: &[Thresholds]` parameter). `--pass-above`/`--fail-below` (when both given) fully
+/// override `--min-effect` and broadcast to every metric, same as before per-metric overrides
+/// existed. Otherwise each metric gets its own `Metric` override from `--min-effect` if one was
+/// given, else the bare `Default` value if given, else 0.0 (today's implicit default).
+fn resolve_thresholds(
+    metrics: &[MetricArg],
+    pass_above: Option<f64>,
+    fail_below: Option<f64>,
+    min_effect: &[MinEffectEntry],
+) -> Result<Vec<Thresholds>, VeridictError> {
+    let mut default: Option<f64> = None;
+    let mut overrides: Vec<(MetricArg, f64)> = Vec::new();
+    for entry in min_effect {
+        match *entry {
+            MinEffectEntry::Default(v) => {
+                if let Some(existing) = default {
+                    return Err(VeridictError::InvalidThreshold(format!(
+                        "--min-effect gives more than one default value ({existing} and {v}); \
+                         only one bare number is allowed per run"
+                    )));
+                }
+                default = Some(v);
+            }
+            MinEffectEntry::Metric(m, v) => {
+                let label = metric_arg_label(m);
+                if overrides
+                    .iter()
+                    .any(|&(om, _)| MetricKind::from(om) == MetricKind::from(m))
+                {
+                    return Err(VeridictError::InvalidThreshold(format!(
+                        "--min-effect specifies metric '{label}' more than once"
+                    )));
+                }
+                if !metrics
+                    .iter()
+                    .any(|&rm| MetricKind::from(rm) == MetricKind::from(m))
+                {
+                    return Err(VeridictError::InvalidThreshold(format!(
+                        "--min-effect '{label}=...' names a metric that wasn't requested via \
+                         --metric"
+                    )));
+                }
+                overrides.push((m, v));
+            }
+        }
+    }
+
+    if let (Some(pass_above), Some(fail_below)) = (pass_above, fail_below) {
+        return metrics
+            .iter()
+            .map(|_| Thresholds::new(pass_above, fail_below))
+            .collect();
+    }
+
+    metrics
+        .iter()
+        .map(|&m| {
+            let v = overrides
+                .iter()
+                .find(|&&(om, _)| MetricKind::from(om) == MetricKind::from(m))
+                .map(|&(_, v)| v)
+                .unwrap_or_else(|| default.unwrap_or(0.0));
+            Thresholds::symmetric(v).map_err(|e| {
+                VeridictError::InvalidThreshold(format!(
+                    "--min-effect for metric '{}': {e}",
+                    metric_arg_label(m)
+                ))
+            })
+        })
+        .collect()
+}
+
 fn run(command: Command) -> Result<ExitCode, VeridictError> {
     match command {
         Command::Compare(args) => run_compare(args),
@@ -825,10 +942,12 @@ fn run(command: Command) -> Result<ExitCode, VeridictError> {
 }
 
 fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
-    let thresholds = match (args.pass_above, args.fail_below) {
-        (Some(pass_above), Some(fail_below)) => Thresholds::new(pass_above, fail_below)?,
-        _ => Thresholds::symmetric(args.min_effect.unwrap_or(0.0))?,
-    };
+    let thresholds = resolve_thresholds(
+        &args.metrics,
+        args.pass_above,
+        args.fail_below,
+        &args.min_effect,
+    )?;
 
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;
@@ -888,7 +1007,7 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
             records,
             only,
             args.confidence,
-            &thresholds,
+            &thresholds[0],
             args.resamples,
             seed,
             args.paired_by_id,
