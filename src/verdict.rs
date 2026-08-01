@@ -9,6 +9,7 @@
 //! an inconclusive result."
 
 use crate::error::VeridictError;
+use crate::metrics;
 use crate::report::{MultiReport, Report};
 use crate::stats::{elo, exact, jeffreys, wilson};
 use crate::{CiMethod, FailureCaps, MetricKind, Promotion, Validity, Verdict};
@@ -85,16 +86,16 @@ pub fn aggregate(verdicts: impl IntoIterator<Item = Verdict>) -> Verdict {
 /// per `ci_method` - Wilson/Jeffreys/Exact differ in width at the same `n`,
 /// so searching the wrong one would contradict the report's own shown CI),
 /// holding the point estimate fixed - not an approximation, an exact search
-/// against real, already-tested math. `mean-diff`/`quantile-diff` are the exception:
-/// there is no "CI width at a hypothetical `n`" function for a bootstrap CI
-/// without real resampled data, so both keep the original `O(1/sqrt(n))` CLT-
-/// scaling model, with its own known, quantified bias: verified within
+/// against real, already-tested math. `mean-diff`/`quantile-diff`/`relative-diff` are the
+/// exception (`metrics::lacks_closed_form_ci`): there is no "CI width at a hypothetical `n`"
+/// function for a bootstrap CI without real resampled data, so all three keep the original
+/// `O(1/sqrt(n))` CLT-scaling model, with its own known, quantified bias: verified within
 /// ~1.5% of an actual re-run for a clean 4x sample-size jump at moderate n,
 /// but a real ~18% *under*-estimate at n=100, because e.g. Wilson's CI also
 /// shrinks via an `O(z^2/n)` recentering term this simple `1/sqrt(n)` model
-/// doesn't capture (measured for `mean-diff`; `quantile-diff` reuses the same
-/// model unverified for its own bootstrap CI, since it's the same "no closed
-/// form" shape). Treat `mean-diff`/`quantile-diff`'s result as "roughly this
+/// doesn't capture (measured for `mean-diff`; `quantile-diff`/`relative-diff` reuse the same
+/// model unverified for their own bootstrap CI, since it's the same "no closed
+/// form" shape). Treat any of the three metrics' result as "roughly this
 /// many, plausibly more," not a guarantee; the other metrics' result is exact
 /// (mod float precision) for the stated model (point estimate unchanged).
 #[allow(clippy::too_many_arguments)]
@@ -133,7 +134,7 @@ pub fn estimate_additional_trials(
     }
     let naive_estimate = (naive_required_n as u64).saturating_sub(paired_count);
 
-    if metric == MetricKind::MeanDiff || metric == MetricKind::QuantileDiff {
+    if metrics::lacks_closed_form_ci(metric) {
         return Some(naive_estimate);
     }
 
@@ -656,6 +657,7 @@ mod tests {
             max_cluster_size: None,
             effective_sample_size: None,
             design_effect: None,
+            scale_diagnostics: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,

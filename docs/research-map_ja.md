@@ -46,6 +46,53 @@ BCaのジャックナイフ加速度項は、平均に対するときのよう�
 ワークフロー)に対する実験前のサンプルサイズ見積もりへの具体的な要望があり、密度推定と分布の仮定
 のどちらのアプローチがその要望により適しているかを判断できるだけの詳細が伴う場合。
 
+### `power --metric relative-diff`
+
+**内容:** `power --metric mean-diff` の閉じた形の実験前計算(`docs/metrics_ja.md` 参照)を、
+`mean-diff` の代わりに `relative-diff` に適用するものです。
+
+**未実装の理由:** `mean-diff` の既存の `--assume-sd`/`--pilot` の設計に構造的には近いものの、単純な
+コピーではありません。`--assume-sd` は*相対*観測値(`(candidate - baseline) / baseline`)の標準偏差を
+意味する必要があり、絶対値のものではないため、`mean-diff` の検出力計画のために既に手元にある値を
+そのまま `relative-diff` へ流用することはできません。`--pilot` は標準偏差を推定する前に、パイロット
+データの各レコードを相対変換(`(candidate - baseline) / baseline`)する必要があり、生の値のままでは
+いけません。さらにこの変換には、`compare --metric relative-diff` が要求しているのと同じ
+`baseline > 0` の検証が必要で、これはパイロットデータにも適用されなければなりません(baselineが
+ゼロ/負のパイロットファイルは、実運用と同様に黙って使用可能なSD推定値を生成してはいけません)。
+どれも難しいことではありませんが、まだ独立した監査を経ていない、本物の設計上の検討事項です -
+`veridict power --metric relative-diff` は、`mean-diff` のコンストラクタを黙って再利用して単位を
+間違えるのではなく、現時点では明確な `VeridictError::PowerUnsupportedForRelativeDiff` を返します。
+
+**判断が変わる条件:** `relative-diff` ゲートに対する実験前のサンプルサイズ計画への具体的な要望が
+出てきた時点で、上記の3点がただの未解決の問いのリストではなく、実際の設計仕様になります。
+
+### logratioメトリクス(`log(candidate / baseline)`)
+
+**内容:** `log(candidate / baseline)` を、`relative-diff` が `(candidate - baseline) / baseline` を
+ブートストラップするのと同じ方法でブートストラップするものです - 「比例変化」という同じ問いに対する
+別の効果量であり、`relative-diff` にはない対称性を持ちます: `log(c/b) = -log(b/c)` であるため、
+baseline側とcandidate側を入れ替えると符号がちょうど反転し、`+X` のlog-ratioの後に `-X` の
+log-ratioが続けば元の値に厳密に戻ります(`relative-diff` では、+100%の増加の後に-50%の減少が続いて
+初めて元の値に戻る、という非対称性があります - `docs/metrics_ja.md` の `relative-diff` セクション
+参照)。正の値が乗法的に変化するデータに対しては、この対称性がより自然な効果量になることが多く、
+比率が乗法的に積み重なる分野(例えばlog-normalモデリング)では標準的な選択です。
+
+**未実装の理由:** `relative-diff` と同じラウンドで意図的に実装していません、見落としではありません
+- これは本質的に別の効果量であり(単位が異なる: パーセンテージではなくlog-ratio、中心の意味も
+異なる: どちらも `0` が「変化なし」を意味しますが、`+0.05` が意味するものは互いに異なります)、
+`relative-diff` と同じラウンドで出荷すると「これらは2つの異なる、それぞれ独立に正当化された
+メトリクスである」という、本プロジェクトが重視している線引きが曖昧になるリスクがありました
+(`AGENTS.md`の「凝った一行コードを避ける」という方針と、2つの半端に差別化されたメトリクスが同時に
+着地するよりも、1つのよく理解されたメトリクスを出荷しドキュメント化することを好む本プロジェクトの
+一般的な方針を参照)。`relative-diff` の `baseline > 0` という制約を共有するだけでなく(それほど
+明白ではありませんが)`candidate > 0` も必要です - 非正のcandidateの `log` は未定義であり、これは
+除算のみでlogを取らない `relative-diff` にはない制約です。そのため、`relative-diff` が適用できる
+データに対してすら、単純な置き換えにはなりません。
+
+**判断が変わる条件:** 対称的な比例変化メトリクスへの具体的な要望 - 最も可能性が高いのは、既に
+log-ratioを他の場所で使っているワークフロー(例えばlog-normalなレイテンシ/スループットモデリング)
+から、`compare` のpass/fail判定に既存のレポートと同じ単位で語ってほしいという要望です。
+
 ### Wilson連続性補正(`winrate`/`sign-test`/`elo`)
 
 **内容:** Wilson score intervalに対する小サンプル向けの補正で、区間をわずかに広げることで、
@@ -186,11 +233,12 @@ Bonferroniは一律`alpha/family_size`の予算を、Holm段階降下法は達�
 `verdict::apply_failure_caps`/`apply_failure_caps_to_multi`は
 `correction::apply_correction`/`apply_correction_to_multi`より*先に*実行され、技術的失敗で
 `Inconclusive`に強制されたレポートが正当なclaimとして扱われることはありません。`mean-diff`/
-`quantile-diff`と`--cluster-by-id`は、`family_size`にカウントしたまま黙って未補正で残すのでは
-なく、設定エラー(終了コード3)として拒否されます(mean-diff/quantile-diffには補正対象となる
-閉じた形のCIが存在せず、`--cluster-by-id`レポートのcluster bootstrap CIも
-`successes`/`paired_count`からは再構築できません。素朴なiidフォールバックは正のcluster内相関の
-もとでは実際より有意に見えてしまい、本プロジェクトの方針とは正反対の寛容さになります)。
+`quantile-diff`/`relative-diff`と`--cluster-by-id`は、`family_size`にカウントしたまま黙って
+未補正で残すのではなく、設定エラー(終了コード3)として拒否されます(`metrics::lacks_closed_form_ci`
+- 3つのbootstrap CIメトリクスはいずれも補正対象となる閉じた形のCIが存在せず、`--cluster-by-id`
+レポートのcluster bootstrap CIも`successes`/`paired_count`からは再構築できません。素朴なiid
+フォールバックは正のcluster内相関のもとでは実際より有意に見えてしまい、本プロジェクトの方針とは
+正反対の寛容さになります)。
 
 **まだ実装されていないもの:** `matrix`の全ペア補正(下記の「matrixの判定セマンティクス」の
 項目を参照 - `compare`で実装されたものの機械的な拡張ではなく、まず判定という概念自体を設計する
@@ -200,8 +248,8 @@ Bonferroniは一律`alpha/family_size`の予算を、Holm段階降下法は達�
 `compare`実行内のメトリクス間だけでなく、より広いキャンペーンでの候補間の補正)、逐次/
 繰り返し確認に対する警告(最終結果が出る前に蓄積中の結果を何度も確認すること自体が、今回は扱って
 いない多重性のリスクです)、そしてcluster対応/bootstrap対応の`achieved_alpha`(実現すれば
-`mean-diff`/`quantile-diff`/`--cluster-by-id`も拒否されることなく`--claim-correction`の
-ファミリーに参加できるようになります)。
+`mean-diff`/`quantile-diff`/`relative-diff`/`--cluster-by-id`も拒否されることなく
+`--claim-correction`のファミリーに参加できるようになります)。
 
 ### matrixの判定セマンティクス
 

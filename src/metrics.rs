@@ -14,15 +14,17 @@ mod common;
 mod elo;
 mod mean_diff;
 mod quantile_diff;
+mod relative_diff;
 mod sign_test;
 mod winrate;
 
-pub(crate) use common::{DiffCollector, OutcomeCollector};
+pub(crate) use common::{DiffCollector, OutcomeCollector, ROBUST_SPAN_MIN_POSITIVE_BASELINES};
 use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::error::VeridictError;
 use crate::input::Record;
+use crate::report::ScaleDiagnostics;
 use crate::{
     BootstrapMethod, CiMethod, FailurePolicy, IntoRecordResult, MetricConfig, MetricKind, Outcome,
     TrialStatus,
@@ -88,6 +90,11 @@ pub struct MetricOutput {
     /// pooled data - 1.0 means no measurable clustering effect; higher means the CI would have
     /// been overconfident without accounting for the clusters.
     pub design_effect: Option<f64>,
+    /// `mean-diff`/`relative-diff` only: the raw distribution of baseline values ingested by this
+    /// aggregator, computed from baselines alone - never candidate, effect, CI, or verdict (see
+    /// `common::compute_scale_diagnostics`). `None` for every other metric, and for these two
+    /// metrics whenever there were zero usable trials (nothing to compute a distribution from).
+    pub scale_diagnostics: Option<ScaleDiagnostics>,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called once per record
@@ -168,6 +175,15 @@ fn build_aggregator(
             quantile,
             bootstrap_method,
         )),
+        MetricConfig::RelativeDiff { bootstrap_method } => {
+            Box::new(relative_diff::RelativeDiffAggregator::new(
+                confidence,
+                resamples,
+                seed,
+                paired_by_id,
+                bootstrap_method,
+            ))
+        }
     }
 }
 
@@ -334,7 +350,20 @@ pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
         MetricKind::SignTest => "metric sign-test",
         MetricKind::Elo => "metric elo",
         MetricKind::QuantileDiff => "metric quantile-diff",
+        MetricKind::RelativeDiff => "metric relative-diff",
     }
+}
+
+/// Shared by `verdict::estimate_additional_trials` and `correction`'s two compatibility checks
+/// (`achieved_alpha`'s early return and `apply_correction`'s upfront guard) - all three need the
+/// exact same answer to "does this metric's CI have a closed form to search/recompute against," so
+/// this is the one place that set is spelled out, rather than three independently-maintained
+/// `matches!` lists that could silently drift apart when a new bootstrap-only metric is added.
+pub(crate) fn lacks_closed_form_ci(metric: MetricKind) -> bool {
+    matches!(
+        metric,
+        MetricKind::MeanDiff | MetricKind::QuantileDiff | MetricKind::RelativeDiff
+    )
 }
 
 /// A label for `IncompatibleCiMethod`'s error message; matches the CLI's
@@ -1052,6 +1081,214 @@ mod tests {
             false,
         );
         assert!(result.is_ok());
+    }
+
+    // --- relative-diff ---
+
+    fn relative_diff_compute(
+        records: &[(usize, Record)],
+        paired_by_id: bool,
+    ) -> Result<MetricOutput, VeridictError> {
+        compute(
+            records.iter().cloned(),
+            MetricConfig::RelativeDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            1000,
+            SEED,
+            paired_by_id,
+            false,
+        )
+    }
+
+    #[test]
+    fn relative_diff_basic_formula() {
+        // mean of +0.10 and -0.10 is 0 - confirms both signs compute correctly in one pass.
+        let records = [
+            (1, rec("a", Some(100.0), Some(110.0), None, None, None)),
+            (2, rec("b", Some(200.0), Some(180.0), None, None, None)),
+        ];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert_eq!(out.paired_count, 2);
+        assert!(out.effect.abs() < 1e-9);
+    }
+
+    #[test]
+    fn relative_diff_single_pair_matches_hand_computed_ratio() {
+        let records = [(1, rec("a", Some(100.0), Some(110.0), None, None, None))];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert!((out.effect - 0.10).abs() < 1e-9);
+
+        let records = [(1, rec("a", Some(200.0), Some(180.0), None, None, None))];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert!((out.effect - (-0.10)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn relative_diff_effect_is_the_mean_of_ratios_not_a_ratio_of_sums() {
+        // mean(candidate_i/baseline_i - 1): (0.05 + 0.05 + 0.05) / 3 = 0.05, unaffected by scale.
+        let records = [
+            (1, rec("a", Some(1_000.0), Some(1_050.0), None, None, None)),
+            (
+                2,
+                rec("b", Some(100_000.0), Some(105_000.0), None, None, None),
+            ),
+            (
+                3,
+                rec(
+                    "c",
+                    Some(50_000_000.0),
+                    Some(52_500_000.0),
+                    None,
+                    None,
+                    None,
+                ),
+            ),
+        ];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert!((out.effect - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn relative_diff_rejects_zero_baseline() {
+        let records = [(1, rec("a", Some(0.0), Some(1.0), None, None, None))];
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(
+            result,
+            Err(VeridictError::RelativeDiffRequiresPositiveBaseline { baseline, .. }) if baseline == 0.0
+        ));
+    }
+
+    #[test]
+    fn relative_diff_rejects_negative_baseline() {
+        let records = [(1, rec("a", Some(-5.0), Some(1.0), None, None, None))];
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(
+            result,
+            Err(VeridictError::RelativeDiffRequiresPositiveBaseline { baseline, .. }) if baseline == -5.0
+        ));
+    }
+
+    #[test]
+    fn relative_diff_rejects_nan_baseline() {
+        let records = [(1, rec("a", Some(f64::NAN), Some(1.0), None, None, None))];
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(
+            result,
+            Err(VeridictError::InvalidValue {
+                field: "baseline",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relative_diff_rejects_infinite_baseline() {
+        let records = [(
+            1,
+            rec("a", Some(f64::INFINITY), Some(1.0), None, None, None),
+        )];
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(
+            result,
+            Err(VeridictError::InvalidValue {
+                field: "baseline",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relative_diff_rejects_a_ratio_that_overflows_to_infinity() {
+        // Both inputs are individually finite, but the division overflows f64::INFINITY.
+        let records = [(1, rec("a", Some(1e-300), Some(1e300), None, None, None))];
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(
+            result,
+            Err(VeridictError::InvalidValue {
+                field: "relative_diff",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn relative_diff_accepts_a_negative_candidate_against_a_positive_baseline() {
+        // candidate isn't mechanically rejected for being negative - only baseline's sign/zero-ness
+        // is constrained.
+        let records = [(1, rec("a", Some(10.0), Some(-5.0), None, None, None))];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert!((out.effect - (-1.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn paired_relative_diff_averages_the_pair_after_transform_not_before() {
+        // Deliberately unequal baselines within the pair: averaging the two *ratios* (r1=+0.10,
+        // r2=-0.02 -> mean +0.04) differs from first averaging baseline/candidate and then taking
+        // one ratio of the averages (which would give a different number here) - this pins that
+        // DiffCollector nets already-transformed relative diffs, not raw baseline/candidate pairs.
+        let records = [
+            (1, rec("op1", Some(100.0), Some(110.0), None, None, None)), // +0.10
+            (2, rec("op1", Some(1_000.0), Some(980.0), None, None, None)), // -0.02
+        ];
+        let out = relative_diff_compute(&records, true).unwrap();
+        assert_eq!(out.paired_count, 1);
+        assert!((out.effect - 0.04).abs() < 1e-9);
+
+        // Confirm this really differs from "average baseline/candidate first, then one ratio":
+        let ratio_of_averages = (1_080.0 / 1_100.0) - 1.0;
+        assert!((out.effect - ratio_of_averages).abs() > 1e-3);
+    }
+
+    #[test]
+    fn relative_diff_paired_by_id_allows_duplicate_id_that_unpaired_mode_rejects() {
+        let records = [
+            (1, rec("dup", Some(10.0), Some(11.0), None, None, None)),
+            (2, rec("dup", Some(20.0), Some(21.0), None, None, None)),
+        ];
+        let result = relative_diff_compute(&records, true);
+        assert!(result.is_ok());
+        let result = relative_diff_compute(&records, false);
+        assert!(matches!(result, Err(VeridictError::DuplicateId { .. })));
+    }
+
+    #[test]
+    fn relative_diff_all_three_bootstrap_methods_run_without_error() {
+        let records: Vec<(usize, Record)> = (0..20)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(
+                        &format!("c{i}"),
+                        Some(10.0 + i as f64),
+                        Some(11.0 + i as f64 * 1.05),
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        for method in [
+            BootstrapMethod::Percentile,
+            BootstrapMethod::Basic,
+            BootstrapMethod::Bca,
+        ] {
+            let out = compute(
+                records.iter().cloned(),
+                MetricConfig::RelativeDiff {
+                    bootstrap_method: method,
+                },
+                0.95,
+                500,
+                SEED,
+                false,
+                false,
+            )
+            .unwrap();
+            assert!(out.ci_low.is_finite() && out.ci_high.is_finite());
+        }
     }
 
     #[test]

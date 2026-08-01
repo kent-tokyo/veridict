@@ -95,26 +95,27 @@ struct CompareArgs {
     #[arg(long, requires = "pass_above", allow_hyphen_values = true)]
     fail_below: Option<f64>,
 
-    /// Bootstrap resample count, used only by --metric mean-diff/quantile-diff.
+    /// Bootstrap resample count, used only by --metric mean-diff/quantile-diff/relative-diff.
     #[arg(long, default_value_t = 10_000)]
     resamples: usize,
 
-    /// Bootstrap RNG seed, used only by --metric mean-diff/quantile-diff. Defaults to a
-    /// fixed seed, so the same input reproduces bit-identical output in CI.
+    /// Bootstrap RNG seed, used only by --metric mean-diff/quantile-diff/relative-diff. Defaults
+    /// to a fixed seed, so the same input reproduces bit-identical output in CI.
     #[arg(long)]
     seed: Option<u64>,
 
     /// Confidence interval method for --metric winrate/sign-test. `exact`
     /// (Clopper-Pearson) and `jeffreys` are only valid for those two metrics;
-    /// combining either with --metric elo/mean-diff is a config error, not a
+    /// combining either with --metric elo/mean-diff/relative-diff is a config error, not a
     /// silent fallback.
     #[arg(long, value_enum, default_value = "wilson")]
     ci_method: CiMethodArg,
 
-    /// Bootstrap variant for --metric mean-diff/quantile-diff. `bca` corrects for bias and
-    /// skewness (not available for quantile-diff - the sample quantile's jackknife acceleration
-    /// term has no solid footing for a non-smooth statistic, a config error rather than a
-    /// silent fallback); `basic` reflects the percentile interval around the point estimate
+    /// Bootstrap variant for --metric mean-diff/quantile-diff/relative-diff. `bca` corrects for
+    /// bias and skewness (not available for quantile-diff - the sample quantile's jackknife
+    /// acceleration term has no solid footing for a non-smooth statistic, a config error rather
+    /// than a silent fallback; available for relative-diff, whose sample mean is smooth the same
+    /// way mean-diff's is); `basic` reflects the percentile interval around the point estimate
     /// (simpler, no bias-correction of its own); `percentile` stays the default so existing CI
     /// numbers don't silently shift.
     #[arg(long, value_enum, default_value = "percentile")]
@@ -143,7 +144,8 @@ struct CompareArgs {
     /// independent. Adds cluster_count/max_cluster_size/effective_sample_size/design_effect to
     /// the report. Mutually exclusive with --paired-by-id (nets exactly two records per id into
     /// one observation, a different treatment of a repeated id) and any other requested metric
-    /// (mean-diff/sign-test/quantile-diff cluster support is deferred, see docs/research-map.md).
+    /// (mean-diff/sign-test/quantile-diff/relative-diff cluster support is deferred, see
+    /// docs/research-map.md).
     #[arg(long, conflicts_with = "paired_by_id")]
     cluster_by_id: bool,
 
@@ -167,8 +169,8 @@ struct CompareArgs {
     /// (default): today's existing behavior, unchanged. `bonferroni`: uniform per-metric
     /// significance alpha/family_size. `holm`: step-down, uniformly more powerful than Bonferroni
     /// for the same family-wise guarantee. Rejected as a configuration error for a family that
-    /// includes --metric mean-diff/quantile-diff (no closed-form CI to correct) or was run with
-    /// --cluster-by-id (correction would reconstruct the wrong CI shape).
+    /// includes --metric mean-diff/quantile-diff/relative-diff (no closed-form CI to correct) or
+    /// was run with --cluster-by-id (correction would reconstruct the wrong CI shape).
     #[arg(long, value_enum, conflicts_with = "correction")]
     claim_correction: Option<CorrectionArg>,
 
@@ -641,6 +643,12 @@ enum PowerMetricArg {
     SignTest,
     Elo,
     MeanDiff,
+    /// Not implemented this round - `PowerMetric::new` rejects it with
+    /// `VeridictError::PowerUnsupportedForRelativeDiff`. Offered as a real CLI choice (rather than
+    /// simply omitted the way `quantile-diff` is) so `power --metric relative-diff` fails with a
+    /// clear, domain-specific error instead of clap's generic "invalid value" usage message - see
+    /// docs/research-map.md for what's deferred and why.
+    RelativeDiff,
 }
 
 impl From<PowerMetricArg> for MetricKind {
@@ -650,6 +658,7 @@ impl From<PowerMetricArg> for MetricKind {
             PowerMetricArg::SignTest => MetricKind::SignTest,
             PowerMetricArg::Elo => MetricKind::Elo,
             PowerMetricArg::MeanDiff => MetricKind::MeanDiff,
+            PowerMetricArg::RelativeDiff => MetricKind::RelativeDiff,
         }
     }
 }
@@ -661,6 +670,7 @@ fn power_metric_arg_label(m: PowerMetricArg) -> &'static str {
         PowerMetricArg::SignTest => "sign-test",
         PowerMetricArg::Elo => "elo",
         PowerMetricArg::MeanDiff => "mean-diff",
+        PowerMetricArg::RelativeDiff => "relative-diff",
     }
 }
 
@@ -671,6 +681,7 @@ enum MetricArg {
     SignTest,
     Elo,
     QuantileDiff,
+    RelativeDiff,
 }
 
 impl From<MetricArg> for MetricKind {
@@ -681,6 +692,7 @@ impl From<MetricArg> for MetricKind {
             MetricArg::SignTest => MetricKind::SignTest,
             MetricArg::Elo => MetricKind::Elo,
             MetricArg::QuantileDiff => MetricKind::QuantileDiff,
+            MetricArg::RelativeDiff => MetricKind::RelativeDiff,
         }
     }
 }

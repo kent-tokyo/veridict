@@ -139,6 +139,7 @@ impl MetricAggregator for WinRateAggregator {
                 max_cluster_size: None,
                 effective_sample_size: None,
                 design_effect: None,
+                scale_diagnostics: None,
             });
         }
         let p_hat = candidate_wins as f64 / n as f64;
@@ -193,6 +194,7 @@ impl MetricAggregator for WinRateAggregator {
             records_with_id: 0,
             max_id_count: 0,
             quantile: None,
+            scale_diagnostics: None,
         })
     }
 }

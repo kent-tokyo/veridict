@@ -4,7 +4,10 @@
 
 [![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/veridict.svg)](https://crates.io/crates/veridict)
+[![docs.rs](https://img.shields.io/docsrs/veridict)](https://docs.rs/veridict)
+[![Downloads](https://img.shields.io/crates/d/veridict.svg)](https://crates.io/crates/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![GitHub stars](https://img.shields.io/github/stars/kent-tokyo/veridict.svg?style=social)](https://github.com/kent-tokyo/veridict)
 
 候補(candidate)がベースライン(baseline)より本当に優れているかを判定する、小さくドメイン非依存な評価ゲート。トライアル結果のファイルから判定します。
 
@@ -35,6 +38,9 @@
 * **レイテンシ/テール性能のリグレッションゲート** - 平均だけでは悪化した最悪ケースを見逃す →
   ペアのリクエストごとのレイテンシに `--metric quantile-diff --quantile 0.95`(または `0.99`)
   (`examples/paired_scores.jsonl`)。
+* **ケースごとに問題規模が大きく異なるベンチマークスイート** - 生スコアの差は最大規模のケースに
+  支配されてしまう → 絶対量ではなく比例変化を見る `--metric relative-diff`
+  (`examples/mixed_scale_scores.jsonl`)。
 * **CIでのリリースリグレッションゲート** - 候補ビルドを直近の正常なベースラインと比較し、
   `--fail-below`/`--pass-above` と `veridict` の終了コードでパイプラインに組み込む
   (下記の[使い方](#使い方)のリグレッションゲート例を参照)。
@@ -107,6 +113,22 @@ veridict compare results.jsonl --metric winrate --metric elo --min-effect 0.02 -
 ```bash
 veridict compare results.jsonl --metric winrate --ci-method exact
 veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
+```
+
+問題規模や生スコアがケースごとに大きく異なるベンチマークで、baselineに対する比例変化を見る
+([スケール不整合の診断](#スケール不整合の診断)参照):
+
+```bash
+veridict compare examples/mixed_scale_scores.jsonl --metric relative-diff --min-effect 0.03
+```
+
+非対称なしきい値も他のメトリクスと全く同じように使えます:
+
+```bash
+veridict compare examples/mixed_scale_scores.jsonl \
+  --metric relative-diff \
+  --pass-above 0.03 \
+  --fail-below -0.02
 ```
 
 candidateのクラッシュ/タイムアウトを、単に報告するだけでなく敗北として扱う(正確な
@@ -192,6 +214,9 @@ veridict power --sprt --elo0 0 --elo1 20
 * `examples/winloss.jsonl` - 勝敗/引き分けのレコード。`--metric winrate` / `--metric sign-test` 用。
 * `examples/paired_scores.jsonl`(同じデータのCSV版が `examples/paired_scores.csv`、下記参照) -
   baseline/candidateのペア数値スコア。`--metric mean-diff` / `--metric sign-test` 用。
+* `examples/mixed_scale_scores.jsonl` - baselineが広い範囲にわたり、かつすべて厳密に正である
+  baseline/candidateのペア数値スコア。`--metric relative-diff` 用(および `--metric mean-diff` の
+  [スケール不整合の診断](#スケール不整合の診断)のデモ用)。
 * `examples/status_failures.jsonl` - サポートされる全レコード形式をまとめてフォーマットを例示したもの(そのまま単一メトリクスに対して実行することは想定していません: レコードは選択したメトリクスが理解できるフィールド、または `baseline_status`/`candidate_status` フィールドのいずれかを持つ必要があり、なければスキーマ不一致として拒否されます)。
 * `examples/chess_engine_draw_heavy.jsonl` - 引き分け率の高い勝敗/引き分けレコード。
   `veridict sprt --sprt-variant trinomial` 用([SPRT](#sprt)参照)。
@@ -235,8 +260,34 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
   統計量であり、BCaのジャックナイフ加速度がそれに対して堅固な裏付けを持たないため。詳細は
   [`docs/metrics_ja.md`](docs/metrics_ja.md) 参照)。1回の実行につき分位点は1つ - 2つ目の分位点
   が必要なら `compare` をもう一度実行してください。
+* **`relative-diff`** - baseline/candidateのペア数値レコードに対する
+  `(candidate - baseline) / baseline` のブートストラップ信頼区間: `mean-diff` の絶対変化ではなく、
+  baselineに対する比例変化です。すべてのbaselineが厳密に正(`baseline > 0`)であることが必須です -
+  ゼロや負のbaselineは設定/データのエラーとして拒否され、`abs(baseline)` や分母のオフセットで黙って
+  計算されることはありません。`--bootstrap-method percentile`/`basic`/`bca`/`--resamples`/`--seed`
+  は `mean-diff` と同じだけ対応しています。`effect`/`ci_low`/`ci_high` は比率(`0.05` = +5%)として
+  報告され、Markdownではパーセンテージとして表示されます(`+5.0%`)- `winrate` のパーセンテージ
+  ポイント(`pp`)接尾辞とは区別されます。今回未対応: `veridict power --metric relative-diff` と
+  `--claim-correction`(詳細は[`docs/metrics_ja.md`](docs/metrics_ja.md)参照)。
 
-`winrate` と `sign-test` は `effect`/`ci_low`/`ci_high` を0を中心とした値(五分五分からの偏差)として報告します。`elo` も構造上0を中心とします(五分の成績は0 Elo)。この3つはいずれも `--min-effect` とそのまま組み合わせられます。`mean-diff`/`quantile-diff` は入力そのものの単位で報告します。
+「1単位の差」が全レコードで同じ実務的意味を持つ場合は `mean-diff` を使ってください。事前に定めた
+評価対象が比例変化であり、baselineがすべて正である場合は `relative-diff` を使ってください。
+この2つは同じ問いを異なる精度で答えるのではなく、異なる問い(平均絶対変化 vs. baselineに対する
+平均比例変化)に答えるものです - 選ぶ前に知っておくべき点がいくつかあります:
+
+* `relative-diff` は方向依存であり、両辺を入れ替えても対称にはなりません: +100%の増加の後に
+  -50%の減少が続くと、元の値にちょうど戻ります。
+* baselineがゼロまたは負の場合は使えません(`compare` は何を意図していたか推測せず、実行全体を
+  拒否します)。
+* 小さいbaselineは、小さな絶対的変化からでも大きな比を生み出し得ます - 単独の大きな
+  `relative-diff` の外れ値を信頼する前に、データのbaselineスケールを把握してください。
+* 各ペア自身の相対差の平均と、合計値どうしの比(`sum(candidate)/sum(baseline) - 1`)は、
+  baselineのスケールがばらつく場合には一般に異なる値になります - `relative-diff` が報告するのは
+  前者です(詳細は[`docs/metrics_ja.md`](docs/metrics_ja.md)参照)。
+* 両方を見た*後で*たまたま通った方を選ぶのは、事前に定めた評価対象ではなく探索的な分析です -
+  詳しくは下記の[スケール不整合の診断](#スケール不整合の診断)を参照してください。
+
+`winrate` と `sign-test` は `effect`/`ci_low`/`ci_high` を0を中心とした値(五分五分からの偏差)として報告します。`elo` も構造上0を中心とします(五分の成績は0 Elo)。この3つはいずれも `--min-effect` とそのまま組み合わせられます。`mean-diff`/`quantile-diff` は入力そのものの単位で報告し、`relative-diff` は比率として報告します。
 
 各トライアルの `baseline_status`/`candidate_status`(`timeout`、`crash`、`invalid`)は、どのメトリクスを実行してもタリーされ、レポートに含まれます。合計値だけでなく、どちら側で失敗したかの内訳(JSONレポートの `failure_breakdown`)も出力されます。`--failure-policy`(`compare --metric winrate`/`--metric elo` と `sprt` の全 `--sprt-variant` で使用可能)は、失敗がレポートだけでなく*計算そのもの*にも影響するかどうかを制御します:
 
@@ -244,9 +295,44 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
 * **`exclude`** - 失敗した側の `result` は、ステータスと同居していてもカウントされません。`report-only` と異なるのはこの混在ケースだけで、ステータスのみの一般的なケースはどちらでも同じ挙動です。
 * **`loss`** - 失敗した側の結果を `result` から読む代わりに合成します: candidateが失敗 -> `baseline_win`、baselineが失敗 -> `candidate_win`、両方失敗 -> `draw`。これは同じレコード上の `result` を*上書き*します - `result` が何と言っていようと、失敗ステータスの方が信頼されます。
 
-`exclude`/`loss` は勝敗ベースのメトリクス(`winrate`/`elo`)にのみ適用されます。`--metric mean-diff`/`--metric sign-test` と組み合わせるのは設定エラーです - 失敗した数値トライアルに恣意的なペナルティを課す原理的な方法がないためです。
+`exclude`/`loss` は勝敗ベースのメトリクス(`winrate`/`elo`)にのみ適用されます。`--metric mean-diff`/`--metric sign-test`/`--metric relative-diff` と組み合わせるのは設定エラーです - 失敗した数値トライアルに恣意的なペナルティを課す原理的な方法がないためです。
 
 複数の `--metric` を同時に指定した場合も、入力全体のスキャンは1回だけです(メトリクスの数だけスキャンを繰り返すのではなく、1回のスキャンで全メトリクスに各レコードを渡します)。
+
+## スケール不整合の診断
+
+`--metric mean-diff` を実行すると、baselineがすべて正でありながら少なくとも約10倍の範囲にわたる
+場合に `data_quality.wide_baseline_scale`(助言のみで `verdict` は変更しません)が発火します -
+絶対差が最大規模のケースに支配されている可能性があるというサインです:
+
+```console
+$ veridict compare examples/mixed_scale_scores.jsonl --metric mean-diff --min-effect 0
+...
+"warnings": [
+  "small sample: 15 paired trial(s), below the conventional 30-trial threshold for confidence-interval methods to be reliable",
+  "baseline values span 1.8 orders of magnitude; absolute differences may be dominated by larger-scale cases. If the scientific question is proportional change, consider --metric relative-diff. Choose the metric before confirmatory analysis; switching after inspecting the verdict is exploratory."
+]
+```
+
+baselineにゼロまたは負の値が含まれる場合、警告は代わりにドメインに即した正規化を提案します
+(`relative-diff` はそのデータに対しても同様にwell-definedではないため):
+
+```text
+baseline values vary widely, but some baselines are zero or negative, so
+relative-diff is not well-defined for this dataset. Use a domain-justified
+normalization rather than adding an arbitrary denominator offset.
+```
+
+**この診断は、観測された結果に基づいてメトリクスの切り替えを推奨することは決してありません。**
+baselineの値のみから計算されます - `positive_baseline_count`、`non_positive_baseline_count`、
+`min_positive_baseline`、`max_positive_baseline`、`raw_orders_of_magnitude`、そして(外れ値1件が
+支配しないよう、正のbaselineが20件以上のときのみ)`robust_orders_of_magnitude` が
+`mean-diff`/`relative-diff` のレポート上で `scale_diagnostics` として公開されます - candidateの値、
+効果量、CI、判定は一切見ません。確証的な分析として扱う前に、測定目標に基づいて
+`--metric mean-diff` か `--metric relative-diff` かを選んでください。判定結果を見た後にメトリクスを
+切り替えることは、2つ目の確証的な分析ではなく探索的なものであり、新規または保留にしていたデータで
+検証すべきです。正確なしきい値と警告文のルールは [`docs/metrics_ja.md`](docs/metrics_ja.md) を
+参照してください。
 
 ## 多重比較補正
 
@@ -261,8 +347,8 @@ deployment-gateの `verdict`/`promotion` には一切触れません - 全metric
 (併せて `unadjusted_verdict` も現れますが、これは常に `verdict` と同値を返す非推奨の互換エイリアス
 です - 代わりに `verdict` を読んでください)と、実行全体の `simultaneous_claims_promotion` という
 別のフィールドに反映されます。`--cluster-by-id`
-や `--metric mean-diff`/`quantile-diff` との併用はサポートされておらず、設定エラーとして拒否
-されます(理由は `docs/metrics_ja.md` 参照)。`--correction` は1リリースだけ非推奨エイリアスとして
+や `--metric mean-diff`/`quantile-diff`/`relative-diff` との併用はサポートされておらず、設定エラー
+として拒否されます(理由は `docs/metrics_ja.md` 参照)。`--correction` は1リリースだけ非推奨エイリアスとして
 残ります。デフォルトは `none` - オプトインしない限り、今日と全く同じ挙動のままです。
 
 ```console
@@ -325,8 +411,12 @@ inconclusiveに格下げすることしかできず、failを新たに作り出�
 `compare` のレポートには、`verdict` に影響しない付加的なフィールドも常に含まれます:
 
 * **`estimated_additional_trials`** - `inconclusive` な結果を決着させるのに必要な追加トライアル数のおおまかな見積もり(信頼区間が `O(1/√n)` で縮小するという前提、効果量自体は変わらないと仮定)。提案できることが何もない場合は `null` になります - 既に判定済み、トライアル数が0件、あるいは効果量がpass/failしきい値の"内側"(デッドゾーン)にある場合です: 効果量がすでにデッドゾーン内にある点推定を中心に信頼区間を縮めても、データをどれだけ追加してもどちらの境界も越えられません。この数値は「保証」ではなく「だいたいこのくらい、あるいはもっと必要」という目安として扱ってください - 既知の、定量化されたバイアスがあります(検証済みの一例では n=100 で約18%の過小評価)。
-* **`warnings`** - 人間可読なデータ品質の警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、`elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)、測定された効果量がCI自身の半値幅より小さい(ゼロ周りのノイズである可能性がある)、`quantile-diff` で要求された分位点の薄い方の裾の期待観測数が10件未満(`paired_count * min(q, 1-q)`)、またはunpairedモードで同一の`id`が10件以上のid付きトライアル中3回以上繰り返されている(すべての`id`がちょうど2回ずつ出現する場合 - つまり`--paired-by-id`を付け忘れただけのよくあるケース - は発火しません)場合です。
-* **`data_quality`** - `warnings` と同じ内容を、文字列ではなく真偽値(`tiny_sample`、`high_failure_rate`、`draw_heavy`、`effect_within_noise_floor`、`low_id_diversity`、`thin_quantile_tail`)として持つフィールドです。文章を解析するのではなくフラグで分岐したい機械側の消費者向けです。`warnings` を置き換えるものではなく併存します - どちらも常に存在します。
+* **`warnings`** - 人間可読なデータ品質の警告で、何もなければ空です: サンプルが小さい(ペアトライアルが30件未満)、失敗率が高い(timeout/crash/invalidが20%超)、`elo` で引き分けが多い(引き分けが50%を超えると、レーティングの根拠となる決着済みの結果が少なくなります)、測定された効果量がCI自身の半値幅より小さい(ゼロ周りのノイズである可能性がある)、`quantile-diff` で要求された分位点の薄い方の裾の期待観測数が10件未満(`paired_count * min(q, 1-q)`)、`mean-diff` でbaselineが広い範囲にわたる(上記の[スケール不整合の診断](#スケール不整合の診断)参照)、またはunpairedモードで同一の`id`が10件以上のid付きトライアル中3回以上繰り返されている(すべての`id`がちょうど2回ずつ出現する場合 - つまり`--paired-by-id`を付け忘れただけのよくあるケース - は発火しません)場合です。
+* **`data_quality`** - `warnings` と同じ内容を、文字列ではなく真偽値(`tiny_sample`、`high_failure_rate`、`draw_heavy`、`effect_within_noise_floor`、`low_id_diversity`、`thin_quantile_tail`、`wide_baseline_scale`)として持つフィールドです。文章を解析するのではなくフラグで分岐したい機械側の消費者向けです。`warnings` を置き換えるものではなく併存します - どちらも常に存在します。
+* **`scale_diagnostics`** - `mean-diff`/`relative-diff` のみ: `wide_baseline_scale` の算出元となる
+  baseline値の生の分布(`positive_baseline_count`、`non_positive_baseline_count`、
+  `min_positive_baseline`、`max_positive_baseline`、`raw_orders_of_magnitude`、
+  `robust_orders_of_magnitude`)です。詳細は[スケール不整合の診断](#スケール不整合の診断)参照。
 
 各手法の前提・失敗モードの詳細は [`docs/metrics_ja.md`](docs/metrics_ja.md) を参照してください。
 
@@ -745,8 +835,11 @@ CSVの行番号は物理的なファイル行ではなくレコードのイン�
 
 * `winrate`/`elo`: ペア全体の合計ポイント(勝ち=1、引き分け=0.5、負け=0という、いわゆる「ペアゲーム」の標準的な採点方式)で正味化します - 合計が`1`より大きければ正味candidate勝ち、`1`未満なら正味baseline勝ち、ちょうど`1`なら正味引き分けです。
 * `mean-diff`/`quantile-diff`/`sign-test`: ペアの2つの差分の平均で正味化します。
+* `relative-diff`: 各生レコードをまず相対変換し(`(candidate - baseline) / baseline`)、その後
+  ペアの2つの比を平均して正味化します - 先にbaseline/candidateを平均してから1つの比を取るのでは
+  ありません(詳細は[`docs/metrics_ja.md`](docs/metrics_ja.md)参照)。
 
-`id` が1回しか出現しない場合は通常のペアなしサンプルとして扱われます(1つのファイルにペアありとペアなしのテストケースが混在しても問題ありません)。同じ `id` を持つレコードが3つ以上ある場合は、ペアへ黙って切り詰めるのではなく、データエラーとして拒否されます。`--paired-by-id` を指定しない場合、`mean-diff`/`quantile-diff`/`sign-test` レコードの `id` 重複はこのフラグの有無に関わらず従来どおり拒否されます。
+`id` が1回しか出現しない場合は通常のペアなしサンプルとして扱われます(1つのファイルにペアありとペアなしのテストケースが混在しても問題ありません)。同じ `id` を持つレコードが3つ以上ある場合は、ペアへ黙って切り詰めるのではなく、データエラーとして拒否されます。`--paired-by-id` を指定しない場合、`mean-diff`/`quantile-diff`/`sign-test`/`relative-diff` レコードの `id` 重複はこのフラグの有無に関わらず従来どおり拒否されます。
 
 **`sprt --sprt-variant pentanomial` だけは「`id` が1回だけならペアなしサンプルとして扱う」という原則の例外です**: ペアを正味化せず5値のスコアをそのまま使うため([SPRT](#sprt)参照)、1局だけでは意味を持ちません。そのため常に `--paired-by-id` が必須で、ちょうど2回出現しない `id` は即座にエラーになります - 他のすべての箇所とは異なり、ペアなしサンプルとしては扱われません。
 
@@ -765,10 +858,11 @@ veridict が出す数値は独自の謎スコアではなく、標準的な(査�
 
 * **`winrate`/`sign-test` の信頼区間** - Wilson score interval(Wilson 1927)。`--ci-method exact`
   を指定すると、代わりにClopper-Pearsonの正確な二項信頼区間(Clopper & Pearson 1934)になります。
-* **`mean-diff`/`quantile-diff` の信頼区間** - percentile / BCa(バイアス補正・加速)ブートストラップ。
-  いずれもEfron & Tibshirani『An Introduction to the Bootstrap』(1993年、14章)に基づきます。
-  `quantile-diff` ではBCaはCLIレベルでゲートされています(詳細は
-  [`docs/metrics_ja.md`](docs/metrics_ja.md) 参照)。
+* **`mean-diff`/`quantile-diff`/`relative-diff` の信頼区間** - percentile / BCa(バイアス補正・加速)
+  ブートストラップ。いずれもEfron & Tibshirani『An Introduction to the Bootstrap』(1993年、14章)に
+  基づきます。BCaがCLIレベルでゲートされているのは `quantile-diff` のみです(詳細は
+  [`docs/metrics_ja.md`](docs/metrics_ja.md) 参照)- `relative-diff` は `mean-diff` と同じく3つの
+  `--bootstrap-method` すべてに対応しています。
 * **`elo`** - ロジスティックElo モデル。Eloの原型のレーティングシステム(Elo 1978)を、広く使われて
   いる形に変形したものです。
 * **`sprt`** - Waldの逐次確率比検定(Wald 1945、`--sprt-variant wald`)。`trinomial`/`pentanomial`
@@ -786,11 +880,12 @@ veridict が出す数値は独自の謎スコアではなく、標準的な(査�
   本プロジェクト独自の設計判断です。
 * **`estimated_additional_trials`** - `winrate`/`sign-test`/`elo` では、レポートが実際に使っている
   CI計算式に対する二分探索であり、想定モデル(点推定を固定)のもとでは厳密です。例外は
-  `mean-diff`/`quantile-diff`で、どちらのブートストラップCIにもそのような閉形式が存在しないため、
-  `O(1/sqrt(n))` のスケーリングによる近似にフォールバックします。これには既知のバイアスがあります
-  (レポートの追加情報を参照)。
+  `mean-diff`/`quantile-diff`/`relative-diff`で、いずれのブートストラップCIにもそのような閉形式が
+  存在しないため、3つとも `O(1/sqrt(n))` のスケーリングによる近似にフォールバックします。これには
+  既知のバイアスがあります(レポートの追加情報を参照)。
 * **`warnings`** - サンプル数30件・失敗率20%・引き分け率50%・(`quantile-diff`のみ)裾の期待観測数
-  10件といった閾値は、特定の論文由来ではなく慣習的な経験則です。
+  10件・(`mean-diff`のみ)baselineスケール約10倍といった閾値は、特定の論文由来ではなく慣習的な
+  経験則です。
 
 ### 参考文献
 

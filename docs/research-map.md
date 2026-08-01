@@ -48,6 +48,55 @@ concept is itself still an open design question (see "Matrix verdict semantics" 
 quantile-based gate (most plausibly a latency/p95 regression-testing workflow), with enough detail
 to settle whether a density-estimate or distributional-assumption approach fits the request better.
 
+### `power --metric relative-diff`
+
+**What it is:** `power --metric mean-diff`'s closed-form pre-experiment calculation (see
+`docs/metrics.md`), applied to `relative-diff` instead of `mean-diff`.
+
+**Why not yet:** structurally close to `mean-diff`'s existing `--assume-sd`/`--pilot` design, but
+not a mechanical copy - `--assume-sd` would need to mean the standard deviation of *relative*
+observations (`(candidate - baseline) / baseline`), not absolute ones, so a value someone already
+has on hand for `mean-diff` power planning isn't reusable as-is for `relative-diff`; `--pilot` would
+need to relative-transform each pilot record (`(candidate - baseline) / baseline`) before estimating
+a standard deviation from the transformed sample, not the raw one; and that transform needs the same
+`baseline > 0` validation `compare --metric relative-diff` enforces, applied to pilot data too (a
+pilot file with a zero/negative baseline can't silently produce a usable SD estimate any more than a
+real run can). None of this is hard, but it's real design surface that hasn't been independently
+audited yet - `veridict power --metric relative-diff` currently returns a clear
+`VeridictError::PowerUnsupportedForRelativeDiff` rather than quietly reusing `mean-diff`'s
+constructor and getting the units wrong.
+
+**What would change this:** a concrete request for pre-experiment sample-size planning against a
+`relative-diff` gate, at which point the above three points become the actual design spec rather
+than a list of open questions.
+
+### Log-ratio metric (`log(candidate / baseline)`)
+
+**What it is:** `log(candidate / baseline)`, bootstrapped the same way `relative-diff` bootstraps
+`(candidate - baseline) / baseline` - a different effect size for the same "proportional change"
+question, with a symmetry property `relative-diff` doesn't have: `log(c/b) = -log(b/c)`, so swapping
+which arm is baseline and which is candidate exactly flips the sign, and a `+X` log-ratio followed by
+a `-X` log-ratio returns exactly to the start (unlike `relative-diff`, where a +100% increase
+followed by a -50% decrease returns to the original value - see `docs/metrics.md`'s `relative-diff`
+section). For positive, multiplicatively-varying data, this symmetry is often the more natural
+effect size, and it's the standard choice in fields (e.g. log-normal modeling) where ratios compound
+multiplicatively.
+
+**Why not yet:** deliberately not implemented alongside `relative-diff` this round, on purpose, not
+by oversight - it's a genuinely different effect size (different units: log-ratio, not a percentage;
+different center: `0` means "no change" for both, but `+0.05` means different things in each), and
+shipping it in the same round as `relative-diff` risked blurring the "these are two distinct,
+independently-justified metrics" line this project cares about (see `AGENTS.md`'s "avoid clever
+one-liners" and this project's general preference for one well-understood metric shipped and
+documented over two half-differentiated ones landing together). It shares `relative-diff`'s
+`baseline > 0` requirement (and, less obviously, needs `candidate > 0` too - `log` of a non-positive
+candidate is undefined, a constraint `relative-diff` doesn't have since it only divides, never takes
+a log), so it isn't a drop-in swap even for data where both would otherwise apply.
+
+**What would change this:** a concrete request for a symmetric proportional-change metric - most
+plausibly from a workflow already using log-ratios elsewhere (e.g. log-normal latency/throughput
+modeling) that wants `compare`'s pass/fail gate to speak the same units it already reports in.
+
 ### Wilson continuity correction (`winrate`/`sign-test`/`elo`)
 
 **What it is:** a small-sample correction to the Wilson score interval that widens it slightly,
@@ -190,12 +239,13 @@ populates a separate `Report.family_adjusted_verdict`/`family_adjusted_promotion
 `verdict::apply_failure_caps`/`apply_failure_caps_to_multi` run *before*
 `correction::apply_correction`/`apply_correction_to_multi`, so a report already forced to
 `Inconclusive` for a technical failure never counts as a legitimate claim. `mean-diff`/
-`quantile-diff` and `--cluster-by-id` are rejected outright as a configuration error (exit code 3)
-rather than silently left uncorrected while still counting toward `family_size` (mean-diff/
-quantile-diff have no closed-form CI to correct against; a `--cluster-by-id` report's cluster
-bootstrap CI can't be reconstructed from `successes`/`paired_count` either, and a naive i.i.d.
-fallback would read as more significant than it truly is under positive intra-cluster correlation -
-leniency in exactly the direction this project's bias forbids).
+`quantile-diff`/`relative-diff` and `--cluster-by-id` are rejected outright as a configuration error
+(exit code 3) rather than silently left uncorrected while still counting toward `family_size`
+(`metrics::lacks_closed_form_ci` - none of the three bootstrap-CI metrics has a closed-form CI to
+correct against; a `--cluster-by-id` report's cluster bootstrap CI can't be reconstructed from
+`successes`/`paired_count` either, and a naive i.i.d. fallback would read as more significant than
+it truly is under positive intra-cluster correlation - leniency in exactly the direction this
+project's bias forbids).
 
 **Still not yet:** `matrix`'s all-pairs correction (see the "matrix verdict semantics" entry below
 - it needs its own verdict concept designed first, not a mechanical extension of what shipped for
@@ -205,8 +255,8 @@ conservative family-error target than FWER), finer-grained correction "families"
 across candidates in a broader campaign, not just across metrics within one `compare` run),
 sequential/repeated-looks warnings (checking an accumulating result multiple times before it's
 final is itself a multiplicity risk this round doesn't address), and a cluster-aware/
-bootstrap-aware `achieved_alpha` (which would let `mean-diff`/`quantile-diff`/`--cluster-by-id`
-join a `--claim-correction` family instead of being rejected outright).
+bootstrap-aware `achieved_alpha` (which would let `mean-diff`/`quantile-diff`/`relative-diff`/
+`--cluster-by-id` join a `--claim-correction` family instead of being rejected outright).
 
 ### Matrix verdict semantics
 
@@ -257,27 +307,27 @@ changes which side of a threshold/LLR boundary a run lands on. No concrete workf
 **What would change this:** a concrete request to have a candidate's crash/timeout rate pull its
 own Elo estimate down in a matrix run, not just get reported alongside it.
 
-### `--cluster-by-id` for `mean-diff`/`sign-test`/`quantile-diff`
+### `--cluster-by-id` for `mean-diff`/`sign-test`/`quantile-diff`/`relative-diff`
 
 **What it is:** `--cluster-by-id` (see `docs/metrics.md`) ships for `winrate`/`elo` - a cluster
 bootstrap CI over id-grouped outcome tallies, correctly widening the interval when many trials
 share a common source of correlation (the same opening/testcase replayed several times).
-`mean-diff`/`sign-test`/`quantile-diff` don't get it yet.
+`mean-diff`/`sign-test`/`quantile-diff`/`relative-diff` don't get it yet.
 
 **Why not yet:** `winrate`/`elo` both collect through `OutcomeCollector`, which already tracks
 per-id groups for `--paired-by-id`'s netting - extending that same grouping to feed a cluster
-bootstrap instead was a natural reuse. `mean-diff`/`sign-test`/`quantile-diff` collect through
-`DiffCollector`/`SignCounts` instead, which discard per-id structure once a value is netted or
-tallied; giving them real cluster support needs those collectors to retain cluster structure
-through to resampling (which `mean-diff`/`quantile-diff` already do for their own *non*-clustered
-bootstrap, so it's a plausible extension, not a new mechanism) - separate wiring per collector, not
-a mechanical copy of `OutcomeCollector`'s change.
+bootstrap instead was a natural reuse. `mean-diff`/`sign-test`/`quantile-diff`/`relative-diff`
+collect through `DiffCollector`/`SignCounts` instead, which discard per-id structure once a value
+is netted or tallied; giving them real cluster support needs those collectors to retain cluster
+structure through to resampling (which `mean-diff`/`quantile-diff`/`relative-diff` already do for
+their own *non*-clustered bootstrap, so it's a plausible extension, not a new mechanism) - separate
+wiring per collector, not a mechanical copy of `OutcomeCollector`'s change.
 
 **What would change this:** a concrete workflow needing a cluster-robust CI for paired numeric
 data (e.g. per-request latencies clustered by which endpoint/deployment produced them) - most
-directly implementable for `mean-diff`/`quantile-diff` (already bootstrap-based) before
-`sign-test` (closed-form Wilson on a sign proportion, same harder-conversion shape `winrate`/`elo`
-themselves needed).
+directly implementable for `mean-diff`/`quantile-diff`/`relative-diff` (already bootstrap-based)
+before `sign-test` (closed-form Wilson on a sign proportion, same harder-conversion shape
+`winrate`/`elo` themselves needed).
 
 ### Checkpoint/training lineage tracking
 

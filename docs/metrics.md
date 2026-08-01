@@ -114,6 +114,139 @@ either's bootstrap CI), and outright rejection as a configuration error for the 
 closed-form CI-at-a-hypothetical-confidence function either - see the `--claim-correction` section
 below).
 
+## `relative-diff` bootstrap confidence interval
+
+**Established statistic, the same bootstrap methodology as `mean-diff` applied to a different
+effect size.** Rather than bootstrapping `candidate - baseline` directly, `relative-diff`
+transforms each usable record's pair to `(candidate - baseline) / baseline` first, then bootstraps
+that transformed sample exactly the way `mean-diff` bootstraps its own diffs - same `DiffCollector`/
+pairing, same three `--bootstrap-method` variants (`percentile`/`basic`/`bca` - all three, unlike
+`quantile-diff`'s BCa restriction: the relative-diff sample mean is a smooth statistic, so BCa's
+jackknife acceleration term has the same solid footing here it has for `mean-diff`), same
+`--resamples`/`--seed` reproducibility guarantee.
+
+**Why this is an independent metric, not a `mean-diff` display mode.** `relative-diff` answers a
+different question than `mean-diff`: "what proportional change" instead of "what absolute change."
+The two aren't interchangeable renderings of the same computation - the accumulated effect generally
+differs whenever baselines vary in scale (`mean(relative_diff_i)` is not `sum(candidate_i) /
+sum(baseline_i) - 1`, see below). This project keeps them as separate `MetricConfig`/`MetricKind`
+variants (not a `--relative` flag on `mean-diff`) so both can run side by side in one multi-metric
+invocation, so each gets its own baseline validation and Markdown rendering, and so power/
+claim-correction support stays independently auditable per metric rather than branching on a bool at
+every call site.
+
+**The effect is the mean of each pair's own ratio, not a ratio of totals:**
+
+```
+effect = mean(relative_diff_i) = mean((candidate_i - baseline_i) / baseline_i)
+```
+
+This treats every benchmark case as one equally-weighted observation, the same convention
+`mean-diff` already uses for its own diffs - a large-baseline case doesn't get more influence over
+the effect just because its absolute numbers are bigger. `sum(candidate_i) / sum(baseline_i) - 1`
+(a volume-weighted total ratio) is a different, and generally unequal, quantity whenever baselines
+vary in scale - the situation this metric exists for.
+
+**`baseline > 0` is required, not merely `baseline != 0`.** A zero baseline makes the ratio
+undefined by division; a *negative* baseline makes a percentage change's sign uninterpretable in a
+stable way (the same underlying improvement can read as a positive or negative ratio depending on
+which side of zero the baseline happens to sit on, independent of whether it's actually an
+improvement). Both are rejected as `VeridictError::RelativeDiffRequiresPositiveBaseline`, a
+configuration/data error - not silently computed against `abs(baseline)` (a materially different
+effect size that would quietly change what the number means), and not computed with an epsilon
+added to the denominator (which fabricates a number rather than reporting that the case's
+percentage change isn't well-defined). `candidate` is not mechanically restricted - a negative
+candidate against a positive baseline is a legal (if unusual) -100%-or-worse observation. A
+non-finite result from an otherwise-finite division (e.g. a very large `candidate` over a very
+small `baseline` overflowing to infinity) is rejected too, via the same `VeridictError::InvalidValue`
+every other non-finite numeric field already uses.
+
+**Directional, not symmetric under swapping the arms.** `(candidate - baseline) / baseline` and the
+same computation with the arms swapped are not simple sign-flips of each other: a +100% increase
+followed by a -50% decrease returns to the original value. Relative changes are directional; if a
+symmetric proportional-change metric is what's needed, see `docs/research-map.md`'s deferred
+log-ratio (`log(candidate / baseline)`) entry - not implemented this round, on purpose, as a
+separate effect size rather than folded into this one.
+
+**`--paired-by-id` relative-transforms first, then nets.** Each raw record's own `(candidate -
+baseline) / baseline` is computed before pairing; two records sharing an `id` are netted by
+averaging *those two ratios* (`(r1 + r2) / 2`), not by averaging baseline/candidate first and then
+taking one ratio of the averages - the same "compute the effect per record, then net by id"
+convention `mean-diff`/`sign-test`/`quantile-diff` already use (see [Paired
+testcases](../README.md#paired-testcases)).
+
+**Not supported this round: `power --metric relative-diff` and `--claim-correction`.**
+`--claim-correction` is rejected the same way `mean-diff`/`quantile-diff` already are - no
+closed-form CI-at-a-hypothetical-confidence function exists for any bootstrap CI without real
+resampled data (`metrics::lacks_closed_form_ci`). `power --metric relative-diff` returns a clear
+`VeridictError::PowerUnsupportedForRelativeDiff` rather than silently reusing `mean-diff`'s
+assumed-SD design with the wrong units - see `docs/research-map.md` for exactly what's deferred (an
+assumed SD of *relative*, not absolute, observations; a relative-transforming `--pilot`;
+`baseline > 0` validation on pilot data too) and why it wasn't folded into this round sight-unseen.
+`estimated_additional_trials` reuses the same `O(1/sqrt(n))` fallback `mean-diff`/`quantile-diff`
+already use, not new special-casing (see that section below).
+
+**Method-selection discipline: pick the metric before looking at results.** `relative-diff` is not
+a "better version" of `mean-diff` to fall back on when `mean-diff` comes back inconclusive - the two
+answer different questions (mean absolute change vs. mean proportional change relative to
+baseline), and picking whichever one happens to pass after inspecting both is analyst degrees of
+freedom, the same p-hacking risk any post-hoc metric switch carries. Choose the metric the
+scientific question actually calls for before running a confirmatory analysis; a switch made after
+inspecting a verdict should be treated as exploratory and validated on fresh or held-out data, not
+reported as if it had been pre-specified. See "Scale-mismatch diagnostic" below for the one place
+this project *does* proactively suggest considering `relative-diff` - and why that suggestion is
+scoped to baseline scale alone, never to the observed effect.
+
+## Scale-mismatch diagnostic (`data_quality.wide_baseline_scale`, `scale_diagnostics`)
+
+**This project's own design choice, not a citation-backed method** - an advisory-only warning
+(never changes `verdict`) that fires for `mean-diff` when baselines are all positive but span a
+wide range, since `mean-diff`'s absolute differences can then be dominated by the largest-scale
+cases. `relative-diff` ships the same underlying `scale_diagnostics` numbers (for transparency) but
+never sets `wide_baseline_scale` on itself - it's already the proportional-change metric, so it has
+nothing to warn its own user to switch away from.
+
+**Computed from baseline values alone, deliberately never looking at candidate, effect, CI, or
+verdict.** A diagnostic meant to inform a metric *choice* made before looking at results would stop
+doing that job the instant it could be influenced by the results themselves - so
+`ScaleDiagnostics`/`wide_baseline_scale` are built purely from the multiset of ingested baseline
+values, independent of which candidate values happen to be paired with them.
+
+**The orders-of-magnitude span, and why there are two of them:**
+
+```
+raw_orders    = log10(max_positive_baseline / min_positive_baseline)
+robust_orders = log10(p95_positive_baseline / p05_positive_baseline)   (only at >= 20 positive baselines)
+```
+
+`raw_orders` is the full span - simple, but a single extreme outlier can dominate it. Once there
+are at least `ROBUST_SPAN_MIN_POSITIVE_BASELINES` (20) positive baselines, `robust_orders` (a
+p95/p05-trimmed span, computed with the same type-7 quantile convention `quantile-diff` uses)
+becomes the *primary* signal instead, so one outlier can't single-handedly trigger the warning on an
+otherwise tightly-scaled dataset. Below that floor, `raw_orders` is all there is. The warning fires
+when the primary (robust-if-available, else raw) span is `>= WIDE_BASELINE_SCALE_ORDERS` (`1.0` -
+baselines spanning roughly a factor of 10), a deliberately conservative starting threshold, not a
+fitted one - see the constant's own doc comment for the reasoning.
+
+**Two warning texts, chosen by whether any baseline is zero or negative - never by whether
+`relative-diff` would actually pass.** When every baseline is positive, the warning names
+`--metric relative-diff` as something to *consider* for a proportional-change question, alongside
+an explicit note that switching metrics after inspecting the verdict is exploratory, not
+confirmatory. When the wide-scale baselines include a zero/negative value, `relative-diff` isn't
+well-defined for the dataset either (see its own `baseline > 0` requirement above), so the warning
+instead suggests a domain-justified normalization rather than an arbitrary denominator offset -
+never claiming `relative-diff` as a fix it isn't. Neither text says `relative-diff` *would* pass, or
+that `mean-diff` is *wrong* - both would smuggle an observed-result-dependent recommendation into a
+diagnostic that's supposed to stay result-independent by construction.
+
+**`scale_diagnostics`'s fields** (`positive_baseline_count`, `non_positive_baseline_count`,
+`min_positive_baseline`, `max_positive_baseline`, `raw_orders_of_magnitude`,
+`robust_orders_of_magnitude` - the last `null` below the 20-positive-baseline floor): present on
+`mean-diff`/`relative-diff` reports whenever there was at least one usable trial (`None`/omitted on
+zero usable trials, the same "no signal" convention `quantile` on `quantile-diff` follows). For
+`relative-diff`, `non_positive_baseline_count` is always `0` - a non-positive baseline is rejected
+outright before this diagnostic would ever see it.
+
 ## `elo`
 
 **Established statistic with one documented approximation.** Score rate
@@ -363,10 +496,10 @@ avoids - and the independent unit under clustering is the cluster, not the trial
 isn't even the right `n` to scale a search from. See `estimated_additional_trials` below.
 
 **Only `winrate`/`elo` this round** (`IncompatibleClusterById` for any other requested metric).
-`mean-diff`/`sign-test`/`quantile-diff` are numeric-diff metrics already bootstrapped by record,
-not by outcome tally - real cluster support for them needs `DiffCollector` (not `OutcomeCollector`)
-to retain cluster structure through to resampling, a genuinely separate piece of wiring, not a
-mechanical extension of this round's work. See `docs/research-map.md`.
+`mean-diff`/`sign-test`/`quantile-diff`/`relative-diff` are numeric-diff metrics already bootstrapped
+by record, not by outcome tally - real cluster support for them needs `DiffCollector` (not
+`OutcomeCollector`) to retain cluster structure through to resampling, a genuinely separate piece of
+wiring, not a mechanical extension of this round's work. See `docs/research-map.md`.
 
 ## `matrix`'s general-graph mode
 
@@ -739,11 +872,12 @@ only the valid, still-`Pass` reports; (4) `verdict`/`promotion` were already fin
 from unadjusted values, and `--claim-correction` never revisits them; (5) aggregate
 `simultaneous_claims_promotion` from every report's `family_adjusted_promotion`.
 
-**`mean-diff`/`quantile-diff` and `--cluster-by-id` are rejected outright (a configuration error,
-exit code 3) - not silently left uncorrected while still counting toward `family_size`.** There is
-no closed-form CI-at-a-hypothetical-confidence function for a bootstrap CI (mean-diff/quantile-diff)
-without real resampled data (same reason `estimated_additional_trials`/`power` special-case them),
-nor for a cluster bootstrap CI (`--cluster-by-id`) - `achieved_alpha` has nothing valid to search
+**`mean-diff`/`quantile-diff`/`relative-diff` and `--cluster-by-id` are rejected outright (a
+configuration error, exit code 3) - not silently left uncorrected while still counting toward
+`family_size`.** There is no closed-form CI-at-a-hypothetical-confidence function for any of the
+three bootstrap-CI metrics (`metrics::lacks_closed_form_ci`) without real resampled data (same
+reason `estimated_additional_trials`/`power` special-case them), nor for a cluster bootstrap CI
+(`--cluster-by-id`) - `achieved_alpha` has nothing valid to search
 against for either. Worse for `--cluster-by-id` specifically: a naive fallback reconstructing a
 plain i.i.d. CI from `successes`/`paired_count` alone comes out *narrower* than the true
 cluster-robust CI whenever there's positive intra-cluster correlation (the usual case, and the
@@ -790,21 +924,23 @@ correction (a different, less conservative family-error target than FWER).
 
 ## `estimated_additional_trials`
 
-**Mixed: exact for three metrics, a heuristic for one.** This is a rough estimate of how many
+**Mixed: exact for three metrics, a heuristic for the rest.** This is a rough estimate of how many
 *additional* trials would likely turn an `inconclusive` result decisive, assuming the effect size
 itself doesn't move.
 
 - For **`winrate`/`sign-test`/`elo`**, this binary-searches the real, already-tested CI function
   the report itself uses (`wilson`/`jeffreys`/`exact`, per `--ci-method`), holding the point
   estimate fixed - not an approximation, an exact search against real, already-verified math.
-- For **`mean-diff`/`quantile-diff`**, there is no closed-form "CI width at a hypothetical n"
-  function for a bootstrap CI without real resampled data, so both fall back to the
-  `O(1/sqrt(n))` CLT-scaling model instead. This has a documented, quantified bias for
-  `mean-diff`: verified within ~1.5% of an actual re-run for a clean 4x sample-size jump at
-  moderate n, but a real ~18% *under*-estimate at n=100, because e.g. Wilson's CI also shrinks via
-  an `O(z^2/n)` recentering term the simple `1/sqrt(n)` model doesn't capture. `quantile-diff`
-  reuses the same model, unverified for its own bootstrap CI. Treat either metric's number as
-  "roughly this many, plausibly more," not a guarantee.
+- For **`mean-diff`/`quantile-diff`/`relative-diff`** (`metrics::lacks_closed_form_ci`), there is
+  no closed-form "CI width at a hypothetical n" function for a bootstrap CI without real resampled
+  data, so all three fall back to the `O(1/sqrt(n))` CLT-scaling model instead. This has a
+  documented, quantified bias for `mean-diff`: verified within ~1.5% of an actual re-run for a
+  clean 4x sample-size jump at moderate n, but a real ~18% *under*-estimate at n=100, because e.g.
+  Wilson's CI also shrinks via an `O(z^2/n)` recentering term the simple `1/sqrt(n)` model doesn't
+  capture. `quantile-diff`/`relative-diff` reuse the same model, unverified for their own bootstrap
+  CI. Treat any of the three metrics' number as "roughly this many, plausibly more," not a
+  guarantee - an approximation, not a guarantee, for `relative-diff` exactly as much as for the
+  other two.
 
 Returns `null` when there's nothing meaningful to suggest: the verdict is already `pass`/`fail`,
 there are zero paired trials, or the effect sits *inside* the pass/fail threshold band (the "dead

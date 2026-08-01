@@ -3,7 +3,7 @@
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::common::DiffCollector;
+use crate::metrics::common::{DiffCollector, compute_scale_diagnostics};
 use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
 use crate::stats::bootstrap;
 use crate::{BootstrapMethod, MetricKind, TrialStatus};
@@ -14,6 +14,10 @@ pub(crate) struct MeanDiffAggregator {
     resamples: usize,
     seed: u64,
     bootstrap_method: BootstrapMethod,
+    /// Raw baseline values, in ingestion order, kept only for `scale_diagnostics` - a separate
+    /// list from `collector`'s diffs since the scale diagnostic reads baselines alone, never a
+    /// `candidate - baseline` diff (see `ScaleDiagnostics`'s doc for why that separation matters).
+    baselines: Vec<f64>,
 }
 
 impl MeanDiffAggregator {
@@ -30,6 +34,7 @@ impl MeanDiffAggregator {
             resamples,
             seed,
             bootstrap_method,
+            baselines: Vec::new(),
         }
     }
 }
@@ -59,6 +64,7 @@ impl MetricAggregator for MeanDiffAggregator {
                 });
             }
             used = true;
+            self.baselines.push(b);
             self.collector.record(line, record.id.as_deref(), c - b)?;
         }
         if !used {
@@ -98,6 +104,7 @@ impl MetricAggregator for MeanDiffAggregator {
                 max_cluster_size: None,
                 effective_sample_size: None,
                 design_effect: None,
+                scale_diagnostics: None,
             });
         }
         let effect = bootstrap::mean(&diffs);
@@ -140,6 +147,7 @@ impl MetricAggregator for MeanDiffAggregator {
             max_cluster_size: None,
             effective_sample_size: None,
             design_effect: None,
+            scale_diagnostics: Some(compute_scale_diagnostics(&self.baselines)),
         })
     }
 }

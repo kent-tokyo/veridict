@@ -119,3 +119,27 @@ fn claim_correction_holm_matches_the_corrected_multi_report_shape() {
         0,
     );
 }
+
+#[test]
+fn relative_diff_matches_the_golden_report_shape() {
+    // Locks relative-diff's own JSON shape: ratio-unit effect/ci_low/ci_high/pass_above/fail_below,
+    // and a populated scale_diagnostics (all baselines here are positive by construction) with
+    // data_quality.wide_baseline_scale staying false (relative-diff never sets that flag on
+    // itself - see lib.rs's collect_data_quality).
+    check_golden(
+        "compare_relative_diff",
+        &[
+            "compare",
+            "tests/fixtures/compare_relative_diff.jsonl",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.05",
+            "--seed",
+            "12345",
+            "--resamples",
+            "2000",
+        ],
+        0,
+    );
+}

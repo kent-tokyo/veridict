@@ -19,6 +19,16 @@ use crate::{MetricKind, Promotion, Validity, Verdict};
 /// documented."
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
+/// Minimum "effective" orders-of-magnitude span across positive baselines before
+/// `DataQuality.wide_baseline_scale` fires for `mean-diff` (see `lib.rs`'s `collect_data_quality`).
+/// `1.0` = baselines spanning roughly a factor of 10. Chosen as a deliberately conservative
+/// starting point, not derived from a fitted threshold: one order of magnitude is already enough
+/// for an absolute-difference metric's variance to be dominated by its largest-scale cases, while
+/// staying silent on everyday 2-3x spreads between cases that don't actually indicate a scale
+/// mismatch. Revisit with calibration evidence (false-warning rate on real mixed-scale benchmark
+/// suites) if this proves too sensitive or too quiet in practice.
+pub const WIDE_BASELINE_SCALE_ORDERS: f64 = 1.0;
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub schema_version: u32,
@@ -83,6 +93,11 @@ pub struct Report {
     /// data; 1.0 means no measurable clustering effect.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub design_effect: Option<f64>,
+    /// `mean-diff`/`relative-diff` only - the raw distribution of baseline values, computed from
+    /// baselines alone (see `ScaleDiagnostics`'s doc for why that independence matters). `None`
+    /// for every other metric, and for these two whenever there were zero usable trials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_diagnostics: Option<ScaleDiagnostics>,
     /// Multiple-comparison correction fields (see `correction` module) - all `None`/omitted
     /// unless `compare --claim-correction bonferroni|holm` (or its deprecated `--correction`
     /// alias) was requested, so a default run's JSON is byte-identical to before this existed.
@@ -155,6 +170,35 @@ pub struct DataQuality {
     /// particular quantile reliably (e.g. p95 on a small sample). Always `false` for every other
     /// metric. See `collect_data_quality` for the threshold.
     pub thin_quantile_tail: bool,
+    /// `mean-diff` only - baselines are all positive but span a wide range (see
+    /// `WIDE_BASELINE_SCALE_ORDERS`), so absolute differences may be dominated by the
+    /// largest-scale cases; or baselines vary widely and include a zero/negative value, so
+    /// `relative-diff` isn't a well-defined alternative for this dataset either. Always `false` for
+    /// every other metric (`relative-diff` ships `scale_diagnostics` for transparency but never
+    /// sets this flag on itself - a proportional-change metric has nothing to warn its own user to
+    /// switch away from). Computed from baseline values alone, never candidate/effect/CI/verdict -
+    /// see `ScaleDiagnostics`.
+    pub wide_baseline_scale: bool,
+}
+
+/// The raw distribution of baseline values feeding `mean-diff`/`relative-diff`'s scale-mismatch
+/// diagnostic (`DataQuality.wide_baseline_scale`, `mean-diff` only) - computed from baseline
+/// values alone. Never derived from candidate, effect, CI, or verdict, by construction: a
+/// diagnostic meant to inform a metric *choice* before looking at results would stop doing that
+/// job the moment it could be influenced by the results themselves (see
+/// `metrics::common::compute_scale_diagnostics`).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ScaleDiagnostics {
+    pub positive_baseline_count: u64,
+    pub non_positive_baseline_count: u64,
+    pub min_positive_baseline: f64,
+    pub max_positive_baseline: f64,
+    /// `log10(max_positive_baseline / min_positive_baseline)`.
+    pub raw_orders_of_magnitude: f64,
+    /// `log10(p95 / p05)` over positive baselines - `Some` only once there are at least
+    /// `metrics::common::ROBUST_SPAN_MIN_POSITIVE_BASELINES` of them, so one extreme outlier can't
+    /// single-handedly define the span on an otherwise tightly-scaled dataset.
+    pub robust_orders_of_magnitude: Option<f64>,
 }
 
 /// A metric's effect/CI/thresholds are proportions (winrate, sign-test),
@@ -162,9 +206,14 @@ pub struct DataQuality {
 /// unit than as a bare float.
 fn fmt_effect(metric: MetricKind, value: f64) -> String {
     match metric {
+        // `winrate`/`sign-test` are percentage *points* (deviation from a 50/50 split) - `pp`, not
+        // `%`, to keep them visually distinct from `relative-diff`'s percentage *change* below:
+        // the two units don't compose (e.g. "+5.0 pp" isn't "+5.0%" of anything), so using the
+        // same suffix for both would read as more comparable than they actually are.
         MetricKind::WinRate | MetricKind::SignTest => format!("{:+.1} pp", value * 100.0),
         MetricKind::Elo => format!("{value:+.1} elo"),
         MetricKind::MeanDiff | MetricKind::QuantileDiff => format!("{value:+.4}"),
+        MetricKind::RelativeDiff => format!("{:+.1}%", value * 100.0),
     }
 }
 
@@ -362,6 +411,7 @@ mod tests {
             max_cluster_size: None,
             effective_sample_size: None,
             design_effect: None,
+            scale_diagnostics: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,

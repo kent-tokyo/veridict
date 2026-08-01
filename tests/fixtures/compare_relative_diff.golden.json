@@ -1,0 +1,53 @@
+{
+  "baseline_count": 20,
+  "candidate_count": 20,
+  "ci_high": 0.07928493050532308,
+  "ci_low": 0.07169734477908497,
+  "confidence": 0.95,
+  "crashes": 0,
+  "data_quality": {
+    "draw_heavy": false,
+    "effect_within_noise_floor": false,
+    "high_failure_rate": false,
+    "low_id_diversity": false,
+    "thin_quantile_tail": false,
+    "tiny_sample": true,
+    "wide_baseline_scale": false
+  },
+  "effect": 0.07562869373258099,
+  "estimated_additional_trials": null,
+  "fail_below": -0.05,
+  "failure_breakdown": {
+    "baseline": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    },
+    "candidate": {
+      "crash": 0,
+      "invalid": 0,
+      "timeout": 0
+    }
+  },
+  "invalid": 0,
+  "metric": "relative-diff",
+  "paired_count": 20,
+  "pass_above": 0.05,
+  "promotion": "promoted",
+  "reason": "CI lower bound 0.0717 meets the pass threshold 0.0500",
+  "scale_diagnostics": {
+    "max_positive_baseline": 488.365,
+    "min_positive_baseline": 28.373,
+    "non_positive_baseline_count": 0,
+    "positive_baseline_count": 20,
+    "raw_orders_of_magnitude": 1.235839273440674,
+    "robust_orders_of_magnitude": 1.058194383448379
+  },
+  "schema_version": 1,
+  "timeouts": 0,
+  "validity": "valid",
+  "verdict": "pass",
+  "warnings": [
+    "small sample: 20 paired trial(s), below the conventional 30-trial threshold for confidence-interval methods to be reliable"
+  ]
+}

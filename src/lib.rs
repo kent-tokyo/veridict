@@ -198,6 +198,16 @@ pub enum MetricKind {
     Elo,
     #[serde(rename = "quantile-diff")]
     QuantileDiff,
+    /// `(candidate - baseline) / baseline`, bootstrapped the same way `mean-diff` bootstraps
+    /// `candidate - baseline` - a distinct metric, not a `mean-diff` display mode: it answers "what
+    /// proportional change" rather than "what absolute change," needs `baseline > 0` (an absolute
+    /// difference has no such constraint), and reports in ratio units, not the input's own units.
+    /// Independent `MetricConfig` variant (not a `--relative` flag on `MeanDiff`) so the two can
+    /// run side by side in one multi-metric invocation and so each metric's own JSON/Markdown
+    /// rendering, power/claim-correction support, and baseline validation stay type-distinguished
+    /// rather than branching on a bool at every use site - see `docs/metrics.md`.
+    #[serde(rename = "relative-diff")]
+    RelativeDiff,
 }
 
 /// Which confidence-interval method `winrate`/`sign-test` use. `Exact`
@@ -277,6 +287,12 @@ pub enum MetricConfig {
         quantile: f64,
         bootstrap_method: BootstrapMethod,
     },
+    /// All three `--bootstrap-method` variants apply exactly as they do for `MeanDiff` - unlike
+    /// `QuantileDiff`, the relative-diff sample mean is a smooth statistic, so BCa's jackknife
+    /// acceleration term has the same solid footing here it has for `mean-diff`.
+    RelativeDiff {
+        bootstrap_method: BootstrapMethod,
+    },
 }
 
 impl MetricConfig {
@@ -289,6 +305,7 @@ impl MetricConfig {
             Self::MeanDiff { .. } => MetricKind::MeanDiff,
             Self::Elo { .. } => MetricKind::Elo,
             Self::QuantileDiff { .. } => MetricKind::QuantileDiff,
+            Self::RelativeDiff { .. } => MetricKind::RelativeDiff,
         }
     }
 
@@ -321,7 +338,10 @@ impl MetricConfig {
                 ci_method,
                 failure_policy,
             }),
-            MetricKind::SignTest | MetricKind::MeanDiff | MetricKind::QuantileDiff
+            MetricKind::SignTest
+            | MetricKind::MeanDiff
+            | MetricKind::QuantileDiff
+            | MetricKind::RelativeDiff
                 if failure_policy != FailurePolicy::ReportOnly =>
             {
                 Err(VeridictError::IncompatibleFailurePolicy {
@@ -329,7 +349,10 @@ impl MetricConfig {
                     metric: metrics::metric_label(kind),
                 })
             }
-            MetricKind::MeanDiff | MetricKind::Elo | MetricKind::QuantileDiff
+            MetricKind::MeanDiff
+            | MetricKind::Elo
+            | MetricKind::QuantileDiff
+            | MetricKind::RelativeDiff
                 if ci_method != CiMethod::Wilson =>
             {
                 Err(VeridictError::IncompatibleCiMethod {
@@ -356,6 +379,7 @@ impl MetricConfig {
                     bootstrap_method,
                 })
             }
+            MetricKind::RelativeDiff => Ok(Self::RelativeDiff { bootstrap_method }),
         }
     }
 
@@ -370,9 +394,10 @@ impl MetricConfig {
     fn ci_method(&self) -> CiMethod {
         match self {
             Self::WinRate { ci_method, .. } | Self::SignTest { ci_method } => *ci_method,
-            Self::MeanDiff { .. } | Self::Elo { .. } | Self::QuantileDiff { .. } => {
-                CiMethod::Wilson
-            }
+            Self::MeanDiff { .. }
+            | Self::Elo { .. }
+            | Self::QuantileDiff { .. }
+            | Self::RelativeDiff { .. } => CiMethod::Wilson,
         }
     }
 }
@@ -561,6 +586,7 @@ fn build_report(
         max_cluster_size: out.max_cluster_size,
         effective_sample_size: out.effective_sample_size,
         design_effect: out.design_effect,
+        scale_diagnostics: out.scale_diagnostics,
         correction_method: None,
         family_size: None,
         achieved_alpha: None,
@@ -660,6 +686,45 @@ fn collect_data_quality(
                 q,
                 out.paired_count
             ));
+        }
+    }
+
+    // `mean-diff` only - `relative-diff` ships `scale_diagnostics` too (for transparency/
+    // machine-readability) but never sets `wide_baseline_scale` on itself: it's already the
+    // proportional-change metric, so it has nothing to warn its own user to switch away from.
+    // Computed from `out.scale_diagnostics` alone, which was itself built from baseline values
+    // only (see `ScaleDiagnostics`'s doc) - this never inspects `out.effect`/`out.ci_low`/
+    // `out.ci_high`, so the warning can't be, even accidentally, a function of the observed result.
+    if metric == MetricKind::MeanDiff
+        && let Some(diag) = &out.scale_diagnostics
+    {
+        // Robust (p95/p05) span is the primary signal once there's enough data for a single
+        // outlier not to define it alone; below that floor, the raw min/max span is all there is.
+        let effective_orders =
+            if diag.positive_baseline_count >= metrics::ROBUST_SPAN_MIN_POSITIVE_BASELINES as u64 {
+                diag.robust_orders_of_magnitude
+                    .unwrap_or(diag.raw_orders_of_magnitude)
+            } else {
+                diag.raw_orders_of_magnitude
+            };
+        quality.wide_baseline_scale = effective_orders >= report::WIDE_BASELINE_SCALE_ORDERS;
+        if quality.wide_baseline_scale {
+            if diag.non_positive_baseline_count == 0 {
+                warnings.push(format!(
+                    "baseline values span {effective_orders:.1} orders of magnitude; absolute \
+                     differences may be dominated by larger-scale cases. If the scientific \
+                     question is proportional change, consider --metric relative-diff. Choose the \
+                     metric before confirmatory analysis; switching after inspecting the verdict \
+                     is exploratory."
+                ));
+            } else {
+                warnings.push(
+                    "baseline values vary widely, but some baselines are zero or negative, so \
+                     relative-diff is not well-defined for this dataset. Use a domain-justified \
+                     normalization rather than adding an arbitrary denominator offset."
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -1288,5 +1353,235 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("smaller than the CI's own half-width"))
         );
+    }
+
+    // --- wide_baseline_scale / scale_diagnostics ---
+
+    fn scale_records(pairs: &[(f64, f64)]) -> Vec<(usize, Record)> {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, &(b, c))| {
+                (
+                    i + 1,
+                    rec(&format!("s{i}"), Some(b), Some(c), None, None, None),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wide_baseline_scale_silent_below_ten_x_spread() {
+        let records = scale_records(&[
+            (10.0, 10.5),
+            (20.0, 21.0),
+            (30.0, 31.5),
+            (40.0, 42.0),
+            (50.0, 52.0),
+        ]);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!report.data_quality.wide_baseline_scale);
+        let diag = report
+            .scale_diagnostics
+            .expect("mean-diff always carries scale_diagnostics for nonempty data");
+        assert!(diag.raw_orders_of_magnitude < report::WIDE_BASELINE_SCALE_ORDERS);
+    }
+
+    #[test]
+    fn wide_baseline_scale_fires_at_or_above_ten_x_spread() {
+        let records = scale_records(&[
+            (10.0, 10.5),
+            (40.0, 42.0),
+            (70.0, 73.0),
+            (100.0, 105.0),
+            (150.0, 157.0),
+        ]);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(report.data_quality.wide_baseline_scale);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("orders of magnitude") && w.contains("--metric relative-diff"))
+        );
+    }
+
+    #[test]
+    fn wide_baseline_scale_uses_robust_span_ignoring_a_single_outlier_at_n40() {
+        // Same construction verified directly against `compute_scale_diagnostics` in
+        // `metrics::common`'s own tests - this confirms the same property survives the full
+        // `compare_one` -> `collect_data_quality` pipeline, not just the underlying function.
+        let mut pairs: Vec<(f64, f64)> = (0..39)
+            .map(|i| {
+                let b = 100.0 + i as f64;
+                (b, b * 1.05)
+            })
+            .collect();
+        pairs.push((10_000_000.0, 10_500_000.0));
+        let records = scale_records(&pairs);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        let diag = report.scale_diagnostics.unwrap();
+        assert_eq!(diag.positive_baseline_count, 40);
+        assert!(diag.raw_orders_of_magnitude > 4.0);
+        assert!(diag.robust_orders_of_magnitude.unwrap() < 1.0);
+        assert!(
+            !report.data_quality.wide_baseline_scale,
+            "a single outlier at n=40 should not trip the robust-span-gated warning"
+        );
+    }
+
+    #[test]
+    fn wide_baseline_scale_with_a_non_positive_baseline_recommends_normalization_not_relative_diff()
+    {
+        let records = scale_records(&[(-5.0, -4.0), (10.0, 10.5), (5000.0, 5250.0)]);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(report.data_quality.wide_baseline_scale);
+        let diag = report.scale_diagnostics.unwrap();
+        assert_eq!(diag.non_positive_baseline_count, 1);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("zero or negative")
+                    && w.contains("not well-defined")
+                    && !w.contains("--metric relative-diff"))
+        );
+    }
+
+    #[test]
+    fn wide_baseline_scale_diagnostics_do_not_depend_on_candidate_effect_or_verdict() {
+        let baselines = [10.0, 40.0, 70.0, 100.0, 150.0];
+        let passing = scale_records(&baselines.iter().map(|&b| (b, b * 1.5)).collect::<Vec<_>>());
+        let failing = scale_records(&baselines.iter().map(|&b| (b, b * 0.5)).collect::<Vec<_>>());
+        let thresholds = Thresholds::symmetric(0.01).unwrap();
+        let config = MetricConfig::MeanDiff {
+            bootstrap_method: BootstrapMethod::Percentile,
+        };
+        let report_pass = compare_one(
+            passing.iter().cloned(),
+            config,
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        let report_fail = compare_one(
+            failing.iter().cloned(),
+            config,
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        // Sanity: these two runs really do land on different verdicts/effects - the point of this
+        // test is that the *diagnostic* doesn't move even though the *result* clearly does.
+        assert_ne!(report_pass.verdict, report_fail.verdict);
+        assert!((report_pass.effect - report_fail.effect).abs() > 1.0);
+
+        let diag_pass = report_pass.scale_diagnostics.unwrap();
+        let diag_fail = report_fail.scale_diagnostics.unwrap();
+        assert_eq!(
+            diag_pass.raw_orders_of_magnitude,
+            diag_fail.raw_orders_of_magnitude
+        );
+        assert_eq!(
+            diag_pass.robust_orders_of_magnitude,
+            diag_fail.robust_orders_of_magnitude
+        );
+        assert_eq!(
+            report_pass.data_quality.wide_baseline_scale,
+            report_fail.data_quality.wide_baseline_scale
+        );
+    }
+
+    #[test]
+    fn relative_diff_never_sets_wide_baseline_scale_even_with_wide_positive_scale() {
+        let records = scale_records(&[
+            (10.0, 10.5),
+            (40.0, 42.0),
+            (70.0, 73.0),
+            (100.0, 105.0),
+            (150.0, 157.0),
+        ]);
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::RelativeDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!report.data_quality.wide_baseline_scale);
+        let diag = report
+            .scale_diagnostics
+            .expect("relative-diff also carries scale_diagnostics, for transparency");
+        // Same wide baselines as `wide_baseline_scale_fires_at_or_above_ten_x_spread` above -
+        // proves the bool's silence here is `relative-diff`-specific, not because the scale
+        // happened to look narrow this time.
+        assert!(diag.raw_orders_of_magnitude >= report::WIDE_BASELINE_SCALE_ORDERS);
     }
 }

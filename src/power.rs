@@ -165,6 +165,12 @@ impl PowerMetric {
             // unsupported outright (see `VeridictError::PowerUnsupportedForQuantileDiff`'s doc),
             // not just missing a dedicated constructor the way `MeanDiff` needed one.
             MetricKind::QuantileDiff => Err(VeridictError::PowerUnsupportedForQuantileDiff),
+            // Same shape as `QuantileDiff` above, not `MeanDiff`: relative-diff power would need
+            // its own assumed-SD design (of relative, not absolute, observations - see
+            // `VeridictError::PowerUnsupportedForRelativeDiff`'s doc), not yet audited independently
+            // of mean-diff's, so it's rejected outright this round rather than reusing `MeanDiff`'s
+            // constructor sight-unseen.
+            MetricKind::RelativeDiff => Err(VeridictError::PowerUnsupportedForRelativeDiff),
         }
     }
 
@@ -585,9 +591,10 @@ impl PowerReport {
             MetricKind::MeanDiff => "mean-diff",
             // Unreachable in practice - `PowerReport` is only ever built for a metric
             // `PowerMetric::new`/`PowerMetric::MeanDiff` actually accepted, and
-            // `quantile-diff` is rejected outright by both. Kept total rather than
-            // `unreachable!()`, same precedent as `metrics::ci_method_label`.
+            // `quantile-diff`/`relative-diff` are both rejected outright by `PowerMetric::new`.
+            // Kept total rather than `unreachable!()`, same precedent as `metrics::ci_method_label`.
             MetricKind::QuantileDiff => "quantile-diff",
+            MetricKind::RelativeDiff => "relative-diff",
         };
         let method_clause = match (self.assume_sd, self.sd_source) {
             (Some(sd), Some(source)) => format!("assumed SD **{sd}** (from `--{source}`)"),

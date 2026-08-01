@@ -10,6 +10,51 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [Unreleased]
+
+### Added
+
+- **`--metric relative-diff`**: bootstrap confidence interval on `(candidate - baseline) /
+  baseline` - proportional change relative to the baseline, for benchmarks where problem size or
+  raw score varies a lot across cases and an absolute `mean-diff` would let large-scale cases
+  dominate the variance. Independent `MetricConfig`/`MetricKind` variant, not a `mean-diff`
+  modifier flag: different effect-size units (a ratio, not raw input units), a different baseline
+  constraint (`baseline > 0`, required - rejected as `VeridictError::RelativeDiffRequiresPositiveBaseline`
+  otherwise), different Markdown rendering (`+6.3%`, not winrate's `+5.0 pp`), and independently
+  auditable power/claim-correction support. Supports all three `--bootstrap-method` variants
+  (`percentile`/`basic`/`bca`), `--paired-by-id` (relative-transforms each record first, then nets
+  same-id pairs by averaging the two ratios - not the ratio of averaged baseline/candidate), and
+  the same `--resamples`/`--seed` reproducibility guarantee as `mean-diff`. Not supported this
+  round: `veridict power --metric relative-diff` (clear `VeridictError::PowerUnsupportedForRelativeDiff`
+  rather than a silent reuse of `mean-diff`'s assumed-SD design) and `--claim-correction` (rejected
+  the same way `mean-diff`/`quantile-diff` already are - no closed-form CI to correct against) -
+  see `docs/research-map.md` for what's deferred and why.
+- **`mean-diff` scale-mismatch diagnostic**: `data_quality.wide_baseline_scale` (advisory, never
+  changes `verdict`) fires when `mean-diff`'s baselines are all positive and span at least
+  `WIDE_BASELINE_SCALE_ORDERS` (1.0, i.e. roughly 10x) orders of magnitude - a sign the absolute
+  difference may be dominated by the largest-scale cases, with a warning suggesting
+  `--metric relative-diff` as an alternative to consider *before* confirmatory analysis (switching
+  metrics after inspecting a verdict is flagged as exploratory, not a recommendation to switch). A
+  different warning fires when the wide-scale baselines include a zero/negative value (where
+  `relative-diff` isn't well-defined either). Computed from baseline values alone - never
+  candidate, effect, CI, or verdict - so it can't be, even accidentally, a function of the observed
+  result. The underlying numbers (`positive_baseline_count`, `non_positive_baseline_count`,
+  `min_positive_baseline`, `max_positive_baseline`, `raw_orders_of_magnitude`,
+  `robust_orders_of_magnitude`) are exposed as `Report.scale_diagnostics`, for both `mean-diff` and
+  `relative-diff` (the latter never sets `wide_baseline_scale` on itself, but still reports the
+  numbers for transparency). At 20+ positive baselines, a p95/p05-based robust span becomes the
+  primary signal instead of the raw min/max span, so one extreme outlier can't single-handedly
+  trigger the warning.
+
+### Changed
+
+- `Report`/`schemas/compare-report.schema.json` gain the additive `data_quality.wide_baseline_scale`
+  field (always present, `false` for every metric other than `mean-diff`) and the optional
+  `scale_diagnostics` field (`mean-diff`/`relative-diff` only). `REPORT_SCHEMA_VERSION` stays `1`
+  per this project's existing "additive changes don't bump it" policy - existing consumers reading
+  known fields are unaffected; `compare_correction_none`/`compare_claim_correction_holm` golden
+  fixtures were regenerated to reflect the new `data_quality` key (the only diff).
+
 ## [0.16.1] - 2026-07-27
 
 ### Changed

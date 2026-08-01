@@ -50,9 +50,10 @@
 //! CI functions `compare` already uses (`stats::wilson`/`stats::exact`/`stats::jeffreys`) - no
 //! separate math for Bonferroni vs. Holm, one search drives both.
 //!
-//! **`mean-diff`/`quantile-diff` and `--cluster-by-id` are rejected outright, not silently
-//! miscorrected or partially counted.** Neither bootstrap CI (mean-diff/quantile-diff) nor a
-//! cluster bootstrap CI (`--cluster-by-id`) has a closed-form CI-at-a-hypothetical-confidence
+//! **`mean-diff`/`quantile-diff`/`relative-diff` and `--cluster-by-id` are rejected outright, not
+//! silently miscorrected or partially counted.** None of the three bootstrap-CI metrics
+//! (`metrics::lacks_closed_form_ci`) nor a cluster bootstrap CI (`--cluster-by-id`) has a
+//! closed-form CI-at-a-hypothetical-confidence
 //! function to search against (same reason `verdict::estimate_additional_trials`/`power` special-
 //! case the bootstrap metrics). Silently leaving such a report uncorrected while still counting
 //! it toward `family_size` - this module's behavior before `family_adjusted_verdict` existed -
@@ -103,9 +104,10 @@ const BISECTION_ITERATIONS: u32 = 60;
 /// Smallest `gamma` (same units as `1 - confidence`) at which this report's own CI, recomputed at
 /// confidence `1 - gamma` from the same observed data, would still have its lower bound (in the
 /// metric's native "effect" units - a proportion offset from zero for winrate/sign-test, Elo
-/// points for elo) clear `pass_above`. `None` for `mean-diff`/`quantile-diff` (no closed-form
-/// CI-at-a-hypothetical-confidence function exists for either's bootstrap CI - see module doc) -
-/// callers must leave such a report's verdict unadjusted. Only ever called for a report whose
+/// points for elo) clear `pass_above`. `None` for `mean-diff`/`quantile-diff`/`relative-diff`
+/// (`metrics::lacks_closed_form_ci` - no closed-form CI-at-a-hypothetical-confidence function
+/// exists for any of the three's bootstrap CI - see module doc) - callers must leave such a
+/// report's verdict unadjusted. Only ever called for a report whose
 /// verdict is already `Pass` at `confidence`, so `gamma_orig = 1 - confidence` is a known-passing
 /// search bracket, not re-verified here.
 fn achieved_alpha(
@@ -117,7 +119,7 @@ fn achieved_alpha(
     pass_above: f64,
     confidence: f64,
 ) -> Option<f64> {
-    if metric == MetricKind::MeanDiff || metric == MetricKind::QuantileDiff {
+    if metrics::lacks_closed_form_ci(metric) {
         return None;
     }
 
@@ -211,9 +213,10 @@ fn holm_reject(
 ///
 /// Returns `Err(VeridictError::CorrectionConflictsWithClusterById)` if any report was built with
 /// `--cluster-by-id` (detected via `report.cluster_count.is_some()`), or
-/// `Err(VeridictError::CorrectionRequiresClosedFormCi)` if any report's metric is `mean-diff`/
-/// `quantile-diff` - both only when `correction != Correction::None` (see the module doc's
-/// "rejected outright" section for why).
+/// `Err(VeridictError::CorrectionRequiresClosedFormCi)` if any report's metric lacks a
+/// closed-form CI (`mean-diff`/`quantile-diff`/`relative-diff` -
+/// `metrics::lacks_closed_form_ci`) - both only when `correction != Correction::None` (see the
+/// module doc's "rejected outright" section for why).
 pub fn apply_correction(
     reports: &mut [Report],
     configs: &[MetricConfig],
@@ -228,7 +231,7 @@ pub fn apply_correction(
     }
     if let Some(report) = reports
         .iter()
-        .find(|r| matches!(r.metric, MetricKind::MeanDiff | MetricKind::QuantileDiff))
+        .find(|r| metrics::lacks_closed_form_ci(r.metric))
     {
         return Err(VeridictError::CorrectionRequiresClosedFormCi {
             metric: metrics::metric_label(report.metric),
@@ -364,6 +367,7 @@ mod tests {
             max_cluster_size: None,
             effective_sample_size: None,
             design_effect: None,
+            scale_diagnostics: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -583,6 +587,7 @@ mod tests {
             max_cluster_size: r.max_cluster_size,
             effective_sample_size: r.effective_sample_size,
             design_effect: r.design_effect,
+            scale_diagnostics: r.scale_diagnostics,
             correction_method: r.correction_method,
             family_size: r.family_size,
             achieved_alpha: r.achieved_alpha,

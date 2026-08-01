@@ -45,14 +45,14 @@
     },
     "metric": {
       "type": "string",
-      "enum": ["winrate", "mean-diff", "sign-test", "elo", "quantile-diff"]
+      "enum": ["winrate", "mean-diff", "sign-test", "elo", "quantile-diff", "relative-diff"]
     },
     "baseline_count": { "type": "integer", "minimum": 0 },
     "candidate_count": { "type": "integer", "minimum": 0 },
     "paired_count": { "type": "integer", "minimum": 0 },
     "effect": {
       "type": "number",
-      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff/quantile-diff."
+      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff/quantile-diff; a ratio (0.05 = +5%) for relative-diff."
     },
     "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
     "ci_low": { "type": "number" },
@@ -67,7 +67,7 @@
     "estimated_additional_trials": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff/quantile-diff."
+      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff/quantile-diff/relative-diff."
     },
     "warnings": {
       "type": "array",
@@ -101,6 +101,7 @@
       "minimum": 0,
       "description": "--cluster-by-id only: Var(cluster bootstrap) / Var(i.i.d. bootstrap) on the same pooled data. 1.0 means no measurable clustering effect."
     },
+    "scale_diagnostics": { "$ref": "#/$defs/scale_diagnostics" },
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
@@ -109,7 +110,7 @@
     "family_size": {
       "type": "integer",
       "minimum": 1,
-      "description": "Number of --metric flags in this run's family; present only alongside correction_method. A family containing mean-diff/quantile-diff (no closed-form CI to correct against) or run with --cluster-by-id is rejected outright as a configuration error instead of being counted with a partial guarantee."
+      "description": "Number of --metric flags in this run's family; present only alongside correction_method. A family containing mean-diff/quantile-diff/relative-diff (no closed-form CI to correct against) or run with --cluster-by-id is rejected outright as a configuration error instead of being counted with a partial guarantee."
     },
     "achieved_alpha": {
       "type": "number",
@@ -169,14 +170,32 @@
     "data_quality": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity", "thin_quantile_tail"],
+      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity", "thin_quantile_tail", "wide_baseline_scale"],
       "properties": {
         "tiny_sample": { "type": "boolean", "description": "paired_count < 30" },
         "high_failure_rate": { "type": "boolean", "description": "over 20% of trials failed to execute" },
         "draw_heavy": { "type": "boolean", "description": "elo only; always false for other metrics. Over 50% draws." },
         "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" },
         "low_id_diversity": { "type": "boolean", "description": "one id repeated >= 3 times among >= 10 id-tagged trials, unpaired mode only; always false when --paired-by-id is set or too few records carry an id" },
-        "thin_quantile_tail": { "type": "boolean", "description": "quantile-diff only; always false for other metrics. Fewer than 10 expected observations (paired_count * min(quantile, 1-quantile)) in the thinner tail." }
+        "thin_quantile_tail": { "type": "boolean", "description": "quantile-diff only; always false for other metrics. Fewer than 10 expected observations (paired_count * min(quantile, 1-quantile)) in the thinner tail." },
+        "wide_baseline_scale": { "type": "boolean", "description": "mean-diff only; always false for other metrics (including relative-diff, which ships scale_diagnostics for transparency but never warns about itself). True when positive baselines span at least WIDE_BASELINE_SCALE_ORDERS (1.0) orders of magnitude - see scale_diagnostics and docs/metrics.md." }
+      }
+    },
+    "scale_diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive_baseline_count", "non_positive_baseline_count", "min_positive_baseline", "max_positive_baseline", "raw_orders_of_magnitude", "robust_orders_of_magnitude"],
+      "description": "mean-diff/relative-diff only. Computed from baseline values alone - never candidate, effect, CI, or verdict - so it can never be tuned by, or reveal, the observed result.",
+      "properties": {
+        "positive_baseline_count": { "type": "integer", "minimum": 0 },
+        "non_positive_baseline_count": { "type": "integer", "minimum": 0, "description": "Always 0 for relative-diff, which hard-rejects any non-positive baseline before this diagnostic would ever be computed." },
+        "min_positive_baseline": { "type": "number" },
+        "max_positive_baseline": { "type": "number" },
+        "raw_orders_of_magnitude": { "type": "number", "description": "log10(max_positive_baseline / min_positive_baseline)." },
+        "robust_orders_of_magnitude": {
+          "type": ["number", "null"],
+          "description": "log10(p95 / p05) over positive baselines. Present only once there are at least 20 of them (see ROBUST_SPAN_MIN_POSITIVE_BASELINES) - null otherwise."
+        }
       }
     }
   }

@@ -105,6 +105,138 @@ nでのCI幅」の閉じた式が存在しないため)、後者については�
 ブートストラップCIにも「仮想的な信頼水準でのCI」の閉じた式が存在しないため - 下記
 `--claim-correction` セクション参照)。
 
+## `relative-diff` のブートストラップ信頼区間
+
+**確立された統計手法。`mean-diff` と同じブートストラップの方法論を、別の効果量に適用したもの。**
+`candidate - baseline` を直接ブートストラップする代わりに、`relative-diff` はまず各利用可能な
+レコードのペアを `(candidate - baseline) / baseline` へ変換し、その変換後のサンプルを `mean-diff`
+が自身のdiffをブートストラップするのと全く同じ方法でブートストラップします - 同じ
+`DiffCollector`/ペアリング、同じ3つの `--bootstrap-method` バリアント(`percentile`/`basic`/`bca`
+- `quantile-diff` のBCa制限とは異なり3つとも使えます。relative-diffの標本平均は平滑な統計量なので、
+BCaのジャックナイフ加速度項は `mean-diff` と同じだけ堅固な裏付けを持ちます)、同じ
+`--resamples`/`--seed` の再現性保証です。
+
+**なぜ独立したメトリクスであり、`mean-diff` の表示モードではないのか。** `relative-diff` は
+`mean-diff` とは異なる問いに答えます: 「絶対的にどれだけ変化したか」ではなく「比例的にどれだけ
+変化したか」です。この2つは同じ計算の交換可能な表示形式ではありません - baselineのスケールが
+ばらつく場合、累積される効果は一般に異なります(`mean(relative_diff_i)` は
+`sum(candidate_i) / sum(baseline_i) - 1` とは異なります。詳細は後述)。本プロジェクトはこの2つを
+独立した `MetricConfig`/`MetricKind` バリアントとして扱います(`mean-diff` への `--relative`
+フラグにはしません)。これにより、両方を1回のmulti-metric実行で並べて実行でき、それぞれが独自の
+baseline検証とMarkdown表示を持ち、power/claim-correctionのサポートもメトリクスごとに独立して
+監査可能なまま保たれます(すべての呼び出し箇所でboolによる分岐をする必要がありません)。
+
+**効果量は各ペア自身の比の平均であり、合計の比ではありません:**
+
+```
+effect = mean(relative_diff_i) = mean((candidate_i - baseline_i) / baseline_i)
+```
+
+これはすべてのベンチマークケースを等しい重みの1つの観測として扱います - `mean-diff` が自身のdiffに
+既に使っているのと同じ慣習です。baselineが大きいケースだからといって、絶対的な数値が大きいという
+理由だけで効果量への影響力が増すことはありません。`sum(candidate_i) / sum(baseline_i) - 1`
+(volume加重の合計比)は、baselineのスケールがばらつく場合には一般に異なる値になります - まさに
+このメトリクスが存在する理由となる状況です。
+
+**`baseline > 0` が必須であり、単に `baseline != 0` では不十分です。** baselineがゼロだと除算に
+より比が未定義になります。baselineが*負*だと、パーセンテージ変化の符号が安定した形で解釈できなく
+なります(同じ根本的な改善であっても、baselineがゼロのどちら側にあるかによって正の比にも負の比にも
+なり得ます。それは実際に改善しているかどうかとは無関係です)。どちらも
+`VeridictError::RelativeDiffRequiresPositiveBaseline` として拒否されます。これは設定/データの
+エラーであり、`abs(baseline)` を分母として黙って計算する(数値の意味を暗黙に変えてしまう別の効果量
+になります)ことも、分母にepsilonを加えて計算する(そのケースのパーセンテージ変化が well-defined
+でないことを報告する代わりに数値を捏造することになります)こともしません。`candidate` は機械的な
+制約を受けません - 正のbaselineに対する負のcandidateは、合法な(珍しくはありますが)-100%以上の
+悪化を表す観測です。個々の入力が有限であっても除算結果が有限にならない場合(たとえば非常に大きな
+`candidate` を非常に小さな `baseline` で割ってinfinityへoverflowする場合)も拒否されます。これは
+他の非有限な数値フィールドが既に使っているのと同じ `VeridictError::InvalidValue` によります。
+
+**方向性があり、両辺を入れ替えても対称にはなりません。** `(candidate - baseline) / baseline` と、
+baseline/candidateを入れ替えた同じ計算は、単純な符号反転の関係にはありません: +100%の増加の後に
+-50%の減少が続くと、元の値にちょうど戻ります。相対変化には方向性があります。対称な比例変化の
+メトリクスが必要な場合は、`docs/research-map_ja.md` に記載されている先送り中のlog-ratio
+(`log(candidate / baseline)`)の項目を参照してください - このメトリクスに畳み込むのではなく、
+別の効果量として扱うべきだという理由から、意図的に今回は実装していません。
+
+**`--paired-by-id` は先に相対変換し、その後にnetします。** 各生レコード自身の
+`(candidate - baseline) / baseline` はペアリングの前に計算されます。同じ `id` を共有する2件の
+レコードは、*その2つの比*を平均することでnetされます(`(r1 + r2) / 2`)。先にbaseline/candidateを
+平均してから1つの比を取るのではありません - これは `mean-diff`/`sign-test`/`quantile-diff` が
+既に使っている「レコードごとに効果量を計算してからidでnetする」という同じ慣習です
+([ペアテストケース](../README_ja.md#ペアテストケースpaired-testcases)参照)。
+
+**今回未対応: `power --metric relative-diff` と `--claim-correction`。** `--claim-correction`は
+`mean-diff`/`quantile-diff` が既に拒否されているのと同じ理由で拒否されます - 実データによる
+リサンプリングなしには、いずれのbootstrap CIにも仮想的な信頼水準でのCIを求める閉じた形の関数が
+存在しないためです(`metrics::lacks_closed_form_ci`)。`power --metric relative-diff` は、
+`mean-diff` の想定SD設計を単位を間違えたまま黙って再利用するのではなく、明確な
+`VeridictError::PowerUnsupportedForRelativeDiff` を返します - 具体的に何が先送りされているか
+(*相対*観測値の想定SD、相対変換を行う `--pilot`、パイロットデータに対する `baseline > 0` の検証)
+と、なぜ今回のラウンドに未検証のまま組み込まなかったのかは `docs/research-map_ja.md` を参照して
+ください。`estimated_additional_trials` は `mean-diff`/`quantile-diff` が既に使っている
+`O(1/sqrt(n))` フォールバックをそのまま再利用しており、新たな特別扱いではありません(下記の
+セクション参照)。
+
+**メトリクス選択の規律: 結果を見る前にメトリクスを選ぶこと。** `relative-diff` は、`mean-diff` が
+inconclusiveになったときに頼る「より良いバージョン」ではありません - この2つは異なる問い
+(baselineに対する平均絶対変化 vs. 平均比例変化)に答えるものであり、両方を見た後にたまたま通った
+方を選ぶことは、事後的なメトリクスの切り替えが持つのと同じp-hackingのリスクである分析者自由度
+そのものです。確証的な分析を実行する前に、科学的な問いが実際に求めているメトリクスを選んでください。
+判定結果を見た後に行われた切り替えは探索的なものとして扱い、事前に指定されていたかのように報告する
+のではなく、新規または保留にしていたデータで検証してください。本プロジェクトが`relative-diff`の
+検討を積極的に提案する唯一の場所と、その提案がbaselineのスケールのみに限定され、観測された効果には
+決して依存しない理由については、下記の「スケール不整合の診断」を参照してください。
+
+## スケール不整合の診断(`data_quality.wide_baseline_scale`、`scale_diagnostics`)
+
+**本プロジェクト独自の設計判断であり、論文に基づく手法ではありません** - baselineがすべて正だが
+広い範囲にわたる場合に`mean-diff`に対して発火する、助言のみの警告です(`verdict`は変更しません)。
+`mean-diff`の絶対差はこの場合、最大スケールのケースに支配されがちになるためです。`relative-diff`は
+同じ`scale_diagnostics`の数値を(透明性のために)出力しますが、`wide_baseline_scale`を自身に対して
+設定することは決してありません - `relative-diff`は既に比例変化のメトリクスであり、自身のユーザーに
+別のメトリクスへ切り替えるよう警告すべき理由がないためです。
+
+**baselineの値のみから計算され、candidate・効果量・CI・判定は意図的に一切見ません。** 結果を見る前に
+メトリクスの*選択*に役立てることを目的とした診断が、その結果自体に影響され得るようになった瞬間、
+その役目を果たせなくなります。そのため`ScaleDiagnostics`/`wide_baseline_scale`は、どのcandidate値と
+ペアになっているかとは無関係に、取り込まれたbaseline値の多重集合のみから構築されます。
+
+**桁数(orders of magnitude)のスパンが2種類ある理由:**
+
+```
+raw_orders    = log10(max_positive_baseline / min_positive_baseline)
+robust_orders = log10(p95_positive_baseline / p05_positive_baseline)   (正のbaselineが20件以上のときのみ)
+```
+
+`raw_orders`は完全なスパンです - シンプルですが、極端な外れ値1件がこれを支配し得ます。正の
+baselineが`ROBUST_SPAN_MIN_POSITIVE_BASELINES`(20)件以上になると、`robust_orders`
+(`quantile-diff`と同じtype-7分位点の慣習で計算されるp95/p05でトリムされたスパン)が代わりに
+*主たる*シグナルになります。これにより、外れ値1件だけでは、それ以外はタイトにスケールされた
+データセットに対して警告を単独で発火させることができなくなります。この基準に満たない場合は、
+`raw_orders`だけが唯一の情報源です。主たる(利用可能なら`robust`、そうでなければ`raw`)スパンが
+`WIDE_BASELINE_SCALE_ORDERS`(`1.0` - おおよそ10倍程度に及ぶbaselineのスパン)以上のときに警告が
+発火します。これはフィッティングされた値ではなく、意図的に保守的な初期しきい値です - 理由は定数
+自身のdocコメントを参照してください。
+
+**警告文は2種類あり、baselineにゼロまたは負の値が含まれるかどうかで選ばれます - `relative-diff`が
+実際に通るかどうかでは決して選ばれません。** すべてのbaselineが正の場合、警告は比例変化の問いに
+対して`--metric relative-diff`を*検討する*ことを提案し、判定結果を見た後にメトリクスを切り替える
+ことは確証的ではなく探索的なものとして扱うべきだという明示的な注意も添えます。広いスケールの
+baselineにゼロ/負の値が含まれる場合、そのデータセットに対しては`relative-diff`も同様にwell-defined
+ではありません(上記の`baseline > 0`の要件を参照)。そのため警告は、任意の分母オフセットではなく
+ドメインに即した正規化を提案します - `relative-diff`が実際には適用できない解決策であるかのように
+主張することはありません。どちらの文言も、`relative-diff`なら*通る*とも、`mean-diff`が*間違っている*
+とも述べません - どちらも、本来は結果に依存しないべき診断に、観測結果に依存した推奨を紛れ込ませて
+しまうことになるためです。
+
+**`scale_diagnostics`のフィールド**(`positive_baseline_count`、`non_positive_baseline_count`、
+`min_positive_baseline`、`max_positive_baseline`、`raw_orders_of_magnitude`、
+`robust_orders_of_magnitude` - 最後のものは正のbaselineが20件未満のときは`null`): 少なくとも1件の
+利用可能な試行があった場合、`mean-diff`/`relative-diff`のレポートに存在します(利用可能な試行が
+ゼロ件の場合は`None`/省略されます。これは`quantile-diff`の`quantile`が従っているのと同じ
+「シグナルなし」の慣習です)。`relative-diff`では、`non_positive_baseline_count`は常に`0`です -
+非正のbaselineは、この診断に到達する前にそもそも拒否されるためです。
+
 ## `elo`
 
 **確立された統計手法+1つの明示的な近似。** スコア率 `score = (candidate_wins + 0.5 * draws) / n`
@@ -593,11 +725,12 @@ false pass率が `alpha/2`(デフォルトの95%信頼度なら0.025)であり�
 おり、`--claim-correction` はそれらを一切再訪しない、(5) 各レポートの `family_adjusted_promotion`
 から `simultaneous_claims_promotion` を集約する。
 
-**`mean-diff`/`quantile-diff` と `--cluster-by-id` は設定エラーとして拒否されます(終了コード3)
-- `family_size` にカウントしたまま黙って未補正で残すのではありません。** 実データの再サンプリング
-なしに、仮想的な信頼水準での信頼区間を閉じた形で求める関数は、ブートストラップCI
-(mean-diff/quantile-diff、`estimated_additional_trials`/`power` が同じ理由でこれらを特別扱い
-しているのと同じ)にも、cluster bootstrap CI(`--cluster-by-id`)にも存在しません -
+**`mean-diff`/`quantile-diff`/`relative-diff` と `--cluster-by-id` は設定エラーとして拒否されます
+(終了コード3)- `family_size` にカウントしたまま黙って未補正で残すのではありません。** 実データの
+再サンプリングなしに、仮想的な信頼水準での信頼区間を閉じた形で求める関数は、3つのブートストラップ
+CIメトリクスのいずれにも(`metrics::lacks_closed_form_ci`、`estimated_additional_trials`/`power`
+が同じ理由でこれらを特別扱いしているのと同じ)、cluster bootstrap CI(`--cluster-by-id`)にも
+存在しません -
 `achieved_alpha` にはどちらに対しても探索すべき有効な対象がありません。`--cluster-by-id` は
 特に悪い方向です: `successes`/`paired_count` だけから素のiid CIを再構築するフォールバックは、
 クラスタ内相関が正の値を持つ通常のケース(そもそも `--cluster-by-id` が信頼区間を広げる理由
@@ -644,21 +777,23 @@ pass条件そのものなので、`family_adjusted_verdict` は単に `verdict` 
 
 ## `estimated_additional_trials`
 
-**混在: 3つのメトリクスでは厳密、1つではヒューリスティック。** これは、効果量自体が動かないと仮定
+**混在: 3つのメトリクスでは厳密、残りではヒューリスティック。** これは、効果量自体が動かないと仮定
 した場合に、`inconclusive` な結果を決着させるためにおおよそ何件の*追加*トライアルが必要かの見積もり
 です。
 
 - **`winrate`/`sign-test`/`elo`** では、レポート自体が使っている実際のCI計算式(`--ci-method`に
   応じて`wilson`/`jeffreys`/`exact`)に対する二分探索であり、点推定を固定した上での近似ではなく、
   既に検証済みの数式に対する厳密な探索です。
-- **`mean-diff`/`quantile-diff`** は例外です。実際のリサンプルデータなしにブートストラップCIの
-  「仮想的なnでの幅」を求める閉形式がどちらにも存在しないため、代わりに `O(1/sqrt(n))` によるCLT
-  スケーリングモデルにフォールバックします。`mean-diff` についてはこれに既知の、定量化されたバイアス
-  があります: 中程度のnでのサンプルサイズ4倍への増加では実際の再実行結果の約1.5%以内に収まりますが、
-  n=100では実際には約18%の過小評価になります - 例えばWilsonのCIは `O(z^2/n)` の再センタリング項に
-  よっても縮小しますが、単純な `1/sqrt(n)` モデルはこれを捉えられないためです。`quantile-diff` は
-  同じモデルを流用していますが、自身のブートストラップCIに対しては未検証です。どちらの数値も保証
-  ではなく「おおよそこのくらい、もっと多いかもしれない」という目安として扱ってください。
+- **`mean-diff`/`quantile-diff`/`relative-diff`**(`metrics::lacks_closed_form_ci`)は例外です。
+  実際のリサンプルデータなしにブートストラップCIの「仮想的なnでの幅」を求める閉形式がいずれにも
+  存在しないため、代わりに `O(1/sqrt(n))` によるCLTスケーリングモデルにフォールバックします。
+  `mean-diff` についてはこれに既知の、定量化されたバイアスがあります: 中程度のnでのサンプルサイズ
+  4倍への増加では実際の再実行結果の約1.5%以内に収まりますが、n=100では実際には約18%の過小評価に
+  なります - 例えばWilsonのCIは `O(z^2/n)` の再センタリング項によっても縮小しますが、単純な
+  `1/sqrt(n)` モデルはこれを捉えられないためです。`quantile-diff`/`relative-diff` は同じモデルを
+  流用していますが、自身のブートストラップCIに対しては未検証です。3つのメトリクスいずれの数値も
+  保証ではなく「おおよそこのくらい、もっと多いかもしれない」という目安として扱ってください
+  - `relative-diff` も他の2つと全く同じように近似です。
 
 提案すべき有用な内容が何もない場合は `null` を返します: 判定が既に`pass`/`fail`である、ペア
 トライアルが0件である、あるいは効果量がpass/failしきい値の帯の*内側*(「dead zone」)にある場合

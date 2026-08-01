@@ -16,6 +16,63 @@ use std::collections::{HashMap, HashSet};
 
 use crate::Outcome;
 use crate::error::VeridictError;
+use crate::report::ScaleDiagnostics;
+use crate::stats::bootstrap;
+
+/// Below this many positive baselines, `raw_orders_of_magnitude` (the full min/max span) is the
+/// only signal available - not enough data yet for a percentile-trimmed span to mean anything more
+/// than the raw one. At or above it, `robust_orders_of_magnitude` (p95/p05) becomes the primary
+/// signal instead, so one extreme outlier can't single-handedly trigger `wide_baseline_scale` on an
+/// otherwise tightly-scaled dataset - see `collect_data_quality` in `lib.rs`.
+pub(crate) const ROBUST_SPAN_MIN_POSITIVE_BASELINES: usize = 20;
+
+/// Computes `mean-diff`/`relative-diff`'s scale-mismatch diagnostic from raw, per-record baseline
+/// values alone - deliberately the *only* input this takes. Candidate values, the metric's effect,
+/// its CI, and its verdict are all in scope by the time an aggregator's `finish()` calls this, but
+/// none of them are passed in: if this function could see any of them, "does the scale look wide"
+/// could end up correlated with "did the result look good," and a diagnostic that only exists to
+/// recommend *before* looking at results would quietly become one more thing tuned by looking at
+/// results. Order-independent (only counts/min/max/percentiles of the multiset matter), so callers
+/// can pass baselines in ingestion order without sorting first.
+pub(crate) fn compute_scale_diagnostics(baselines: &[f64]) -> ScaleDiagnostics {
+    let mut positive: Vec<f64> = baselines.iter().copied().filter(|&b| b > 0.0).collect();
+    let non_positive_baseline_count = (baselines.len() - positive.len()) as u64;
+    if positive.is_empty() {
+        return ScaleDiagnostics {
+            positive_baseline_count: 0,
+            non_positive_baseline_count,
+            min_positive_baseline: 0.0,
+            max_positive_baseline: 0.0,
+            raw_orders_of_magnitude: 0.0,
+            robust_orders_of_magnitude: None,
+        };
+    }
+    positive.sort_by(f64::total_cmp);
+    let min_positive_baseline = positive[0];
+    let max_positive_baseline = positive[positive.len() - 1];
+    // log10(max) - log10(min), not log10(max / min): both baselines are finite, but their
+    // quotient can overflow to inf (e.g. 1e-300 vs 1e100), which would serialize as JSON `null`
+    // and violate the schema's `"type": "number"`. Subtracting logs never overflows here.
+    let raw_orders_of_magnitude = max_positive_baseline.log10() - min_positive_baseline.log10();
+    let robust_orders_of_magnitude = if positive.len() >= ROBUST_SPAN_MIN_POSITIVE_BASELINES {
+        // `bootstrap::quantile` re-sorts internally; `positive` is already sorted, but the input is
+        // small enough (a per-run baseline list, not a bootstrap resample) that re-sorting it is not
+        // worth a second, sort-skipping code path just for this call site.
+        let p05 = bootstrap::quantile(&positive, 0.05);
+        let p95 = bootstrap::quantile(&positive, 0.95);
+        Some(p95.log10() - p05.log10())
+    } else {
+        None
+    };
+    ScaleDiagnostics {
+        positive_baseline_count: positive.len() as u64,
+        non_positive_baseline_count,
+        min_positive_baseline,
+        max_positive_baseline,
+        raw_orders_of_magnitude,
+        robust_orders_of_magnitude,
+    }
+}
 
 /// Shared by WinRate and Elo: one win/loss/draw observation per record.
 /// Order-independent (only integer tallies come out), so no ordering
@@ -324,5 +381,91 @@ impl SignCounts {
             }
         }
         Ok((self.positive, self.negative))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_baselines_has_zero_positive_count_and_no_robust_span() {
+        let diag = compute_scale_diagnostics(&[]);
+        assert_eq!(diag.positive_baseline_count, 0);
+        assert_eq!(diag.non_positive_baseline_count, 0);
+        assert_eq!(diag.raw_orders_of_magnitude, 0.0);
+        assert!(diag.robust_orders_of_magnitude.is_none());
+    }
+
+    #[test]
+    fn all_non_positive_baselines_has_zero_positive_count_and_no_span() {
+        let diag = compute_scale_diagnostics(&[0.0, -5.0, -10.0]);
+        assert_eq!(diag.positive_baseline_count, 0);
+        assert_eq!(diag.non_positive_baseline_count, 3);
+        assert_eq!(diag.raw_orders_of_magnitude, 0.0);
+    }
+
+    #[test]
+    fn raw_orders_of_magnitude_matches_log10_of_max_over_min() {
+        let diag = compute_scale_diagnostics(&[10.0, 100.0, 1_000.0]);
+        assert!((diag.raw_orders_of_magnitude - 2.0).abs() < 1e-9); // log10(1000/10)
+        assert_eq!(diag.positive_baseline_count, 3);
+        assert_eq!(diag.non_positive_baseline_count, 0);
+        assert_eq!(diag.min_positive_baseline, 10.0);
+        assert_eq!(diag.max_positive_baseline, 1_000.0);
+    }
+
+    #[test]
+    fn mixed_sign_baselines_count_positives_and_non_positives_separately() {
+        let diag = compute_scale_diagnostics(&[10.0, -5.0, 0.0, 1_000.0]);
+        assert_eq!(diag.positive_baseline_count, 2);
+        assert_eq!(diag.non_positive_baseline_count, 2);
+    }
+
+    #[test]
+    fn robust_span_is_none_below_the_20_positive_baseline_floor() {
+        let baselines: Vec<f64> = (1..=19).map(|i| i as f64).collect();
+        let diag = compute_scale_diagnostics(&baselines);
+        assert_eq!(diag.positive_baseline_count, 19);
+        assert!(diag.robust_orders_of_magnitude.is_none());
+    }
+
+    #[test]
+    fn robust_span_appears_at_the_20_positive_baseline_floor() {
+        let baselines: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let diag = compute_scale_diagnostics(&baselines);
+        assert_eq!(diag.positive_baseline_count, 20);
+        assert!(diag.robust_orders_of_magnitude.is_some());
+    }
+
+    #[test]
+    fn a_single_extreme_outlier_does_not_move_the_robust_span_at_n40() {
+        // 39 baselines clustered in [100, 138], plus one wild outlier at 10,000,000 - the outlier
+        // is the sample max, but at n=40 type-7's p95 (h = 0.95*39 = 37.05) interpolates between
+        // sorted indices 37/38 (values 137/138), never touching index 39 (the outlier) - so it
+        // never enters the p95 estimate. n=20 would NOT have this property (h = 0.95*19 = 18.05,
+        // which does land on the max) - this is why the robust-span floor matters, not just its
+        // presence/absence.
+        let mut baselines: Vec<f64> = (0..39).map(|i| 100.0 + i as f64).collect();
+        baselines.push(10_000_000.0);
+        let diag = compute_scale_diagnostics(&baselines);
+        assert_eq!(diag.positive_baseline_count, 40);
+        let robust = diag.robust_orders_of_magnitude.unwrap();
+        assert!(
+            robust < 1.0,
+            "robust span {robust} was pulled up by the single outlier"
+        );
+        // The raw (non-robust) span, by contrast, DOES include the outlier and is far wider -
+        // confirming the outlier is real data, just correctly excluded from the robust summary.
+        assert!(diag.raw_orders_of_magnitude > 4.0);
+    }
+
+    #[test]
+    fn result_does_not_depend_on_input_order() {
+        let a = compute_scale_diagnostics(&[5.0, 500.0, 50.0]);
+        let b = compute_scale_diagnostics(&[50.0, 5.0, 500.0]);
+        assert_eq!(a.raw_orders_of_magnitude, b.raw_orders_of_magnitude);
+        assert_eq!(a.min_positive_baseline, b.min_positive_baseline);
+        assert_eq!(a.max_positive_baseline, b.max_positive_baseline);
     }
 }

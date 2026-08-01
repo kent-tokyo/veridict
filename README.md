@@ -4,7 +4,10 @@ English | [日本語](README_ja.md)
 
 [![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/veridict.svg)](https://crates.io/crates/veridict)
+[![docs.rs](https://img.shields.io/docsrs/veridict)](https://docs.rs/veridict)
+[![Downloads](https://img.shields.io/crates/d/veridict.svg)](https://crates.io/crates/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![GitHub stars](https://img.shields.io/github/stars/kent-tokyo/veridict.svg?style=social)](https://github.com/kent-tokyo/veridict)
 
 A small, domain-agnostic evaluation gate: decide whether a candidate is
 actually better than a baseline, from a file of trial results.
@@ -39,6 +42,10 @@ spreadsheet and guess:
 * **Latency/tail-performance regression gate** - a mean can hide a worsened
   worst case -> `--metric quantile-diff --quantile 0.95` (or `0.99`) on paired
   per-request latencies (`examples/paired_scores.jsonl`).
+* **Benchmark suite with wildly different problem sizes per case** - raw
+  score differences would be dominated by the largest cases ->
+  `--metric relative-diff` for proportional change instead of absolute
+  (`examples/mixed_scale_scores.jsonl`).
 * **Release regression gate in CI** - candidate build vs last known-good
   baseline, wired into a pipeline with `--fail-below`/`--pass-above` and a
   `veridict` exit code (see [Regression gate](#usage) below).
@@ -114,6 +121,22 @@ Exact binomial CI on a small sample, BCa bootstrap on a skewed one:
 ```bash
 veridict compare results.jsonl --metric winrate --ci-method exact
 veridict compare scores.jsonl --metric mean-diff --bootstrap-method bca
+```
+
+Proportional change relative to the baseline, for benchmarks where problem size or raw score
+varies a lot across cases (see [Scale-mismatch diagnostic](#scale-mismatch-diagnostic)):
+
+```bash
+veridict compare examples/mixed_scale_scores.jsonl --metric relative-diff --min-effect 0.03
+```
+
+Asymmetric thresholds work the same way as for every other metric:
+
+```bash
+veridict compare examples/mixed_scale_scores.jsonl \
+  --metric relative-diff \
+  --pass-above 0.03 \
+  --fail-below -0.02
 ```
 
 Treat a candidate crash/timeout as a loss instead of just reporting it (see [Metrics](#metrics)
@@ -205,6 +228,9 @@ See `examples/`:
 * `examples/winloss.jsonl` - win/loss/draw records, for `--metric winrate` / `--metric sign-test`.
 * `examples/paired_scores.jsonl` (and `examples/paired_scores.csv`, same data in the CSV format
   below) - paired baseline/candidate scores, for `--metric mean-diff` / `--metric sign-test`.
+* `examples/mixed_scale_scores.jsonl` - paired baseline/candidate scores with baselines spanning a
+  wide range, all strictly positive, for `--metric relative-diff` (and to demonstrate `--metric
+  mean-diff`'s [scale-mismatch diagnostic](#scale-mismatch-diagnostic)).
 * `examples/status_failures.jsonl` - all supported record shapes together, illustrating the format (not meant to be run against a single metric as-is: a record must carry a field the chosen metric understands, or a `baseline_status`/`candidate_status` field, or it is rejected as a schema mismatch).
 * `examples/chess_engine_draw_heavy.jsonl` - win/loss/draw records with a high draw rate, for
   `veridict sprt --sprt-variant trinomial` (see [SPRT](#sprt)).
@@ -273,11 +299,42 @@ veridict compare examples/paired_scores.csv --format csv --metric mean-diff
   a non-smooth statistic, so BCa's jackknife acceleration has no solid
   footing for it; see [`docs/metrics.md`](docs/metrics.md)). One quantile per
   invocation - run `compare` again for a second quantile.
+* **`relative-diff`** - bootstrap confidence interval on
+  `(candidate - baseline) / baseline` for paired numeric records: proportional
+  change relative to the baseline, instead of `mean-diff`'s absolute change.
+  Requires every baseline to be strictly positive (`baseline > 0`) - zero and
+  negative baselines are rejected as a configuration/data error, not silently
+  computed against `abs(baseline)` or a shifted denominator. Same
+  `--bootstrap-method percentile`/`basic`/`bca`/`--resamples`/`--seed` support
+  as `mean-diff`. Reports `effect`/`ci_low`/`ci_high` as a ratio (`0.05` =
+  +5%), rendered as a percentage in Markdown (`+5.0%`) - distinct from
+  `winrate`'s percentage-point `pp` suffix. Not supported this round:
+  `veridict power --metric relative-diff` and `--claim-correction` (see
+  [`docs/metrics.md`](docs/metrics.md)).
+
+Use `mean-diff` when one unit has the same practical meaning across all records. Use
+`relative-diff` when proportional change is the pre-specified estimand and all baseline values are
+strictly positive. They answer different questions (mean absolute change vs. mean proportional
+change), not the same question at different precision - a few things worth knowing before picking
+one:
+
+* `relative-diff` is directional, not symmetric under swapping the arms: a +100% increase followed
+  by a -50% decrease returns to the original value.
+* It's unusable when any baseline is zero or negative (`compare` rejects the run outright rather
+  than guessing what you meant).
+* A small baseline can produce a large ratio from a small absolute change - know your data's
+  baseline scale before trusting a lone large `relative-diff` outlier.
+* The mean of each pair's own relative diff and the ratio of summed totals
+  (`sum(candidate)/sum(baseline) - 1`) are generally different numbers when baselines vary in
+  scale - `relative-diff` reports the former (see [`docs/metrics.md`](docs/metrics.md)).
+* Picking whichever metric happens to pass *after* looking at both is exploratory analysis, not a
+  pre-specified estimand - see [Scale-mismatch diagnostic](#scale-mismatch-diagnostic) below.
 
 `winrate` and `sign-test` report `effect`/`ci_low`/`ci_high` centered on 0
 (deviation from a 50/50 split); `elo` is centered on 0 by construction (an
 even score is 0 Elo). All three compose directly with `--min-effect`.
-`mean-diff`/`quantile-diff` report them in the input's own units.
+`mean-diff`/`quantile-diff` report them in the input's own units; `relative-diff` reports them as a
+ratio.
 
 Every trial's `baseline_status`/`candidate_status` (`timeout`, `crash`,
 `invalid`) is tallied and reported regardless of which metric you run, both
@@ -301,12 +358,48 @@ also affects the *computation*, not just the report:
   `result` says next to it.
 
 `exclude`/`loss` only apply to outcome-based metrics (`winrate`/`elo`);
-requesting either with `--metric mean-diff`/`--metric sign-test` is a config
-error, not an arbitrary numeric penalty for a failed numeric trial.
+requesting either with `--metric mean-diff`/`--metric sign-test`/
+`--metric relative-diff` is a config error, not an arbitrary numeric penalty
+for a failed numeric trial.
 
 Requesting several `--metric` flags together scans the input once, feeding
 every record to every requested metric, rather than one full pass per
 metric.
+
+## Scale-mismatch diagnostic
+
+When you run `--metric mean-diff`, `data_quality.wide_baseline_scale` (advisory, never changes
+`verdict`) fires if baselines are all positive but span at least a ~10x range - a sign the absolute
+difference may be dominated by the largest-scale cases:
+
+```console
+$ veridict compare examples/mixed_scale_scores.jsonl --metric mean-diff --min-effect 0
+...
+"warnings": [
+  "small sample: 15 paired trial(s), below the conventional 30-trial threshold for confidence-interval methods to be reliable",
+  "baseline values span 1.8 orders of magnitude; absolute differences may be dominated by larger-scale cases. If the scientific question is proportional change, consider --metric relative-diff. Choose the metric before confirmatory analysis; switching after inspecting the verdict is exploratory."
+]
+```
+
+If some baselines are zero or negative, the warning instead recommends a domain-justified
+normalization rather than `relative-diff` (which isn't well-defined for that data either):
+
+```text
+baseline values vary widely, but some baselines are zero or negative, so
+relative-diff is not well-defined for this dataset. Use a domain-justified
+normalization rather than adding an arbitrary denominator offset.
+```
+
+**This diagnostic never recommends switching metrics based on the observed result.** It's computed
+from baseline values alone - `positive_baseline_count`, `non_positive_baseline_count`,
+`min_positive_baseline`, `max_positive_baseline`, `raw_orders_of_magnitude`, and (at 20+ positive
+baselines, to keep one outlier from dominating) `robust_orders_of_magnitude`, all exposed as
+`scale_diagnostics` on `mean-diff`/`relative-diff` reports - never candidate values, the effect
+size, the CI, or the verdict. Choose `--metric mean-diff` or `--metric relative-diff` based on the
+measurement goal before treating a result as confirmatory; switching metrics after inspecting a
+verdict is exploratory, not a second confirmatory analysis, and should be validated on fresh or
+held-out data. See [`docs/metrics.md`](docs/metrics.md) for the exact threshold and warning-text
+rules.
 
 ## Multiple-comparison correction
 
@@ -321,7 +414,8 @@ section for the full reasoning). Instead, correction populates a separate
 `family_adjusted_verdict`/`family_adjusted_promotion` per report (`unadjusted_verdict` also
 appears alongside them, a deprecated compatibility alias that always equals `verdict` - read
 `verdict` instead) and an overall `simultaneous_claims_promotion`. Not supported together with
-`--cluster-by-id` or `--metric mean-diff`/`quantile-diff` (rejected as a configuration error - see
+`--cluster-by-id` or `--metric mean-diff`/`quantile-diff`/`relative-diff` (rejected as a
+configuration error - see
 `docs/metrics.md`). `--correction` is kept as a deprecated alias for one release. Default is
 `none` - today's existing behavior, unchanged, unless you opt in.
 
@@ -407,15 +501,23 @@ Every `compare` report also carries advisory fields that never affect
   effect being smaller than the CI's own half-width (plausibly noise around
   zero), for `quantile-diff`, too few expected observations in the thinner
   tail at the requested quantile (fewer than 10, `paired_count * min(q, 1-q)`),
-  or, in unpaired mode, one `id` being repeated 3+ times among 10+
-  id-tagged trials (a sign the same test case was logged multiple times
-  rather than run that many independent times - silent when every `id`
-  appears exactly twice, the common case of forgetting `--paired-by-id`).
+  for `mean-diff`, baselines spanning a wide range (see [Scale-mismatch
+  diagnostic](#scale-mismatch-diagnostic) above), or, in unpaired mode, one
+  `id` being repeated 3+ times among 10+ id-tagged trials (a sign the same
+  test case was logged multiple times rather than run that many independent
+  times - silent when every `id` appears exactly twice, the common case of
+  forgetting `--paired-by-id`).
 * **`data_quality`** - the same flags as `warnings`, as booleans
   (`tiny_sample`, `high_failure_rate`, `draw_heavy`, `effect_within_noise_floor`,
-  `low_id_diversity`) rather than strings, for a machine consumer that wants
-  to branch on a flag instead of parsing prose. Added alongside `warnings`,
-  not a replacement - both are always present.
+  `low_id_diversity`, `wide_baseline_scale`) rather than strings, for a
+  machine consumer that wants to branch on a flag instead of parsing prose.
+  Added alongside `warnings`, not a replacement - both are always present.
+* **`scale_diagnostics`** - `mean-diff`/`relative-diff` only: the raw
+  distribution of baseline values (`positive_baseline_count`,
+  `non_positive_baseline_count`, `min_positive_baseline`,
+  `max_positive_baseline`, `raw_orders_of_magnitude`,
+  `robust_orders_of_magnitude`) `wide_baseline_scale` is computed from - see
+  [Scale-mismatch diagnostic](#scale-mismatch-diagnostic).
 
 See [`docs/metrics.md`](docs/metrics.md) for the full detail on every method
 above, including assumptions and known failure modes.
@@ -1010,12 +1112,16 @@ single net observation instead of two independent ones:
   loss=0, the standard "paired game" convention) - `>1` is a net candidate
   win, `<1` a net baseline win, exactly `1` a net draw.
 * `mean-diff`/`quantile-diff`/`sign-test`: net by averaging the pair's two diffs.
+* `relative-diff`: each raw record is relative-transformed
+  (`(candidate - baseline) / baseline`) *first*, then the pair's two ratios are netted by
+  averaging - not by averaging baseline/candidate first and taking one ratio of the averages (see
+  [`docs/metrics.md`](docs/metrics.md)).
 
 An `id` used only once is an ordinary unpaired sample (mixing paired and
 unpaired testcases in one file is fine). Three or more records sharing an
 `id` is rejected as a data error, not silently truncated to a pair. Without
-`--paired-by-id`, a duplicate `id` on `mean-diff`/`quantile-diff`/`sign-test`
-records is still rejected outright, same as before this flag existed.
+`--paired-by-id`, a duplicate `id` on `mean-diff`/`quantile-diff`/`sign-test`/
+`relative-diff` records is still rejected outright, same as before this flag existed.
 
 **`sprt --sprt-variant pentanomial` is the one exception to "an id used once
 is an ordinary unpaired sample":** it keeps the pair's full 5-value score
@@ -1071,9 +1177,9 @@ genuinely independent ones. `cluster_count`/`max_cluster_size` are always presen
 (no estimator involved) - the number of distinct clusters and the largest one's size, e.g. how
 repeated the most-replayed opening is.
 
-Only `winrate`/`elo` this round - `mean-diff`/`sign-test`/`quantile-diff` cluster support is
-deferred (see `docs/research-map.md`), a separate piece of wiring since those metrics bootstrap by
-individual record today, not by outcome tally.
+Only `winrate`/`elo` this round - `mean-diff`/`sign-test`/`quantile-diff`/`relative-diff` cluster
+support is deferred (see `docs/research-map.md`), a separate piece of wiring since those metrics
+bootstrap by individual record today, not by outcome tally.
 
 ## Verdict logic
 
@@ -1095,9 +1201,10 @@ what's deliberately out of scope.
 
 * **`winrate`/`sign-test` CI** - Wilson score interval (Wilson 1927); `--ci-method exact` gives
   the Clopper-Pearson exact binomial interval (Clopper & Pearson 1934) instead.
-* **`mean-diff`/`quantile-diff` CI** - percentile or BCa (bias-corrected and accelerated)
-  bootstrap, both from Efron & Tibshirani, *An Introduction to the Bootstrap* (1993, ch. 14). BCa
-  is CLI-gated for `quantile-diff` (see [`docs/metrics.md`](docs/metrics.md)).
+* **`mean-diff`/`quantile-diff`/`relative-diff` CI** - percentile or BCa (bias-corrected and
+  accelerated) bootstrap, both from Efron & Tibshirani, *An Introduction to the Bootstrap* (1993,
+  ch. 14). BCa is CLI-gated for `quantile-diff` only (see [`docs/metrics.md`](docs/metrics.md));
+  `relative-diff` supports all three `--bootstrap-method` variants, same as `mean-diff`.
 * **`elo`** - the logistic Elo model, the widely-used variant of Elo's original rating system
   (Elo 1978).
 * **`sprt`** - Wald's sequential probability ratio test (Wald 1945, `--sprt-variant wald`); the
@@ -1115,12 +1222,12 @@ choices or heuristics, and are labeled that way deliberately rather than dressed
   Verdict logic) are this project's own conservative design choice.
 * **`estimated_additional_trials`** - for `winrate`/`sign-test`/`elo` this binary-searches the
   real CI formula the report already uses, which is exact for the stated model (point estimate
-  held fixed). `mean-diff`/`quantile-diff` are the exception: there's no such closed form for a
-  bootstrap CI, so both fall back to an `O(1/sqrt(n))` scaling heuristic with a documented bias
-  (see Report extras).
-* **`warnings`** - the 30-trial, 20%-failure-rate, 50%-draw-rate, and (`quantile-diff` only)
-  10-expected-observations-in-the-tail thresholds are conventional rules of thumb, not derived
-  from a specific paper.
+  held fixed). `mean-diff`/`quantile-diff`/`relative-diff` are the exception: there's no such
+  closed form for a bootstrap CI, so all three fall back to an `O(1/sqrt(n))` scaling heuristic
+  with a documented bias (see Report extras).
+* **`warnings`** - the 30-trial, 20%-failure-rate, 50%-draw-rate, (`quantile-diff` only)
+  10-expected-observations-in-the-tail, and (`mean-diff` only) ~10x-baseline-scale thresholds are
+  conventional rules of thumb, not derived from a specific paper.
 
 ### References
 

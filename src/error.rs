@@ -94,6 +94,15 @@ pub enum VeridictError {
     PowerUnsupportedForQuantileDiff,
 
     #[error(
+        "power estimation isn't supported for metric relative-diff this round; it would need an \
+         assumed standard deviation of relative (not absolute) observations, and --pilot would \
+         need to relative-transform each record (validating baseline > 0) before estimating one - \
+         structurally close to mean-diff's existing --assume-sd/--pilot design but not yet audited \
+         on its own terms, so it isn't reused sight-unseen - see docs/research-map.md"
+    )]
+    PowerUnsupportedForRelativeDiff,
+
+    #[error(
         "--assume-effect ({assume_effect}) must be strictly greater than --min-effect \
          ({min_effect}); power evaluated with the true effect equal to the pass threshold is \
          just the interval's own miscoverage at that boundary (~1-confidence), not something \
@@ -154,6 +163,16 @@ pub enum VeridictError {
         field: &'static str,
         value: f64,
     },
+
+    #[error(
+        "line {line}: relative-diff requires baseline > 0 (got {baseline}); this isn't only about \
+         avoiding division by zero - a percentage change relative to a negative baseline doesn't \
+         have a stable interpretation (the same underlying improvement can read as a positive or \
+         negative ratio depending on which side of zero the baseline sits on), so it's rejected \
+         rather than silently computed against abs(baseline) or a shifted denominator. Use \
+         --metric mean-diff instead if some baselines are zero or negative"
+    )]
+    RelativeDiffRequiresPositiveBaseline { line: usize, baseline: f64 },
 
     #[error(
         "line {line}: unrecognized status '{value}' in field '{field}' (expected ok|timeout|crash|invalid)"

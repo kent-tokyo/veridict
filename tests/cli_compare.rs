@@ -2773,3 +2773,279 @@ fn verify_run_empty_games_input_exits_three() {
         .code(3)
         .stderr(predicate::str::contains("no records"));
 }
+
+// --- relative-diff ---
+
+#[test]
+fn relative_diff_reports_a_ratio_effect_and_passes_on_a_five_percent_min_effect() {
+    let stdin = "{\"baseline\":100.0,\"candidate\":110.0}\n{\"baseline\":200.0,\"candidate\":220.0}\n{\"baseline\":50.0,\"candidate\":55.0}\n";
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.05",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["metric"], "relative-diff");
+    assert!((json["effect"].as_f64().unwrap() - 0.10).abs() < 1e-9);
+}
+
+#[test]
+fn relative_diff_markdown_uses_percent_not_winrates_percentage_points() {
+    let stdin =
+        "{\"baseline\":100.0,\"candidate\":110.0}\n{\"baseline\":200.0,\"candidate\":220.0}\n";
+    let md_path = std::env::temp_dir().join("veridict_cli_test_relative_diff.md");
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.05",
+            "--report-md",
+            md_path.to_str().unwrap(),
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0);
+    let md = std::fs::read_to_string(&md_path).unwrap();
+    std::fs::remove_file(&md_path).ok();
+    assert!(
+        md.contains("+10.0%"),
+        "expected a percent-formatted effect, got:\n{md}"
+    );
+    assert!(
+        !md.contains("pp"),
+        "relative-diff must not use winrate's pp suffix:\n{md}"
+    );
+}
+
+#[test]
+fn relative_diff_rejects_zero_baseline_exits_three() {
+    veridict()
+        .args(["compare", "-", "--metric", "relative-diff"])
+        .write_stdin("{\"baseline\":0.0,\"candidate\":1.0}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("baseline > 0"));
+}
+
+#[test]
+fn relative_diff_rejects_negative_baseline_exits_three() {
+    veridict()
+        .args(["compare", "-", "--metric", "relative-diff"])
+        .write_stdin("{\"baseline\":-5.0,\"candidate\":1.0}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("baseline > 0"));
+}
+
+#[test]
+fn relative_diff_paired_by_id_averages_ratios_not_raw_values() {
+    // id "op1": +10% then -2% -> paired relative observation +4%, not the ratio of averaged
+    // baseline/candidate.
+    let stdin = "{\"id\":\"op1\",\"baseline\":100.0,\"candidate\":110.0}\n\
+                 {\"id\":\"op1\",\"baseline\":1000.0,\"candidate\":980.0}\n";
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--paired-by-id",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["paired_count"], 1);
+    assert!((json["effect"].as_f64().unwrap() - 0.04).abs() < 1e-9);
+}
+
+#[test]
+fn relative_diff_all_bootstrap_methods_produce_valid_json() {
+    let stdin: String = (0..20)
+        .map(|i| {
+            let b = 10.0 + i as f64;
+            format!("{{\"baseline\":{b},\"candidate\":{}}}\n", b * 1.05)
+        })
+        .collect();
+    for method in ["percentile", "basic", "bca"] {
+        let output = veridict()
+            .args([
+                "compare",
+                "-",
+                "--metric",
+                "relative-diff",
+                "--bootstrap-method",
+                method,
+            ])
+            .write_stdin(stdin.clone())
+            .assert()
+            .code(0)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(json["ci_low"].as_f64().unwrap().is_finite());
+        assert!(json["ci_high"].as_f64().unwrap().is_finite());
+    }
+}
+
+#[test]
+fn relative_diff_same_seed_and_input_is_bit_identical() {
+    let stdin: String = (0..20)
+        .map(|i| {
+            let b = 10.0 + i as f64;
+            format!("{{\"baseline\":{b},\"candidate\":{}}}\n", b * 1.05 + 0.3)
+        })
+        .collect();
+    let args = ["compare", "-", "--metric", "relative-diff", "--seed", "42"];
+    let out_a = veridict()
+        .args(args)
+        .write_stdin(stdin.clone())
+        .output()
+        .unwrap();
+    let out_b = veridict().args(args).write_stdin(stdin).output().unwrap();
+    assert_eq!(out_a.stdout, out_b.stdout);
+}
+
+#[test]
+fn relative_diff_multi_metric_with_mean_diff_runs_in_a_single_pass_with_correct_units() {
+    let stdin =
+        "{\"baseline\":100.0,\"candidate\":110.0}\n{\"baseline\":200.0,\"candidate\":220.0}\n";
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--metric",
+            "relative-diff",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let reports = json["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0]["metric"], "mean-diff");
+    assert_eq!(reports[1]["metric"], "relative-diff");
+    // mean-diff's effect is in raw units (mean of +10, +20 = 15); relative-diff's is a ratio (0.10).
+    assert!((reports[0]["effect"].as_f64().unwrap() - 15.0).abs() < 1e-9);
+    assert!((reports[1]["effect"].as_f64().unwrap() - 0.10).abs() < 1e-9);
+}
+
+#[test]
+fn claim_correction_rejects_a_relative_diff_family() {
+    let stdin = "{\"id\":\"a\",\"baseline\":100.0,\"candidate\":110.0}\n{\"id\":\"b\",\"baseline\":200.0,\"candidate\":220.0}\n";
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--claim-correction",
+            "bonferroni",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("relative-diff"));
+}
+
+#[test]
+fn power_relative_diff_is_a_clear_unsupported_error_not_a_clap_usage_error() {
+    veridict()
+        .args([
+            "power",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.02",
+            "--assume-effect",
+            "0.10",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("relative-diff"));
+}
+
+#[test]
+fn cluster_by_id_rejected_for_relative_diff() {
+    let stdin = "{\"id\":\"a\",\"baseline\":10.0,\"candidate\":11.0}\n";
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--cluster-by-id",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("relative-diff"));
+}
+
+// --- wide_baseline_scale scale-mismatch diagnostic ---
+
+#[test]
+fn wide_baseline_scale_warning_fires_above_ten_x_spread_and_mentions_relative_diff() {
+    let stdin = "{\"baseline\":10.0,\"candidate\":10.5}\n\
+                 {\"baseline\":40.0,\"candidate\":42.0}\n\
+                 {\"baseline\":70.0,\"candidate\":73.0}\n\
+                 {\"baseline\":100.0,\"candidate\":105.0}\n\
+                 {\"baseline\":150.0,\"candidate\":157.0}\n";
+    let output = veridict()
+        .args(["compare", "-", "--metric", "mean-diff"])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["data_quality"]["wide_baseline_scale"], true);
+    assert!(json["scale_diagnostics"].is_object());
+    let warnings = json["warnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("--metric relative-diff"))
+    );
+}
+
+#[test]
+fn wide_baseline_scale_silent_below_ten_x_spread() {
+    let stdin = "{\"baseline\":10.0,\"candidate\":10.5}\n\
+                 {\"baseline\":20.0,\"candidate\":21.0}\n\
+                 {\"baseline\":30.0,\"candidate\":31.5}\n\
+                 {\"baseline\":50.0,\"candidate\":52.0}\n";
+    let output = veridict()
+        .args(["compare", "-", "--metric", "mean-diff"])
+        .write_stdin(stdin)
+        .assert()
+        .code(0)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["data_quality"]["wide_baseline_scale"], false);
+}
