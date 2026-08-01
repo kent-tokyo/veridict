@@ -10,7 +10,7 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
-## [Unreleased]
+## [0.17.0] - 2026-08-01
 
 ### Added
 
@@ -54,6 +54,10 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
   per this project's existing "additive changes don't bump it" policy - existing consumers reading
   known fields are unaffected; `compare_correction_none`/`compare_claim_correction_holm` golden
   fixtures were regenerated to reflect the new `data_quality` key (the only diff).
+- `Cargo.toml`: added a `documentation` field pointing at docs.rs, and reworded `description` to
+  name "A/B and hypothesis testing" explicitly (crates.io/GitHub search discoverability only, no
+  code change). `README.md`/`README_ja.md` gained `docs.rs`, crates.io downloads, and GitHub-stars
+  badges alongside the existing CI/version/license ones.
 
 ## [0.16.1] - 2026-07-27
 
