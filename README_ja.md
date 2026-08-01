@@ -5,9 +5,7 @@
 [![CI](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml/badge.svg)](https://github.com/kent-tokyo/veridict/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/veridict.svg)](https://crates.io/crates/veridict)
 [![docs.rs](https://img.shields.io/docsrs/veridict)](https://docs.rs/veridict)
-[![Downloads](https://img.shields.io/crates/d/veridict.svg)](https://crates.io/crates/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![GitHub stars](https://img.shields.io/github/stars/kent-tokyo/veridict.svg?style=social)](https://github.com/kent-tokyo/veridict)
 
 候補(candidate)がベースライン(baseline)より本当に優れているかを判定する、小さくドメイン非依存な評価ゲート。トライアル結果のファイルから判定します。
 

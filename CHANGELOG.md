@@ -10,6 +10,14 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [Unreleased]
+
+### Changed
+
+- `README.md`/`README_ja.md`: dropped the crates.io downloads and GitHub-stars badges added in
+  0.17.0 - on a crate this new, both render as near-zero counts that undercut credibility rather
+  than build it. `docs.rs` stays (it's a build/link badge, not a vanity count).
+
 ## [0.17.0] - 2026-08-01
 
 ### Added
