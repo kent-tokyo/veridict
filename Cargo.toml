@@ -1,6 +1,6 @@
 [package]
 name = "veridict"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 authors = ["kent-tokyo <kent-tokyo@users.noreply.github.com>"]
 description = "Statistical regression gate for A/B and hypothesis testing: compare candidate vs baseline results with win-rate, Elo, SPRT, and bootstrap confidence intervals."
