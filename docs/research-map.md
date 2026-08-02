@@ -70,6 +70,57 @@ constructor and getting the units wrong.
 `relative-diff` gate, at which point the above three points become the actual design spec rather
 than a list of open questions.
 
+### Subset-only `relative-diff` (effect size restricted to non-tied cases)
+
+**What it is:** a second, `relative-diff`-only diagnostic number - or possibly its own bootstrap
+CI - computed over just the non-tied subset of ingested records (`candidate != baseline`), rather
+than the full pooled sample `relative-diff` already reports. The motivating case: a change that
+only affects a subset of test cases (e.g. one code path among several) contributes an exact
+`diff = 0` for every untouched case, which pulls the pooled `mean(relative_diff_i)` toward zero and
+makes a correctly-scoped, conservative change look weaker than it actually is among the cases it
+touches. `compare --metric relative-diff`'s `data_quality.diluted_by_ties`/`tied_count` (see
+`docs/metrics.md`) *detects* this dilution today - counts how many records tied exactly - but
+doesn't correct for it; this entry is the deferred "and report the target-subset number too" half.
+
+**Why not yet:** this directly borders `docs/metrics.md`'s "Method-selection discipline: pick the
+metric before looking at results" principle - restricting to `diff != 0` records is a
+data-dependent filter, even though it's arguably a legitimate distinction rather than result-driven
+cherry-picking: the *full pooled* `relative-diff` answers an intent-to-treat-style question ("what
+was the average proportional effect across everything tested, including cases the change never
+touched"), while a *non-tied-subset* number answers a per-protocol-style question ("what was the
+average proportional effect among cases the change actually affected"). Both are legitimate,
+well-defined questions - but which records land in "non-tied" is only known after the run, unlike
+`relative-diff` vs `mean-diff` itself (a metric choice made before seeing any data). That framing
+needs to be written down and justified with the same rigor this project already gives
+`scale_diagnostics` (computed from baselines alone, deliberately never conditioned on the observed
+effect) before shipping a second effect size that *is* conditioned on the observed per-record diffs
+- a category this project has not shipped before.
+
+Open questions, not yet answered:
+
+- **Diagnostic-only vs. a real second effect size.** `scale_diagnostics` is the existing precedent
+  for "an extra number that's advisory/transparency-only and never touches `verdict`/CI" - a
+  subset-only *count* or *point estimate* could follow that shape. A subset-only number with its
+  *own* bootstrap CI (and potentially its own `verdict`) is a materially bigger claim - it would
+  need the same design rigor `relative-diff` itself got as an independent `MetricConfig`/
+  `MetricKind` (see `docs/metrics.md`'s "why this is an independent metric" section), not a
+  mechanical reuse of the existing bootstrap machinery on a filtered sample.
+- **CLI surface.** An always-computed report field (cheap, but changes every `relative-diff`
+  report's shape) vs. an opt-in flag (e.g. something in the shape of `--exclude-ties`) that a
+  caller requests explicitly - and what either would be named.
+- **Denominator/counting-point question, for the effect-size case specifically.** `tied_count`
+  (shipped) settled this for a simple *count*: at ingest, before `--paired-by-id` netting (so two
+  opposite nonzero ratios netting to `0.0` under pairing is never mistaken for a genuine exact
+  match). A subset-only *effect size* recomputation has its own, harder implications under
+  `--paired-by-id` that a count doesn't: does filtering happen before or after netting, and does
+  the bootstrap resample the filtered raw records or the filtered netted pairs? Not settled by the
+  count-only design that shipped.
+
+**What would change this:** someone doing that design pass, or a concrete follow-up request
+specific enough to settle the diagnostic-vs-effect-size question above - e.g. a report where
+`diluted_by_ties` fired and the pooled `relative-diff` alone wasn't enough to judge whether a
+narrowly-scoped change should ship.
+
 ### Log-ratio metric (`log(candidate / baseline)`)
 
 **What it is:** `log(candidate / baseline)`, bootstrapped the same way `relative-diff` bootstraps

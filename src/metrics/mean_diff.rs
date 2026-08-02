@@ -105,6 +105,7 @@ impl MetricAggregator for MeanDiffAggregator {
                 effective_sample_size: None,
                 design_effect: None,
                 scale_diagnostics: None,
+                tied_count: None,
             });
         }
         let effect = bootstrap::mean(&diffs);
@@ -148,6 +149,7 @@ impl MetricAggregator for MeanDiffAggregator {
             effective_sample_size: None,
             design_effect: None,
             scale_diagnostics: Some(compute_scale_diagnostics(&self.baselines)),
+            tied_count: None,
         })
     }
 }

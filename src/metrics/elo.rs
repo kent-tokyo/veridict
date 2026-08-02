@@ -131,6 +131,7 @@ impl MetricAggregator for EloAggregator {
                 effective_sample_size: None,
                 design_effect: None,
                 scale_diagnostics: None,
+                tied_count: None,
             });
         }
         let score = (candidate_wins as f64 + 0.5 * draws as f64) / n as f64;
@@ -187,6 +188,7 @@ impl MetricAggregator for EloAggregator {
             max_id_count: 0,
             quantile: None,
             scale_diagnostics: None,
+            tied_count: None,
         })
     }
 }

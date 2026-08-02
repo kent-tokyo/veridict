@@ -12,6 +12,7 @@
       "correction_method": "holm",
       "crashes": 0,
       "data_quality": {
+        "diluted_by_ties": false,
         "draw_heavy": false,
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
@@ -38,6 +39,7 @@
       "family_adjusted_promotion": "promoted",
       "family_adjusted_verdict": "pass",
       "family_size": 2,
+      "inconclusive_kind": null,
       "invalid": 0,
       "metric": "winrate",
       "paired_count": 100,
@@ -62,6 +64,7 @@
       "correction_method": "holm",
       "crashes": 0,
       "data_quality": {
+        "diluted_by_ties": false,
         "draw_heavy": false,
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
@@ -88,6 +91,7 @@
       "family_adjusted_promotion": "promoted",
       "family_adjusted_verdict": "pass",
       "family_size": 2,
+      "inconclusive_kind": null,
       "invalid": 0,
       "metric": "elo",
       "paired_count": 100,

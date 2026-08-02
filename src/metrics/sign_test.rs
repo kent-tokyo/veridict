@@ -95,6 +95,7 @@ impl MetricAggregator for SignTestAggregator {
                 effective_sample_size: None,
                 design_effect: None,
                 scale_diagnostics: None,
+                tied_count: None,
             });
         }
         let (lo, hi) = match self.ci_method {
@@ -123,6 +124,7 @@ impl MetricAggregator for SignTestAggregator {
             effective_sample_size: None,
             design_effect: None,
             scale_diagnostics: None,
+            tied_count: None,
         })
     }
 }

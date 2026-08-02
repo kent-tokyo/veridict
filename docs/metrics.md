@@ -950,6 +950,40 @@ case, not more data alone. Also `null` whenever `--cluster-by-id` was used (see
 `--cluster-by-id` above) - none of the binary-searched CI functions describe a cluster bootstrap,
 and the independent unit is the cluster, not the trial.
 
+**A dead-zone `null` next to a zero-excluding CI is exactly `inconclusive_kind: "directional"`
+below** - a real, consistently-signed effect that's simply too small to clear the threshold, where
+by definition no amount of *additional data at the same effect size* can help. Seeing `null` here
+doesn't mean the field is unsupported for a given metric (it's computed the same way for every
+metric); it means this specific run's point estimate already sits inside the threshold band.
+
+## `inconclusive_kind`
+
+**Sub-classifies an `inconclusive` verdict by whether its CI excludes zero.** Two situations both
+serialize as `"verdict": "inconclusive"` otherwise, but call for different next steps:
+
+- **`directional`** - `ci_low`/`ci_high` share a sign (the CI excludes zero): a real,
+  consistent-direction effect that simply doesn't clear the pass/fail threshold yet. More trials
+  *can* help here, unless `estimated_additional_trials` is `null` for the dead-zone reason above.
+- **`noise`** - the CI still straddles zero (`ci_low <= 0.0 <= ci_high`, inclusive): the sign of
+  the effect itself is undetermined, indistinguishable from noise around zero.
+
+`null` (not one of the two strings above) for a `pass`/`fail` verdict, and for an `inconclusive`
+verdict that isn't a real CI judgment: zero usable trials (a data-availability problem, not a
+noise/directional question) or a `--max-timeouts`/`--max-crashes`/`--max-invalid` cap breach (see
+`FailureCaps` above - a technical-invalidity `inconclusive` isn't a statistical judgment either).
+
+**Deliberately a different test from `data_quality.effect_within_noise_floor`.** That flag is
+`abs(effect) < CI half-width`, an approximation that assumes the CI is symmetric around the point
+estimate. `inconclusive_kind` reads `ci_low`/`ci_high` directly, with no such assumption, so it
+stays exact on an asymmetric bootstrap CI - `relative-diff`'s `bca` method, in particular, can
+produce a CI that isn't symmetric around `effect`. The two fields can disagree on such a report;
+neither supersedes the other, and both are always reported.
+
+**Also shown in the Markdown report**, not just JSON: the `Verdict:` line reads
+`Verdict: inconclusive (directional)` / `Verdict: inconclusive (noise)` whenever
+`inconclusive_kind` is set, the same way it already appends `(q=0.95)` to the metric line for
+`quantile-diff`.
+
 ## `warnings`
 
 **Not citation-backed - conventional rules of thumb**, computed independently of `verdict` (a
@@ -981,7 +1015,25 @@ warning never changes `pass`/`fail`/`inconclusive`):
 - **Thin quantile tail** (`quantile-diff` only) - fewer than 10 expected observations
   (`paired_count * min(q, 1-q)`) in the thinner tail at the requested quantile - see the
   `quantile-diff` section above.
+- **Diluted by ties** (`relative-diff` only, silent under `--paired-by-id`) - at least
+  `TIE_DILUTION_FRACTION` (0.5) of ingested records showed `candidate == baseline` exactly
+  (`tied_count`). If a change only affects a subset of cases, the untouched majority's exact-zero
+  diffs pull the pooled `mean(relative_diff_i)` toward zero, making a correctly-scoped,
+  conservative change look weaker than it is. `tied_count` is counted at ingest, before any
+  `--paired-by-id` netting - two opposite nonzero ratios netting to `0.0` under pairing is a
+  different phenomenon from a genuine exact match, and isn't counted here. This warning stays
+  silent entirely under `--paired-by-id` (same convention as low id diversity, below): the
+  fraction's denominator (`baseline_count`) is post-netting while `tied_count` is pre-netting, and
+  under pairing that isn't a small approximation but an unbounded skew - two records from the same
+  tied pair both count toward `tied_count` but net to a single post-netting record, so the naive
+  ratio can run past 100% (a verified case: two exact-match pairs plus one distinct
+  netted-to-zero pair produces `tied_count == 2`, `baseline_count == 2` - a 100% reading against a
+  true 50% pre-netting rate). `tied_count` itself is still reported and still exact under
+  `--paired-by-id`; only the derived warning is suppressed. See `docs/research-map.md`'s
+  "subset-only relative-diff" entry for a deferred idea to report an effect size restricted to the
+  non-tied
+  subset, which this warning only detects, not corrects for.
 
-None of these thresholds (30, 20%, 50%, 3-of-10, 10-expected-in-the-tail) come from a specific
-paper - they're the kind of rule of thumb a careful practitioner would apply by hand, made
+None of these thresholds (30, 20%, 50%, 3-of-10, 10-expected-in-the-tail, 50%-tied) come from a
+specific paper - they're the kind of rule of thumb a careful practitioner would apply by hand, made
 automatic.

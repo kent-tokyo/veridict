@@ -6,6 +6,7 @@
   "confidence": 0.95,
   "crashes": 0,
   "data_quality": {
+    "diluted_by_ties": false,
     "draw_heavy": false,
     "effect_within_noise_floor": false,
     "high_failure_rate": false,
@@ -29,6 +30,7 @@
       "timeout": 0
     }
   },
+  "inconclusive_kind": null,
   "invalid": 0,
   "metric": "relative-diff",
   "paired_count": 20,
@@ -44,6 +46,7 @@
     "robust_orders_of_magnitude": 1.058194383448379
   },
   "schema_version": 1,
+  "tied_count": 0,
   "timeouts": 0,
   "validity": "valid",
   "verdict": "pass",

@@ -26,6 +26,7 @@
     "failure_breakdown",
     "reason",
     "estimated_additional_trials",
+    "inconclusive_kind",
     "warnings",
     "data_quality"
   ],
@@ -69,6 +70,11 @@
       "minimum": 0,
       "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff/quantile-diff/relative-diff."
     },
+    "inconclusive_kind": {
+      "type": ["string", "null"],
+      "enum": ["noise", "directional", null],
+      "description": "Sub-classifies an inconclusive verdict by whether the CI excludes zero: directional (a real, consistent-direction effect that just doesn't clear the pass/fail threshold) vs noise (the CI still straddles zero). null for pass/fail, and for an inconclusive verdict that isn't a real CI judgment (zero usable trials, or a failure-cap breach). See docs/metrics.md."
+    },
     "warnings": {
       "type": "array",
       "items": { "type": "string" },
@@ -102,6 +108,11 @@
       "description": "--cluster-by-id only: Var(cluster bootstrap) / Var(i.i.d. bootstrap) on the same pooled data. 1.0 means no measurable clustering effect."
     },
     "scale_diagnostics": { "$ref": "#/$defs/scale_diagnostics" },
+    "tied_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "relative-diff only: count of ingested records where candidate == baseline exactly, counted before any --paired-by-id netting. Omitted entirely (not null) for every other metric. See data_quality.diluted_by_ties."
+    },
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
@@ -170,7 +181,7 @@
     "data_quality": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity", "thin_quantile_tail", "wide_baseline_scale"],
+      "required": ["tiny_sample", "high_failure_rate", "draw_heavy", "effect_within_noise_floor", "low_id_diversity", "thin_quantile_tail", "wide_baseline_scale", "diluted_by_ties"],
       "properties": {
         "tiny_sample": { "type": "boolean", "description": "paired_count < 30" },
         "high_failure_rate": { "type": "boolean", "description": "over 20% of trials failed to execute" },
@@ -178,7 +189,8 @@
         "effect_within_noise_floor": { "type": "boolean", "description": "abs(effect) < CI half-width, guarded by !tiny_sample" },
         "low_id_diversity": { "type": "boolean", "description": "one id repeated >= 3 times among >= 10 id-tagged trials, unpaired mode only; always false when --paired-by-id is set or too few records carry an id" },
         "thin_quantile_tail": { "type": "boolean", "description": "quantile-diff only; always false for other metrics. Fewer than 10 expected observations (paired_count * min(quantile, 1-quantile)) in the thinner tail." },
-        "wide_baseline_scale": { "type": "boolean", "description": "mean-diff only; always false for other metrics (including relative-diff, which ships scale_diagnostics for transparency but never warns about itself). True when positive baselines span at least WIDE_BASELINE_SCALE_ORDERS (1.0) orders of magnitude - see scale_diagnostics and docs/metrics.md." }
+        "wide_baseline_scale": { "type": "boolean", "description": "mean-diff only; always false for other metrics (including relative-diff, which ships scale_diagnostics for transparency but never warns about itself). True when positive baselines span at least WIDE_BASELINE_SCALE_ORDERS (1.0) orders of magnitude - see scale_diagnostics and docs/metrics.md." },
+        "diluted_by_ties": { "type": "boolean", "description": "relative-diff only; always false for other metrics, and always false under --paired-by-id (the pre-netting/post-netting count mismatch there is an unbounded skew, not a small approximation). True when tied_count / baseline_count >= TIE_DILUTION_FRACTION (0.5) - see tied_count and docs/metrics.md." }
       }
     },
     "scale_diagnostics": {

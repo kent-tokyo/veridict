@@ -95,6 +95,10 @@ pub struct MetricOutput {
     /// `common::compute_scale_diagnostics`). `None` for every other metric, and for these two
     /// metrics whenever there were zero usable trials (nothing to compute a distribution from).
     pub scale_diagnostics: Option<ScaleDiagnostics>,
+    /// `relative-diff` only: count of ingested records where `candidate == baseline` exactly,
+    /// counted before any `--paired-by-id` netting (see `RelativeDiffAggregator::ingest`). `None`
+    /// for every other metric.
+    pub tied_count: Option<u64>,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called once per record

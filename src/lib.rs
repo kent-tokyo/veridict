@@ -31,6 +31,22 @@ pub enum Verdict {
     Inconclusive,
 }
 
+/// Sub-classifies a `Verdict::Inconclusive` result by whether its CI excludes zero - the two
+/// situations read identically as `"inconclusive"` otherwise, but call for different next steps.
+/// `None` (not this enum) covers every case where the split doesn't apply: `Pass`/`Fail`, an
+/// `Inconclusive` caused by zero usable trials rather than a real CI, or one forced by a breached
+/// `FailureCaps` - see `verdict::classify_inconclusive` and `build_report`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InconclusiveKind {
+    /// The CI still straddles zero (`ci_low <= 0.0 <= ci_high`) - the sign of the effect itself
+    /// is undetermined, indistinguishable from noise around zero.
+    Noise,
+    /// The CI excludes zero (both bounds share a sign) - a real, consistent-direction effect
+    /// that simply doesn't clear the pass/fail threshold yet.
+    Directional,
+}
+
 /// Whether a report's underlying data is trustworthy enough to read a
 /// `Verdict` off of at all - independent of what that verdict says.
 /// `Invalid` means a hard technical-failure cap (`FailureCaps`) was
@@ -465,6 +481,7 @@ where
         thresholds,
         out,
         metric.ci_method(),
+        paired_by_id,
     ))
 }
 
@@ -512,6 +529,7 @@ where
                 thresholds,
                 out,
                 config.ci_method(),
+                paired_by_id,
             )
         })
         .collect();
@@ -532,6 +550,7 @@ fn build_report(
     thresholds: &verdict::Thresholds,
     out: metrics::MetricOutput,
     ci_method: CiMethod,
+    paired_by_id: bool,
 ) -> Report {
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
@@ -539,6 +558,15 @@ fn build_report(
     let (verdict, reason) = match &out.warning {
         Some(warning) => (Verdict::Inconclusive, warning.clone()),
         None => verdict::decide(out.ci_low, out.ci_high, thresholds),
+    };
+    // `None` for `Pass`/`Fail`, and for the `out.warning.is_some()` zero-trial path above (where
+    // ci_low == ci_high == 0.0 would misleadingly read as `Noise` - it's a data-availability
+    // problem, not a real CI judgment). `apply_failure_caps` clears this the same way it clears
+    // `estimated_additional_trials` below, for the same reason.
+    let inconclusive_kind = if verdict == Verdict::Inconclusive && out.warning.is_none() {
+        Some(verdict::classify_inconclusive(out.ci_low, out.ci_high))
+    } else {
+        None
     };
     // `estimate_additional_trials` binary-searches wilson/jeffreys/exact -
     // none of which describe a cluster bootstrap CI's width at a hypothetical
@@ -559,7 +587,7 @@ fn build_report(
             confidence,
         )
     };
-    let (data_quality, warnings) = collect_data_quality(metric, &out);
+    let (data_quality, warnings) = collect_data_quality(metric, &out, paired_by_id);
     let promotion = Promotion::decide(Validity::Valid, verdict);
 
     Report {
@@ -583,6 +611,7 @@ fn build_report(
         failure_breakdown: out.failures,
         reason,
         estimated_additional_trials,
+        inconclusive_kind,
         warnings,
         data_quality,
         quantile: out.quantile,
@@ -591,6 +620,7 @@ fn build_report(
         effective_sample_size: out.effective_sample_size,
         design_effect: out.design_effect,
         scale_diagnostics: out.scale_diagnostics,
+        tied_count: out.tied_count,
         correction_method: None,
         family_size: None,
         achieved_alpha: None,
@@ -609,6 +639,7 @@ fn build_report(
 fn collect_data_quality(
     metric: MetricKind,
     out: &metrics::MetricOutput,
+    paired_by_id: bool,
 ) -> (report::DataQuality, Vec<String>) {
     let mut quality = report::DataQuality::default();
     let mut warnings = Vec::new();
@@ -729,6 +760,36 @@ fn collect_data_quality(
                         .to_string(),
                 );
             }
+        }
+    }
+
+    // `relative-diff` only, and silent entirely under `--paired-by-id` (same convention as
+    // `low_id_diversity` below - repeated ids mean something different there). `out.tied_count` is
+    // counted at ingest (pre-netting - see `RelativeDiffAggregator::ingest`), while
+    // `out.baseline_count` is post-netting; under `--paired-by-id` this isn't a small
+    // approximation but a real, unbounded skew - two records from the same tied pair both count
+    // toward `tied_count` but net to a single post-netting record, so the naive ratio can run past
+    // 100% (verified: two exact-match pairs plus a distinct netted-to-zero pair produces
+    // `tied_count == 2`, `baseline_count == 2`, i.e. a 2x-inflated 100% reading against the true
+    // 50% pre-netting rate). Reporting a real pre-netting denominator would need new plumbing this
+    // round doesn't add without a concrete request for it - see docs/research-map.md's
+    // "subset-only relative-diff" entry, which already covers the closely related question of a
+    // pre-netting-aware subset effect size.
+    if !paired_by_id
+        && let Some(tied_count) = out.tied_count
+        && out.baseline_count > 0
+    {
+        let tied_fraction = tied_count as f64 / out.baseline_count as f64;
+        quality.diluted_by_ties = tied_fraction >= report::TIE_DILUTION_FRACTION;
+        if quality.diluted_by_ties {
+            warnings.push(format!(
+                "more than half of paired records show no change between candidate and baseline \
+                 ({tied_count} of {}); if only a subset of cases was actually affected by this \
+                 change, the pooled relative-diff effect is diluted toward zero by the unaffected \
+                 majority - see docs/research-map.md's \"subset-only relative-diff\" entry for a \
+                 deferred idea to report a target-subset effect size separately",
+                out.baseline_count
+            ));
         }
     }
 
@@ -867,6 +928,9 @@ mod tests {
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
         assert_eq!(report.timeouts, 1);
+        // Zero usable trials is a data-availability problem, not a real CI judgment - ci_low ==
+        // ci_high == 0.0 here would misleadingly read as `Noise` if this weren't guarded.
+        assert_eq!(report.inconclusive_kind, None);
     }
 
     #[test]
@@ -1593,5 +1657,240 @@ mod tests {
         // proves the bool's silence here is `relative-diff`-specific, not because the scale
         // happened to look narrow this time.
         assert!(diag.raw_orders_of_magnitude >= report::WIDE_BASELINE_SCALE_ORDERS);
+    }
+
+    #[test]
+    fn inconclusive_kind_is_none_on_a_pass_verdict() {
+        let records = [
+            (1, rec("a", Some(1.0), Some(2.0), None, None, None)),
+            (2, rec("b", Some(1.0), Some(2.0), None, None, None)),
+        ];
+        let thresholds = Thresholds::symmetric(0.5).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Pass);
+        assert_eq!(report.inconclusive_kind, None);
+    }
+
+    #[test]
+    fn inconclusive_kind_is_directional_when_ci_excludes_zero_but_stays_in_the_dead_zone() {
+        // Every diff is identical (+0.5): resampling an identical value can't move the mean, so
+        // the bootstrap CI collapses to a single point at 0.5 - deterministically excludes zero,
+        // deterministically inside a +-5.0 dead zone.
+        let records: Vec<_> = (0..30)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(&format!("r{i}"), Some(1.0), Some(1.5), None, None, None),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(5.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(
+            report.inconclusive_kind,
+            Some(InconclusiveKind::Directional)
+        );
+        // Directly ties into the dead-zone estimated_additional_trials contract documented above.
+        assert_eq!(report.estimated_additional_trials, None);
+    }
+
+    #[test]
+    fn inconclusive_kind_is_noise_when_ci_straddles_zero() {
+        // Diffs alternate +0.1/-0.1: effect is exactly 0.0, and the bootstrap CI around a
+        // two-point-mass sample straddles zero rather than collapsing to it.
+        let records: Vec<_> = (0..40)
+            .map(|i| {
+                let diff = if i % 2 == 0 { 0.1 } else { -0.1 };
+                (
+                    i + 1,
+                    rec(
+                        &format!("r{i}"),
+                        Some(1.0),
+                        Some(1.0 + diff),
+                        None,
+                        None,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(5.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.inconclusive_kind, Some(InconclusiveKind::Noise));
+    }
+
+    #[test]
+    fn relative_diff_tied_count_and_dilution_flag_fire_when_most_records_are_exact_matches() {
+        // 8 of 10 records are exact matches (candidate == baseline); only 2 carry a real change.
+        let mut records = vec![
+            (
+                1,
+                rec("touched-a", Some(10.0), Some(11.0), None, None, None),
+            ),
+            (
+                2,
+                rec("touched-b", Some(10.0), Some(11.0), None, None, None),
+            ),
+        ];
+        for i in 0..8 {
+            records.push((
+                3 + i,
+                rec(
+                    &format!("untouched{i}"),
+                    Some(10.0),
+                    Some(10.0),
+                    None,
+                    None,
+                    None,
+                ),
+            ));
+        }
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::RelativeDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.tied_count, Some(8));
+        assert!(report.data_quality.diluted_by_ties);
+        assert!(report.warnings.iter().any(|w| w.contains("no change")));
+    }
+
+    #[test]
+    fn relative_diff_tied_count_is_zero_and_dilution_flag_silent_with_no_ties() {
+        let records: Vec<_> = (0..10)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec(&format!("r{i}"), Some(10.0), Some(11.0), None, None, None),
+                )
+            })
+            .collect();
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::RelativeDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.tied_count, Some(0));
+        assert!(!report.data_quality.diluted_by_ties);
+    }
+
+    #[test]
+    fn relative_diff_tied_count_under_paired_by_id_counts_at_ingest_not_post_netting() {
+        // "pair" nets two *opposite* nonzero ratios (+10%/-10%) to a diff of exactly 0.0 - neither
+        // record was an exact match, so it must not count toward tied_count. "tied" nets two
+        // genuine exact matches - both must count.
+        let records = [
+            (1, rec("pair", Some(100.0), Some(110.0), None, None, None)),
+            (2, rec("pair", Some(100.0), Some(90.0), None, None, None)),
+            (3, rec("tied", Some(100.0), Some(100.0), None, None, None)),
+            (4, rec("tied", Some(100.0), Some(100.0), None, None, None)),
+        ];
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::RelativeDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            report.tied_count,
+            Some(2),
+            "only the two literal exact-match records count, not the netted-to-zero pair"
+        );
+        assert_eq!(
+            report.baseline_count, 2,
+            "post-netting: 2 groups -> 2 diffs"
+        );
+        // tied_count(2)/baseline_count(2) would naively read as a 100% tied rate here, double the
+        // true 50% pre-netting rate - diluted_by_ties must stay silent under --paired-by-id rather
+        // than report that inflated number.
+        assert!(!report.data_quality.diluted_by_ties);
+    }
+
+    #[test]
+    fn tied_count_is_none_for_metrics_other_than_relative_diff() {
+        let records = [
+            (1, rec("a", Some(1.0), Some(1.5), None, None, None)),
+            (2, rec("b", Some(1.0), Some(1.5), None, None, None)),
+        ];
+        let thresholds = Thresholds::symmetric(0.0).unwrap();
+        let report = compare_one(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            &thresholds,
+            500,
+            DEFAULT_SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.tied_count, None);
+        assert!(!report.data_quality.diluted_by_ties);
     }
 }

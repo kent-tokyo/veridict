@@ -89,8 +89,9 @@ struct CompareArgs {
     /// repeat the flag to mix both, since different metrics' effect sizes live on different
     /// scales (sign-test/winrate: win-rate margin off 0.5; relative-diff: relative ratio;
     /// mean-diff/quantile-diff/elo: raw units) and sharing one number across mixed metrics in a
-    /// multi-metric run is only coincidentally correct. Ignored if --pass-above/--fail-below are
-    /// given.
+    /// multi-metric run is only coincidentally correct - a bare default shared across metrics on
+    /// different scales prints a stderr warning naming the mismatched metrics. Ignored if
+    /// --pass-above/--fail-below are given.
     #[arg(long, value_delimiter = ',', value_parser = parse_min_effect_entry)]
     min_effect: Vec<MinEffectEntry>,
 
@@ -929,6 +930,83 @@ fn resolve_thresholds(
         .collect()
 }
 
+/// Which scale a metric's raw effect number lives on - see `CompareArgs::min_effect`'s doc for
+/// the same three-way split. Used only to warn when a bare `--min-effect` default is silently
+/// shared across metrics whose numbers aren't comparable.
+fn min_effect_unit_family(m: MetricArg) -> &'static str {
+    match m {
+        MetricArg::Winrate | MetricArg::SignTest => "win-rate margin off 0.5",
+        MetricArg::RelativeDiff => "relative ratio",
+        MetricArg::MeanDiff | MetricArg::QuantileDiff | MetricArg::Elo => "raw units",
+    }
+}
+
+/// Warns on stderr (never blocks the run - this is advisory, like the `--correction` deprecation
+/// warning it's modeled on) when a bare `--min-effect` default silently applies to two or more
+/// requested metrics whose unit families differ (see `min_effect_unit_family`) - e.g. `--min-effect
+/// 0.01` meaning "barely above a coin flip" for `sign-test` and "a real 1% score change" for
+/// `relative-diff` at the same time. Silent when every metric has its own `metric=value` override
+/// (nothing is actually shared), when only one metric is requested (nothing to compare against),
+/// or when `--pass-above`/`--fail-below` were given (they bypass `--min-effect` entirely).
+fn warn_on_mixed_min_effect_units(
+    metrics: &[MetricArg],
+    pass_above: Option<f64>,
+    fail_below: Option<f64>,
+    min_effect: &[MinEffectEntry],
+) {
+    if pass_above.is_some() || fail_below.is_some() {
+        return;
+    }
+    let default = min_effect.iter().find_map(|e| match *e {
+        MinEffectEntry::Default(v) => Some(v),
+        MinEffectEntry::Metric(..) => None,
+    });
+    let Some(default) = default else {
+        return;
+    };
+    let overridden: Vec<MetricArg> = min_effect
+        .iter()
+        .filter_map(|e| match *e {
+            MinEffectEntry::Metric(m, _) => Some(m),
+            MinEffectEntry::Default(_) => None,
+        })
+        .collect();
+    let defaulted: Vec<MetricArg> = metrics
+        .iter()
+        .copied()
+        .filter(|m| {
+            !overridden
+                .iter()
+                .any(|&om| MetricKind::from(om) == MetricKind::from(*m))
+        })
+        .collect();
+
+    let mut families: Vec<&'static str> = defaulted
+        .iter()
+        .map(|&m| min_effect_unit_family(m))
+        .collect();
+    families.sort_unstable();
+    families.dedup();
+    if families.len() < 2 {
+        return;
+    }
+
+    let named: Vec<String> = defaulted
+        .iter()
+        .map(|&m| format!("{} ({})", metric_arg_label(m), min_effect_unit_family(m)))
+        .collect();
+    eprintln!(
+        "warning: --min-effect {default} applies the same threshold to {} without a per-metric \
+         override, but these are not the same scale. Consider e.g. --min-effect {}.",
+        named.join(" and "),
+        defaulted
+            .iter()
+            .map(|&m| format!("{}={default}", metric_arg_label(m)))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+}
+
 fn run(command: Command) -> Result<ExitCode, VeridictError> {
     match command {
         Command::Compare(args) => run_compare(args),
@@ -948,6 +1026,12 @@ fn run_compare(args: CompareArgs) -> Result<ExitCode, VeridictError> {
         args.fail_below,
         &args.min_effect,
     )?;
+    warn_on_mixed_min_effect_units(
+        &args.metrics,
+        args.pass_above,
+        args.fail_below,
+        &args.min_effect,
+    );
 
     let format = resolve_format(&args.input, args.format);
     let records = read_records(&args.input, format)?;

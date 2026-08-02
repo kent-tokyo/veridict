@@ -2800,6 +2800,80 @@ fn relative_diff_reports_a_ratio_effect_and_passes_on_a_five_percent_min_effect(
 }
 
 #[test]
+fn relative_diff_inconclusive_kind_is_directional_in_the_dead_zone() {
+    // Every pair has the identical +0.3% relative diff: the bootstrap CI collapses to a single
+    // point at 0.003, which excludes zero but sits inside a +-0.5% dead zone.
+    let stdin: String = (0..20)
+        .map(|_| "{\"baseline\":100.0,\"candidate\":100.3}\n")
+        .collect();
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.005",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["verdict"], "inconclusive");
+    assert_eq!(json["inconclusive_kind"], "directional");
+    assert!(json["estimated_additional_trials"].is_null());
+}
+
+#[test]
+fn relative_diff_inconclusive_kind_is_noise_when_ci_straddles_zero() {
+    let stdin: String = (0..20)
+        .map(|i| {
+            let pct = if i % 2 == 0 { 101.0 } else { 99.0 };
+            format!("{{\"baseline\":100.0,\"candidate\":{pct}}}\n")
+        })
+        .collect();
+    let output = veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.5",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["verdict"], "inconclusive");
+    assert_eq!(json["inconclusive_kind"], "noise");
+}
+
+#[test]
+fn relative_diff_tied_count_and_diluted_by_ties_appear_in_json() {
+    let mut stdin = String::new();
+    stdin.push_str("{\"baseline\":100.0,\"candidate\":110.0}\n");
+    stdin.push_str("{\"baseline\":100.0,\"candidate\":110.0}\n");
+    for _ in 0..8 {
+        stdin.push_str("{\"baseline\":100.0,\"candidate\":100.0}\n");
+    }
+    let output = veridict()
+        .args(["compare", "-", "--metric", "relative-diff"])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["tied_count"], 8);
+    assert_eq!(json["data_quality"]["diluted_by_ties"], true);
+}
+
+#[test]
 fn relative_diff_markdown_uses_percent_not_winrates_percentage_points() {
     let stdin =
         "{\"baseline\":100.0,\"candidate\":110.0}\n{\"baseline\":200.0,\"candidate\":220.0}\n";
@@ -2827,6 +2901,34 @@ fn relative_diff_markdown_uses_percent_not_winrates_percentage_points() {
     assert!(
         !md.contains("pp"),
         "relative-diff must not use winrate's pp suffix:\n{md}"
+    );
+}
+
+#[test]
+fn relative_diff_markdown_verdict_line_shows_inconclusive_kind() {
+    let stdin: String = (0..20)
+        .map(|_| "{\"baseline\":100.0,\"candidate\":100.3}\n")
+        .collect();
+    let md_path = std::env::temp_dir().join("veridict_cli_test_inconclusive_kind.md");
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.005",
+            "--report-md",
+            md_path.to_str().unwrap(),
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .code(2);
+    let md = std::fs::read_to_string(&md_path).unwrap();
+    std::fs::remove_file(&md_path).ok();
+    assert!(
+        md.contains("Verdict: inconclusive (directional)"),
+        "expected the verdict line to carry the inconclusive_kind suffix, got:\n{md}"
     );
 }
 
@@ -3019,6 +3121,86 @@ fn min_effect_mixes_bare_default_and_metric_override() {
         reports[1]["pass_above"], 0.005,
         "relative-diff keeps its own override"
     );
+}
+
+#[test]
+fn min_effect_mixed_units_warns_on_bare_default() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .stderr(
+            predicate::str::contains("warning:")
+                .and(predicate::str::contains("sign-test"))
+                .and(predicate::str::contains("relative-diff"))
+                .and(predicate::str::contains("not the same scale")),
+        );
+}
+
+#[test]
+fn min_effect_mixed_units_silent_with_full_per_metric_overrides() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "sign-test=0.01,relative-diff=0.01",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .stderr(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn min_effect_mixed_units_silent_for_a_single_metric() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "relative-diff",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(min_effect_multi_metric_stdin())
+        .assert()
+        .stderr(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn min_effect_mixed_units_silent_when_same_unit_family() {
+    // sign-test and winrate share a unit family (win-rate margin off 0.5) - a shared bare default
+    // between them is genuinely comparable, so this must stay silent.
+    let stdin = (0..20)
+        .map(|_| "{\"result\":\"candidate_win\"}\n")
+        .collect::<String>();
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "sign-test",
+            "--metric",
+            "winrate",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stderr(predicate::str::contains("warning:").not());
 }
 
 #[test]

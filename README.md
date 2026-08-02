@@ -1187,19 +1187,26 @@ the thresholds: `pass` requires the CI's pessimistic (lower) bound to clear
 or below `--fail-below`. Anything else, including zero usable trials, is
 `inconclusive`.
 
+An `inconclusive` result carries its own `inconclusive_kind`, sub-classifying
+*why*: `directional` (the CI excludes zero - a real, consistent-direction
+effect that just doesn't clear the threshold yet) vs `noise` (the CI still
+straddles zero - the sign itself is undetermined). See
+[`docs/metrics.md`](docs/metrics.md#inconclusive_kind).
+
 `--min-effect X` is shorthand for symmetric thresholds
 (`--pass-above X --fail-below -X`) and defaults to `0`. In a multi-metric run,
 `X` applies to every requested metric by default - but different metrics'
 effect sizes live on different scales (`winrate`/`sign-test`: a win-rate
 margin off 0.5; `relative-diff`: a relative ratio; `mean-diff`/
 `quantile-diff`/`elo`: raw units), so sharing one number is only
-coincidentally correct. Override per metric with `metric=value`, comma-
-separated or repeated, optionally alongside a bare default:
-`--min-effect sign-test=0.01,relative-diff=0.005` gives each metric its own
-bar; `--min-effect 0.01,relative-diff=0.005` uses `0.01` for every other
-requested metric and `0.005` just for `relative-diff`. A `metric=value` entry
-naming a metric that wasn't requested via `--metric` is a config error, not a
-silent no-op.
+coincidentally correct - a bare default shared across metrics on different
+scales prints a stderr warning naming the mismatch. Override per metric with
+`metric=value`, comma-separated or repeated, optionally alongside a bare
+default: `--min-effect sign-test=0.01,relative-diff=0.005` gives each metric
+its own bar; `--min-effect 0.01,relative-diff=0.005` uses `0.01` for every
+other requested metric and `0.005` just for `relative-diff`. A `metric=value`
+entry naming a metric that wasn't requested via `--metric` is a config error,
+not a silent no-op.
 
 ## Statistical basis
 

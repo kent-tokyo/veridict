@@ -10,6 +10,37 @@ results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a fals
 as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
 reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
 
+## [Unreleased]
+
+### Added
+
+- **`inconclusive_kind` sub-classifies an `inconclusive` verdict**: `directional` when the CI
+  excludes zero (a real, consistent-direction effect that just doesn't clear the pass/fail
+  threshold) vs `noise` when the CI still straddles zero (the sign itself is undetermined). Both
+  serialized identically as `"verdict": "inconclusive"` before this - telling them apart required
+  eyeballing `ci_low`/`ci_high`'s signs by hand. `null` for `pass`/`fail`, and for an
+  `inconclusive` that isn't a real CI judgment (zero usable trials, or a `FailureCaps` breach).
+  See `docs/metrics.md`'s `inconclusive_kind` section, and its note connecting a dead-zone
+  `estimated_additional_trials: null` to a `directional` result - that field already applied to
+  every metric including `relative-diff`; a dead-zone `null` was sometimes mistaken for the field
+  being unsupported there. Also shown in the Markdown report's `Verdict:` line, not just JSON.
+- **`--min-effect` cross-metric unit-mismatch warning**: a bare `--min-effect` default shared
+  across two or more requested metrics on different scales (e.g. `sign-test`'s win-rate margin off
+  0.5 vs `relative-diff`'s relative ratio) now prints a stderr warning naming the mismatched
+  metrics and suggesting the per-metric override syntax. Silent when every metric has its own
+  `metric=value` override, when only one metric is requested, or when the mismatched metrics
+  happen to share a unit family (e.g. `sign-test`/`winrate`, both a win-rate margin).
+- **`relative-diff` tie-count and dilution warning**: `tied_count` reports how many ingested
+  records were an exact match (`candidate == baseline`), counted before any `--paired-by-id`
+  netting. `data_quality.diluted_by_ties` fires once at least half of them are - a change that
+  only affects a subset of cases contributes an exact-zero diff for every untouched case, pulling
+  the pooled `relative-diff` effect toward zero. Detects the dilution; doesn't correct for it - see
+  `docs/research-map.md`'s new "subset-only relative-diff" entry for a deferred idea to report an
+  effect size restricted to the non-tied subset. `diluted_by_ties` stays silent entirely under
+  `--paired-by-id` (same convention as `low_id_diversity`): its denominator is post-netting while
+  `tied_count` is pre-netting, which isn't a small approximation under pairing but an unbounded
+  skew that can read past 100% - `tied_count` itself stays exact and reported either way.
+
 ## [0.18.0] - 2026-08-01
 
 ### Added

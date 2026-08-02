@@ -12,7 +12,7 @@ use crate::error::VeridictError;
 use crate::metrics;
 use crate::report::{MultiReport, Report};
 use crate::stats::{elo, exact, jeffreys, wilson};
-use crate::{CiMethod, FailureCaps, MetricKind, Promotion, Validity, Verdict};
+use crate::{CiMethod, FailureCaps, InconclusiveKind, MetricKind, Promotion, Validity, Verdict};
 
 pub struct Thresholds {
     pub pass_above: f64,
@@ -198,8 +198,9 @@ pub fn estimate_additional_trials(
 /// `report.verdict` to `Inconclusive` and overwrites `report.reason` (a
 /// failure-invalidated run must never surface as a clean `Pass`/`Fail`,
 /// possible today under `--failure-policy loss` where a crash can tip the
-/// numeric verdict) and clears `estimated_additional_trials` (more trials
-/// can't fix a technical-failure problem). Always sets `report.validity`/
+/// numeric verdict) and clears `estimated_additional_trials`/`inconclusive_kind` (more trials
+/// can't fix a technical-failure problem, and a failure-cap-forced `Inconclusive` isn't a real CI
+/// judgment either). Always sets `report.validity`/
 /// `report.promotion`, even under `FailureCaps::default()` (every cap
 /// `None`), which always yields `Validity::Valid` - a run that never passes
 /// a `--max-*` flag is unaffected.
@@ -209,6 +210,7 @@ pub fn apply_failure_caps(report: &mut Report, caps: &FailureCaps) {
     if validity == Validity::Invalid {
         report.verdict = Verdict::Inconclusive;
         report.estimated_additional_trials = None;
+        report.inconclusive_kind = None;
         if let Some(reason) = reason {
             report.reason = format!("INVALID: {reason}. Strength not evaluated.");
         }
@@ -264,6 +266,25 @@ pub fn decide(ci_low: f64, ci_high: f64, thresholds: &Thresholds) -> (Verdict, S
                 thresholds.pass_above, thresholds.fail_below
             ),
         )
+    }
+}
+
+/// Sub-classifies an `Inconclusive` result by whether `[ci_low, ci_high]` excludes zero: `Noise`
+/// if it still straddles zero (inclusive boundary, matching `decide`'s own `>=`/`<=` convention -
+/// a CI that merely touches zero can't rule it out either), else `Directional`. Only meaningful
+/// when the caller already knows the verdict is `Inconclusive` from a real CI (see `build_report`
+/// for the cases that must skip this entirely: `Pass`/`Fail`, zero-trial reports, and
+/// failure-cap-forced `Inconclusive`).
+///
+/// Deliberately a different test from `data_quality.effect_within_noise_floor`
+/// (`|effect| < half_width`, which assumes a symmetric CI): this one reads `ci_low`/`ci_high`
+/// directly, so it stays exact on an asymmetric bootstrap CI (e.g. `relative-diff`'s `bca`
+/// method), where the two can disagree.
+pub fn classify_inconclusive(ci_low: f64, ci_high: f64) -> InconclusiveKind {
+    if ci_low <= 0.0 && 0.0 <= ci_high {
+        InconclusiveKind::Noise
+    } else {
+        InconclusiveKind::Directional
     }
 }
 
@@ -333,6 +354,39 @@ mod tests {
             Thresholds::new(0.0, f64::NEG_INFINITY),
             Err(VeridictError::InvalidThreshold(_))
         ));
+    }
+
+    // --- classify_inconclusive ---
+
+    #[test]
+    fn classify_noise_when_ci_straddles_zero() {
+        assert_eq!(classify_inconclusive(-0.01, 0.02), InconclusiveKind::Noise);
+    }
+
+    #[test]
+    fn classify_directional_when_ci_is_all_positive() {
+        assert_eq!(
+            classify_inconclusive(0.001, 0.02),
+            InconclusiveKind::Directional
+        );
+    }
+
+    #[test]
+    fn classify_directional_when_ci_is_all_negative() {
+        assert_eq!(
+            classify_inconclusive(-0.02, -0.001),
+            InconclusiveKind::Directional
+        );
+    }
+
+    #[test]
+    fn classify_noise_on_ci_low_boundary_touching_zero() {
+        assert_eq!(classify_inconclusive(0.0, 0.02), InconclusiveKind::Noise);
+    }
+
+    #[test]
+    fn classify_noise_on_ci_high_boundary_touching_zero() {
+        assert_eq!(classify_inconclusive(-0.02, 0.0), InconclusiveKind::Noise);
     }
 
     // --- estimate_additional_trials ---
@@ -650,6 +704,7 @@ mod tests {
             failure_breakdown: crate::metrics::FailureBreakdown::default(),
             reason: "ok".to_string(),
             estimated_additional_trials: None,
+            inconclusive_kind: None,
             warnings: Vec::new(),
             data_quality: crate::report::DataQuality::default(),
             quantile: None,
@@ -658,6 +713,7 @@ mod tests {
             effective_sample_size: None,
             design_effect: None,
             scale_diagnostics: None,
+            tied_count: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -691,6 +747,20 @@ mod tests {
         assert!(report.reason.contains("INVALID"));
         assert!(report.reason.contains("3 crash(es)"));
         assert_eq!(report.estimated_additional_trials, None);
+    }
+
+    #[test]
+    fn breached_cap_clears_a_pre_existing_inconclusive_kind() {
+        // A failure-cap-forced Inconclusive isn't a real CI judgment, even if the report already
+        // carried a noise/directional label from before the cap was applied.
+        let mut report = report_with(Verdict::Inconclusive, 0, 3, 0);
+        report.inconclusive_kind = Some(InconclusiveKind::Directional);
+        let caps = FailureCaps {
+            max_crashes: Some(2),
+            ..Default::default()
+        };
+        apply_failure_caps(&mut report, &caps);
+        assert_eq!(report.inconclusive_kind, None);
     }
 
     #[test]

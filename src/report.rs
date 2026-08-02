@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use crate::metrics::FailureBreakdown;
-use crate::{MetricKind, Promotion, Validity, Verdict};
+use crate::{InconclusiveKind, MetricKind, Promotion, Validity, Verdict};
 
 /// Current JSON report schema version, for `Report`/`MultiReport`/
 /// `SprtReport`/`ComparisonMatrix` alike. Every change so far (including
@@ -28,6 +28,14 @@ pub const REPORT_SCHEMA_VERSION: u32 = 1;
 /// mismatch. Revisit with calibration evidence (false-warning rate on real mixed-scale benchmark
 /// suites) if this proves too sensitive or too quiet in practice.
 pub const WIDE_BASELINE_SCALE_ORDERS: f64 = 1.0;
+
+/// Minimum fraction of `relative-diff`'s ingested records that must be an exact match
+/// (`candidate == baseline`) before `DataQuality.diluted_by_ties` fires (see `lib.rs`'s
+/// `collect_data_quality`). `0.5` = a rule-of-thumb "more than half untouched" threshold, the same
+/// kind of practitioner's convention as `WIDE_BASELINE_SCALE_ORDERS` - not literature-backed, not
+/// fitted, just automated. Revisit with real false-warning-rate evidence if it proves too
+/// sensitive or too quiet in practice.
+pub const TIE_DILUTION_FRACTION: f64 = 0.5;
 
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -64,6 +72,19 @@ pub struct Report {
     /// a fixed JSON key set matters more to machine consumers than omitting
     /// it when absent.
     pub estimated_additional_trials: Option<u64>,
+    /// Sub-classifies an `Inconclusive` verdict by whether its CI excludes zero: `Directional`
+    /// (a real, consistent-direction effect that just doesn't clear the pass/fail threshold) vs
+    /// `Noise` (the CI still straddles zero - the sign itself is undetermined). `None` for a
+    /// `Pass`/`Fail` verdict, and for an `Inconclusive` verdict that isn't a real CI judgment
+    /// (zero usable trials, or a `FailureCaps` breach - see `verdict::apply_failure_caps`).
+    /// See `verdict::classify_inconclusive`. Always serialized, including as `null`, for the same
+    /// reason as `estimated_additional_trials` above.
+    ///
+    /// Distinct from `data_quality.effect_within_noise_floor` (an approximate
+    /// `|effect| < half_width` test that assumes a symmetric CI) - this field reads
+    /// `ci_low`/`ci_high` directly, so the two can disagree on an asymmetric bootstrap CI (e.g.
+    /// `relative-diff`'s `bca` method). Both are reported; neither supersedes the other.
+    pub inconclusive_kind: Option<InconclusiveKind>,
     /// Purely advisory data-quality flags (tiny sample, high failure rate,
     /// draw-heavy Elo run) - unlike `reason`, these never change `verdict`.
     /// Always present, empty when there's nothing to flag. Human-readable
@@ -98,6 +119,13 @@ pub struct Report {
     /// for every other metric, and for these two whenever there were zero usable trials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scale_diagnostics: Option<ScaleDiagnostics>,
+    /// `relative-diff` only - count of ingested records where `candidate == baseline` exactly
+    /// (counted before any `--paired-by-id` netting, so it's unaffected by two opposite nonzero
+    /// ratios netting to zero). `None` for every other metric. See `DataQuality.diluted_by_ties`
+    /// for the derived warning, and `docs/research-map.md`'s "subset-only relative-diff" entry for
+    /// a deferred idea to report an effect size restricted to the non-tied subset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tied_count: Option<u64>,
     /// Multiple-comparison correction fields (see `correction` module) - all `None`/omitted
     /// unless `compare --claim-correction bonferroni|holm` (or its deprecated `--correction`
     /// alias) was requested, so a default run's JSON is byte-identical to before this existed.
@@ -179,6 +207,14 @@ pub struct DataQuality {
     /// switch away from). Computed from baseline values alone, never candidate/effect/CI/verdict -
     /// see `ScaleDiagnostics`.
     pub wide_baseline_scale: bool,
+    /// `relative-diff` only - at least `TIE_DILUTION_FRACTION` of ingested records were an exact
+    /// match (`tied_count`), which pulls the pooled mean toward zero whenever a change only
+    /// affects a subset of cases. Always `false` for every other metric, and always `false` under
+    /// `--paired-by-id` too (same convention as `low_id_diversity` below) - the denominator
+    /// (`baseline_count`) is post-netting while `tied_count` is counted pre-netting, which isn't a
+    /// small approximation there but an unbounded skew (can read past 100%) - see
+    /// `collect_data_quality`.
+    pub diluted_by_ties: bool,
 }
 
 /// The raw distribution of baseline values feeding `mean-diff`/`relative-diff`'s scale-mismatch
@@ -259,7 +295,10 @@ impl Report {
              - timeout: {timeouts} (baseline={b_timeout}, candidate={c_timeout})\n\
              - crash: {crashes} (baseline={b_crash}, candidate={c_crash})\n\
              - invalid: {invalid} (baseline={b_invalid}, candidate={c_invalid})\n",
-            verdict = serde_str(&self.verdict),
+            verdict = match self.inconclusive_kind {
+                Some(kind) => format!("{} ({})", serde_str(&self.verdict), serde_str(&kind)),
+                None => serde_str(&self.verdict),
+            },
             validity = serde_str(&self.validity),
             promotion = serde_str(&self.promotion),
             metric = match self.quantile {
@@ -404,6 +443,7 @@ mod tests {
             failure_breakdown: FailureBreakdown::default(),
             reason: "ok".to_string(),
             estimated_additional_trials: None,
+            inconclusive_kind: None,
             warnings: Vec::new(),
             data_quality: DataQuality::default(),
             quantile: None,
@@ -412,6 +452,7 @@ mod tests {
             effective_sample_size: None,
             design_effect: None,
             scale_diagnostics: None,
+            tied_count: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,
@@ -494,6 +535,36 @@ mod tests {
             report
                 .to_json_pretty()
                 .contains("\"estimated_additional_trials\": 750")
+        );
+    }
+
+    #[test]
+    fn inconclusive_kind_none_leaves_the_verdict_line_bare() {
+        let report = sample_report();
+        assert!(report.to_markdown().contains("Verdict: pass\n"));
+    }
+
+    #[test]
+    fn inconclusive_kind_directional_appears_on_the_verdict_line() {
+        let mut report = sample_report();
+        report.verdict = Verdict::Inconclusive;
+        report.inconclusive_kind = Some(crate::InconclusiveKind::Directional);
+        assert!(
+            report
+                .to_markdown()
+                .contains("Verdict: inconclusive (directional)\n")
+        );
+    }
+
+    #[test]
+    fn inconclusive_kind_noise_appears_on_the_verdict_line() {
+        let mut report = sample_report();
+        report.verdict = Verdict::Inconclusive;
+        report.inconclusive_kind = Some(crate::InconclusiveKind::Noise);
+        assert!(
+            report
+                .to_markdown()
+                .contains("Verdict: inconclusive (noise)\n")
         );
     }
 

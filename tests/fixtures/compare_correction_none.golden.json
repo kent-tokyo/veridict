@@ -9,6 +9,7 @@
       "confidence": 0.95,
       "crashes": 0,
       "data_quality": {
+        "diluted_by_ties": false,
         "draw_heavy": false,
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
@@ -32,6 +33,7 @@
           "timeout": 0
         }
       },
+      "inconclusive_kind": null,
       "invalid": 0,
       "metric": "winrate",
       "paired_count": 100,
@@ -52,6 +54,7 @@
       "confidence": 0.95,
       "crashes": 0,
       "data_quality": {
+        "diluted_by_ties": false,
         "draw_heavy": false,
         "effect_within_noise_floor": false,
         "high_failure_rate": false,
@@ -75,6 +78,7 @@
           "timeout": 0
         }
       },
+      "inconclusive_kind": null,
       "invalid": 0,
       "metric": "elo",
       "paired_count": 100,

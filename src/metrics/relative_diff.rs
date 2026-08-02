@@ -22,6 +22,11 @@ pub(crate) struct RelativeDiffAggregator {
     /// non-positive or non-finite baseline is rejected before reaching this point), so
     /// `non_positive_baseline_count` in this metric's own `ScaleDiagnostics` is always `0`.
     baselines: Vec<f64>,
+    /// Count of ingested records where `candidate == baseline` exactly - counted here, at ingest,
+    /// rather than post-`DiffCollector::finish()`, so a `--paired-by-id` netting of two opposite
+    /// nonzero ratios to `0.0` is never mistaken for a genuine exact-match tie. See `MetricOutput.
+    /// tied_count`.
+    tied_count: u64,
 }
 
 impl RelativeDiffAggregator {
@@ -39,6 +44,7 @@ impl RelativeDiffAggregator {
             seed,
             bootstrap_method,
             baselines: Vec::new(),
+            tied_count: 0,
         }
     }
 }
@@ -81,6 +87,9 @@ impl MetricAggregator for RelativeDiffAggregator {
             }
             used = true;
             self.baselines.push(b);
+            if c == b {
+                self.tied_count += 1;
+            }
             let relative = (c - b) / b;
             // `b > 0` and `c` finite doesn't guarantee `(c - b) / b` is finite - a large finite `c`
             // over a tiny finite `b` (e.g. candidate=1e300, baseline=1e-300) can overflow to
@@ -135,6 +144,7 @@ impl MetricAggregator for RelativeDiffAggregator {
                 effective_sample_size: None,
                 design_effect: None,
                 scale_diagnostics: None,
+                tied_count: None,
             });
         }
         // The effect is `mean(relative_diff_i)` - the average of each pair's own ratio, not
@@ -185,6 +195,7 @@ impl MetricAggregator for RelativeDiffAggregator {
             effective_sample_size: None,
             design_effect: None,
             scale_diagnostics: Some(compute_scale_diagnostics(&self.baselines)),
+            tied_count: Some(self.tied_count),
         })
     }
 }
