@@ -1,0 +1,40 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to publish"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  crates-io:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify release tag and package version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "invalid release tag: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+
+          ACTUAL_TAG=$(git describe --tags --exact-match HEAD)
+          PACKAGE_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "veridict") | .version')
+
+          test "$ACTUAL_TAG" = "$RELEASE_TAG"
+          test "v$PACKAGE_VERSION" = "$RELEASE_TAG"
+      - name: Publish to crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
