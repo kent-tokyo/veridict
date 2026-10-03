@@ -18,7 +18,7 @@ mod relative_diff;
 mod sign_test;
 mod winrate;
 
-pub(crate) use common::{DiffCollector, OutcomeCollector, ROBUST_SPAN_MIN_POSITIVE_BASELINES};
+pub(crate) use common::{DiffCollector, ROBUST_SPAN_MIN_POSITIVE_BASELINES};
 use serde::Serialize;
 use std::collections::HashMap;
 

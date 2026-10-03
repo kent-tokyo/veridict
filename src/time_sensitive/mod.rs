@@ -434,10 +434,8 @@ impl TimeSensitiveTest {
 /// its `SchemaMismatch` guard against a record with neither a status nor a result field), and
 /// merges in the failure counts `TimeSensitiveTest` itself never sees (see `report`'s doc).
 ///
-/// Unlike `sprt::run` (which - for `Wald`/`Trinomial` - computes its LLR once from final
-/// aggregate counts, see `sprt.rs`'s own doc on why that isn't true sequential replay), this
-/// function performs genuine trial-by-trial replay: `rejection_time` and optional-stopping
-/// idempotence are load-bearing outputs here, not incidental ones, so there is no final-aggregate
+/// Like `sprt::run`, this performs genuine trial-by-trial replay. Here `rejection_time` and
+/// optional-stopping idempotence are also load-bearing outputs, so there is no final-aggregate
 /// shortcut available.
 pub fn run<I>(
     records: I,

@@ -2,1038 +2,254 @@
 
 English | [日本語](metrics_ja.md)
 
-This is the unabridged version of the README's "Statistical basis" section: for each number
-veridict reports, the method behind it, its assumptions, its known failure modes, and whether it's
-an established statistic or a project-specific design choice. See `docs/research-map.md` for
-methods considered but not shipped, and what's deliberately out of scope.
+This document defines the statistical contract of the shipped commands. For examples and basic
+CLI use, start with the [README](../README.md). For unshipped ideas, see the
+[research map](research-map.md).
 
-Full bibliographic entries for every citation below are in the README's "Statistical basis" →
-References section (not duplicated here).
+## Common decision rule
 
-## `winrate` / `sign-test` confidence interval
+For confidence-interval metrics, let `[L, U]` be the interval for the reported effect.
 
-**Established statistic**, three interchangeable methods (`--ci-method`):
+- `pass` when `L >= pass_above`.
+- `fail` when `U <= fail_below`.
+- `inconclusive` otherwise.
 
-- **`wilson` (default)** - Wilson score interval (Wilson 1927). `winrate` computes it over
-  decisive (non-draw) trials only: `p_hat = candidate_wins / (candidate_wins + baseline_wins)`;
-  draws count toward "used" records but are excluded from the proportion, matching standard
-  paired-match testing practice. `sign-test` runs the identical interval over the proportion of
-  paired records where the candidate beat the baseline (ties excluded). Both are then centered on
-  0 (deviation from a 50/50 split) so they compose directly with `--min-effect`/`--pass-above`/
-  `--fail-below`.
-- **`exact`** - Clopper-Pearson exact binomial interval (Clopper & Pearson 1934), derived directly
-  from the Binomial-Beta relationship. Holds its nominal coverage guarantee exactly at any sample
-  size, at the cost of usually being wider than Wilson's. Only defined for a true integer-count
-  binomial - rejected for `elo`/`mean-diff` (`VeridictError::IncompatibleCiMethod`), not silently
-  approximated.
-- **`jeffreys`** - Bayesian credible interval using the non-informative Jeffreys prior
-  Beta(0.5, 0.5) (Jeffreys 1946; the boundary-clamping convention used here, and the general
-  "Interval Estimation for a Binomial Proportion" comparison of the three methods, is from Brown,
-  Cai & DasGupta (2001)). Same integer-count restriction as `exact`, for the same reason.
+`--min-effect x` is the symmetric form: `pass_above = x` and `fail_below = -x`. In a multi-metric
+run, use `metric=value` thresholds when units differ. Invalid input or configuration is not a
+statistical verdict and exits with code `3`.
 
-**Failure mode / ordering to know:** for interior `p` the textbook ordering holds - Wilson
-tightest, Jeffreys in the middle, Clopper-Pearson widest - but this is *not* universal. At the
-boundary (all-wins or all-losses), Jeffreys' prior contributes real probability mass near the edge
-that neither Wilson's normal approximation nor Clopper-Pearson's worst-case guarantee gets to use,
-so Jeffreys can end up narrower than *both* there. Don't assume Clopper-Pearson is always the
-widest just because it's the "exact" one.
+`promotion` is stricter than `verdict`: validity checks may demote a statistical pass to
+`inconclusive`, but cannot create a pass or convert a result to `fail`.
 
-## `mean-diff` bootstrap confidence interval
+## Comparison metrics
 
-**Established statistic**, three methods (`--bootstrap-method`), all from Efron & Tibshirani,
-*An Introduction to the Bootstrap* (1993, ch. 14):
+| Metric | Observation | Point estimate | Interval |
+|---|---|---|---|
+| `winrate` | decisive `result` | candidate win rate minus `0.5` | Wilson, exact, or Jeffreys |
+| `sign-test` | paired numeric record | positive-sign rate minus `0.5` | Wilson, exact, or Jeffreys |
+| `mean-diff` | `candidate - baseline` | arithmetic mean | percentile, basic, or BCa bootstrap |
+| `quantile-diff` | `candidate - baseline` | selected sample quantile | percentile or basic bootstrap |
+| `relative-diff` | `(candidate - baseline) / baseline` | arithmetic mean | percentile, basic, or BCa bootstrap |
+| `elo` | win/draw/loss score | logistic Elo transform of mean score | transformed score interval |
 
-- **`percentile` (default)** - the original bootstrap CI: resample `candidate - baseline` pairs
-  with replacement, take the `alpha/2`/`1 - alpha/2` percentiles of the resampled means.
-- **`basic`** (a.k.a. reflected/reverse-percentile) - reflects the percentile interval around the
-  original sample's point estimate: `(2*effect - perc_hi, 2*effect - perc_lo)`. No bias-correction
-  of its own. **Known limitation:** on skewed data it reflects the *same* skew that made the
-  percentile interval biased in the first place, so it can move the bounds in the opposite
-  qualitative direction from BCa's correction - it's the "obvious" fix for percentile's bias
-  problem, but a naive one.
-- **`bca`** - bias-corrected and accelerated. Adjusts *which* percentiles are read using a
-  bias-correction `z0` (fraction of bootstrap resamples below the original estimate, converted via
-  the inverse normal CDF) and an acceleration `a` (from a jackknife over the original sample,
-  O(n)). When `z0 = 0` and `a = 0` this reduces exactly to the plain percentile bounds - useful to
-  know when checking whether a BCa result looks wrong.
+### `winrate` and `sign-test`
 
-`--resamples` controls the resample count; `--seed` controls the RNG seed (fixed by default, so
-output is bit-identical across runs of the same input - every resample gets its own independently
-seeded RNG stream, verified invariant to worker/thread count).
+Draws and exact numeric ties are excluded, respectively. Effects and interval endpoints are
+centered on zero by subtracting `0.5`; therefore `--min-effect 0.02` means a 52% decisive win or
+positive-sign rate. `baseline_count` and `candidate_count` are side-specific decisive counts;
+`paired_count` is their sum.
 
-## `quantile-diff` bootstrap confidence interval
+`--ci-method` selects:
 
-**Established statistic, generalized from `mean-diff`'s mean to an arbitrary quantile** (`--quantile
-Q`, default `0.5` = the median) of `candidate - baseline`. Useful where the mean isn't the number
-that matters - a p95/p99 latency regression gate, for instance, where a handful of outliers
-shouldn't move the verdict but a shift in the *typical worst case* should. Same input (paired
-numeric records, `DiffCollector`), same `--resamples`/`--seed` semantics as `mean-diff`.
+- `wilson` (default): Wilson score interval.
+- `exact`: Clopper-Pearson interval.
+- `jeffreys`: equal-tailed beta posterior interval with Jeffreys prior.
 
-**Quantile convention:** type-7 linear interpolation (R's default `type=7`, also NumPy's
-`percentile` default) - the least-surprising choice among several published conventions.
-`--quantile` must be strictly inside `(0, 1)`; `0` or `1` (the sample min/max) is rejected as
-`VeridictError::InvalidQuantile` rather than silently accepted, since the bootstrap distribution of
-a sample extreme doesn't converge the way an interior quantile's does.
+Exact and Jeffreys require integer binomial counts. If no decisive observation remains, the result
+is `inconclusive`.
 
-**Two of `mean-diff`'s three bootstrap methods (`--bootstrap-method`):**
+### `mean-diff`
 
-- **`percentile` (default)** - resample `candidate - baseline` pairs with replacement, take the
-  `alpha/2`/`1 - alpha/2` percentiles of the resampled quantiles.
-- **`basic`** (reflected) - same reflection-around-the-point-estimate construction as `mean-diff`'s.
+Each record contributes one paired difference. Bootstrap resampling is over those differences, not
+over the baseline and candidate columns independently. `--resamples` controls the number of draws;
+`--seed` makes the result reproducible.
 
-**`bca` is implemented but rejected as a config error** (`VeridictError::IncompatibleBootstrapMethod`),
-not silently unavailable. The sample quantile is a non-smooth statistic (the empirical quantile
-function is a step function), so BCa's jackknife acceleration term has no solid asymptotic footing
-the way it does for the mean - an established statistical caveat, not a hunch. `tests/calibration/
-quantile_coverage.rs` measures this directly rather than leaving it purely theoretical: at p95/n=30
-on skewed data, BCa's measured coverage (0.7910) was statistically indistinguishable from plain
-percentile's (0.7940) - no evidence the correction helps here the way it measurably does for
-`mean-diff` (see `tests/calibration/bootstrap_coverage.rs`). The gate stays until calibration
-evidence justifies lifting it, in either direction.
+`percentile` is the default. `basic` reflects percentile endpoints around the point estimate. `bca`
+adds bias and acceleration corrections and requires enough non-degenerate data for jackknife terms.
 
-**Tail quantiles need real sample size, and the report says so.** A `q`-th quantile at small `n`
-has only `n * min(q, 1-q)` expected observations in the thinner tail - p95 at n=30 has roughly 1.5,
-p99 at n=30 has roughly 0.3 (a case `tests/calibration/quantile_coverage.rs` documents as
-genuinely degenerate, not a bug: measured coverage there was 0.2670 against a 0.95 nominal target).
-`data_quality.thin_quantile_tail` fires when that expected count drops below 10 (the same shape as
-the binomial `np >= 10` rule of thumb), independent of the separate `tiny_sample` flag - a sample
-large enough to clear `tiny_sample`'s `n >= 30` floor can still trip this one at an extreme `q`
-(e.g. n=100 at q=0.95 has only ~5 expected tail observations).
+### `quantile-diff`
 
-**Limitation, not a bug: one quantile per `compare` invocation.** `--quantile` is a single
-per-invocation flag, like `--bootstrap-method`; there's no way to request `quantile-diff` at two
-different quantiles in one run. Run `compare` twice (once per quantile) if you need both a p50 and
-a p95 gate, for instance.
+The metric takes the selected sample quantile of recordwise paired differences. The default is
+`0.5` (the median); use `--quantile` explicitly for stable automation.
 
-**Not supported: `power --metric quantile-diff` and `matrix`/`plan`.** Power needs an
-order-statistic asymptotic variance (or a density estimate at the quantile) - a separate research
-problem from `mean-diff`'s closed-form power, not a mirror of it (see `docs/research-map.md`).
-`estimated_additional_trials`/`--claim-correction` treat `quantile-diff` exactly like `mean-diff`:
-the `O(1/sqrt(n))` CLT-scaling fallback for the former (no closed-form CI-width-at-n function for
-either's bootstrap CI), and outright rejection as a configuration error for the latter (no
-closed-form CI-at-a-hypothetical-confidence function either - see the `--claim-correction` section
-below).
+BCa is rejected for this metric. Sample quantiles are non-smooth, and current calibration did not
+show a coverage improvement that justifies exposing the method. Use percentile or basic.
 
-## `relative-diff` bootstrap confidence interval
+### `relative-diff`
 
-**Established statistic, the same bootstrap methodology as `mean-diff` applied to a different
-effect size.** Rather than bootstrapping `candidate - baseline` directly, `relative-diff`
-transforms each usable record's pair to `(candidate - baseline) / baseline` first, then bootstraps
-that transformed sample exactly the way `mean-diff` bootstraps its own diffs - same `DiffCollector`/
-pairing, same three `--bootstrap-method` variants (`percentile`/`basic`/`bca` - all three, unlike
-`quantile-diff`'s BCa restriction: the relative-diff sample mean is a smooth statistic, so BCa's
-jackknife acceleration term has the same solid footing here it has for `mean-diff`), same
-`--resamples`/`--seed` reproducibility guarantee.
+Every usable record must have `baseline > 0`. The reported effect is the mean of per-record ratios,
+not the ratio of aggregate means. An effect of `0.03` means a mean relative increase of 3%.
 
-**Why this is an independent metric, not a `mean-diff` display mode.** `relative-diff` answers a
-different question than `mean-diff`: "what proportional change" instead of "what absolute change."
-The two aren't interchangeable renderings of the same computation - the accumulated effect generally
-differs whenever baselines vary in scale (`mean(relative_diff_i)` is not `sum(candidate_i) /
-sum(baseline_i) - 1`, see below). This project keeps them as separate `MetricConfig`/`MetricKind`
-variants (not a `--relative` flag on `mean-diff`) so both can run side by side in one multi-metric
-invocation, so each gets its own baseline validation and Markdown rendering, and so power/
-claim-correction support stays independently auditable per metric rather than branching on a bool at
-every call site.
+`tied_count` reports exact zero differences. `data_quality.diluted_by_ties` warns when unchanged
+records may dilute an effect that only touches a subset. This diagnostic does not alter the metric
+or verdict.
 
-**The effect is the mean of each pair's own ratio, not a ratio of totals:**
+### Scale diagnostic
 
-```
-effect = mean(relative_diff_i) = mean((candidate_i - baseline_i) / baseline_i)
+For `mean-diff`, `scale_diagnostics` inspects baseline magnitudes only. A wide-scale warning means
+large cases may dominate an absolute mean. It is advisory and never changes the verdict. Choose
+`relative-diff` before examining outcomes when proportional change is the intended claim.
+
+### `elo`
+
+Each candidate win scores `1`, draw `0.5`, and baseline win `0`. With score `p`, the point estimate
+is the logistic-Elo transform:
+
+```text
+Elo = 400 * log10(p / (1 - p))
 ```
 
-This treats every benchmark case as one equally-weighted observation, the same convention
-`mean-diff` already uses for its own diffs - a large-baseline case doesn't get more influence over
-the effect just because its absolute numbers are bigger. `sum(candidate_i) / sum(baseline_i) - 1`
-(a volume-weighted total ratio) is a different, and generally unequal, quantity whenever baselines
-vary in scale - the situation this metric exists for.
+The confidence interval is transformed endpoint-wise. Boundary scores may produce infinite Elo;
+JSON represents non-finite endpoints as `null` and adds a warning. Elo here is a result-scale
+summary, not proof of strength outside the observed population.
 
-**`baseline > 0` is required, not merely `baseline != 0`.** A zero baseline makes the ratio
-undefined by division; a *negative* baseline makes a percentage change's sign uninterpretable in a
-stable way (the same underlying improvement can read as a positive or negative ratio depending on
-which side of zero the baseline happens to sit on, independent of whether it's actually an
-improvement). Both are rejected as `VeridictError::RelativeDiffRequiresPositiveBaseline`, a
-configuration/data error - not silently computed against `abs(baseline)` (a materially different
-effect size that would quietly change what the number means), and not computed with an epsilon
-added to the denominator (which fabricates a number rather than reporting that the case's
-percentage change isn't well-defined). `candidate` is not mechanically restricted - a negative
-candidate against a positive baseline is a legal (if unusual) -100%-or-worse observation. A
-non-finite result from an otherwise-finite division (e.g. a very large `candidate` over a very
-small `baseline` overflowing to infinity) is rejected too, via the same `VeridictError::InvalidValue`
-every other non-finite numeric field already uses.
+## Pairing and clustering
 
-**Directional, not symmetric under swapping the arms.** `(candidate - baseline) / baseline` and the
-same computation with the arms swapped are not simple sign-flips of each other: a +100% increase
-followed by a -50% decrease returns to the original value. Relative changes are directional; if a
-symmetric proportional-change metric is what's needed, see `docs/research-map.md`'s deferred
-log-ratio (`log(candidate / baseline)`) entry - not implemented this round, on purpose, as a
-separate effect size rather than folded into this one.
+`--paired-by-id` combines records with the same ID using the metric's pairing rule. One record is a
+valid singleton, two become one ID-level observation, and three or more are invalid. Outcome
+metrics net the two scores; numeric metrics average the two paired differences. Without pairing,
+duplicate IDs are rejected where uniqueness is required.
 
-**`--paired-by-id` relative-transforms first, then nets.** Each raw record's own `(candidate -
-baseline) / baseline` is computed before pairing; two records sharing an `id` are netted by
-averaging *those two ratios* (`(r1 + r2) / 2`), not by averaging baseline/candidate first and then
-taking one ratio of the averages - the same "compute the effect per record, then net by id"
-convention `mean-diff`/`sign-test`/`quantile-diff` already use (see [Paired
-testcases](../README.md#paired-testcases)).
+`--cluster-by-id` is different: it keeps every trial but resamples whole ID clusters for `winrate`
+or `elo`. It protects the interval from treating correlated rows as independent. It requires enough
+distinct clusters, is incompatible with `--paired-by-id`, and is not supported for numeric metrics.
 
-**Not supported this round: `power --metric relative-diff` and `--claim-correction`.**
-`--claim-correction` is rejected the same way `mean-diff`/`quantile-diff` already are - no
-closed-form CI-at-a-hypothetical-confidence function exists for any bootstrap CI without real
-resampled data (`metrics::lacks_closed_form_ci`). `power --metric relative-diff` returns a clear
-`VeridictError::PowerUnsupportedForRelativeDiff` rather than silently reusing `mean-diff`'s
-assumed-SD design with the wrong units - see `docs/research-map.md` for exactly what's deferred (an
-assumed SD of *relative*, not absolute, observations; a relative-transforming `--pilot`;
-`baseline > 0` validation on pilot data too) and why it wasn't folded into this round sight-unseen.
-`estimated_additional_trials` reuses the same `O(1/sqrt(n))` fallback `mean-diff`/`quantile-diff`
-already use, not new special-casing (see that section below).
+## Failures and evidence validity
 
-**Method-selection discipline: pick the metric before looking at results.** `relative-diff` is not
-a "better version" of `mean-diff` to fall back on when `mean-diff` comes back inconclusive - the two
-answer different questions (mean absolute change vs. mean proportional change relative to
-baseline), and picking whichever one happens to pass after inspecting both is analyst degrees of
-freedom, the same p-hacking risk any post-hoc metric switch carries. Choose the metric the
-scientific question actually calls for before running a confirmatory analysis; a switch made after
-inspecting a verdict should be treated as exploratory and validated on fresh or held-out data, not
-reported as if it had been pre-specified. See "Scale-mismatch diagnostic" below for the one place
-this project *does* proactively suggest considering `relative-diff` - and why that suggestion is
-scoped to baseline scale alone, never to the observed effect.
+`baseline_status` and `candidate_status` accept `ok`, `timeout`, `crash`, and `invalid`.
 
-## Scale-mismatch diagnostic (`data_quality.wide_baseline_scale`, `scale_diagnostics`)
+| `--failure-policy` | Metric treatment |
+|---|---|
+| `report-only` | Count failures; use a literal `result` if present |
+| `exclude` | Ignore any outcome on a record where either side failed |
+| `loss` | Candidate failure becomes a baseline win, baseline failure becomes a candidate win, and dual failure becomes a draw |
 
-**This project's own design choice, not a citation-backed method** - an advisory-only warning
-(never changes `verdict`) that fires for `mean-diff` when baselines are all positive but span a
-wide range, since `mean-diff`'s absolute differences can then be dominated by the largest-scale
-cases. `relative-diff` ships the same underlying `scale_diagnostics` numbers (for transparency) but
-never sets `wide_baseline_scale` on itself - it's already the proportional-change metric, so it has
-nothing to warn its own user to switch away from.
+The policy does not hide counts. `exclude` and `loss` are accepted only by outcome-based metrics
+and sequential tests; numeric metrics reject them as configuration errors.
 
-**Computed from baseline values alone, deliberately never looking at candidate, effect, CI, or
-verdict.** A diagnostic meant to inform a metric *choice* made before looking at results would stop
-doing that job the instant it could be influenced by the results themselves - so
-`ScaleDiagnostics`/`wide_baseline_scale` are built purely from the multiset of ingested baseline
-values, independent of which candidate values happen to be paired with them.
+`--max-timeouts`, `--max-crashes`, and `--max-invalid` define validity caps. A breached cap records
+the reason and prevents promotion. In multi-metric runs, validity and promotion are summarized at
+the overall level as well as per metric.
 
-**The orders-of-magnitude span, and why there are two of them:**
+## Multiple metrics and claim correction
 
-```
-raw_orders    = log10(max_positive_baseline / min_positive_baseline)
-robust_orders = log10(p95_positive_baseline / p05_positive_baseline)   (only at >= 20 positive baselines)
+Repeat `--metric` to evaluate several claims from one input. Overall verdict precedence is
+`fail > inconclusive > pass`.
+
+`--claim-correction` controls family-wise confidence:
+
+- `none`: each metric uses the requested confidence independently.
+- `bonferroni`: equal alpha allocation across claims.
+- `holm`: ordered Holm adjustment; never less powerful than Bonferroni for the same family.
+
+Correction does not replace the ordinary `verdict` or `promotion`. It populates the separate
+`family_adjusted_verdict`, `family_adjusted_promotion`, and multi-report
+`simultaneous_claims_promotion` fields. Corrected claims can only be preserved or demoted. Families
+containing bootstrap metrics or `--cluster-by-id` are rejected because the required adjusted
+interval cannot be reconstructed from the closed-form binomial model.
+
+## SPRT
+
+`sprt` compares two simple hypotheses using log-likelihood ratio boundaries:
+
+```text
+upper = ln((1 - beta) / alpha)
+lower = ln(beta / (1 - alpha))
 ```
 
-`raw_orders` is the full span - simple, but a single extreme outlier can dominate it. Once there
-are at least `ROBUST_SPAN_MIN_POSITIVE_BASELINES` (20) positive baselines, `robust_orders` (a
-p95/p05-trimmed span, computed with the same type-7 quantile convention `quantile-diff` uses)
-becomes the *primary* signal instead, so one outlier can't single-handedly trigger the warning on an
-otherwise tightly-scaled dataset. Below that floor, `raw_orders` is all there is. The warning fires
-when the primary (robust-if-available, else raw) span is `>= WIDE_BASELINE_SCALE_ORDERS` (`1.0` -
-baselines spanning roughly a factor of 10), a deliberately conservative starting threshold, not a
-fitted one - see the constant's own doc comment for the reasoning.
+Crossing the upper boundary returns `pass`; crossing the lower boundary returns `fail`; otherwise
+the result is `inconclusive`.
 
-**Two warning texts, chosen by whether any baseline is zero or negative - never by whether
-`relative-diff` would actually pass.** When every baseline is positive, the warning names
-`--metric relative-diff` as something to *consider* for a proportional-change question, alongside
-an explicit note that switching metrics after inspecting the verdict is exploratory, not
-confirmatory. When the wide-scale baselines include a zero/negative value, `relative-diff` isn't
-well-defined for the dataset either (see its own `baseline > 0` requirement above), so the warning
-instead suggests a domain-justified normalization rather than an arbitrary denominator offset -
-never claiming `relative-diff` as a fix it isn't. Neither text says `relative-diff` *would* pass, or
-that `mean-diff` is *wrong* - both would smuggle an observed-result-dependent recommendation into a
-diagnostic that's supposed to stay result-independent by construction.
+### Variants
 
-**`scale_diagnostics`'s fields** (`positive_baseline_count`, `non_positive_baseline_count`,
-`min_positive_baseline`, `max_positive_baseline`, `raw_orders_of_magnitude`,
-`robust_orders_of_magnitude` - the last `null` below the 20-positive-baseline floor): present on
-`mean-diff`/`relative-diff` reports whenever there was at least one usable trial (`None`/omitted on
-zero usable trials, the same "no signal" convention `quantile` on `quantile-diff` follows). For
-`relative-diff`, `non_positive_baseline_count` is always `0` - a non-positive baseline is rejected
-outright before this diagnostic would ever see it.
+- `wald`: binary test over decisive outcomes. Hypotheses are logistic Elo (`--elo0`, `--elo1`).
+- `trinomial`: win/draw/loss generalized LLR with an estimated draw nuisance parameter. Hypotheses
+  are BayesElo (`--belo0`, `--belo1`), not logistic Elo.
+- `pentanomial`: generalized LLR over paired two-trial scores `{0, 0.5, 1, 1.5, 2}`. It requires
+  `--paired-by-id` and exactly two records per completed pair.
 
-## `elo`
+All variants replay the input sequentially and retain the first eligible crossing. Input order is
+therefore part of the experiment schedule. Wald and trinomial evaluate after each usable trial, or
+after each completed net pair with `--paired-by-id`; pentanomial evaluates after each completed
+pair. Later records cannot change the decision LLR or outcome prefix, but they are still parsed and
+included in failure counts; a breached failure cap can force the final verdict to `inconclusive`.
+`--min-paired-ids` and `--max-paired-ids` constrain pentanomial evaluation. With
+`--require-complete-pairs`, incomplete pairs are rejected where supported.
 
-**Established statistic with one documented approximation.** Score rate
-`score = (candidate_wins + 0.5 * draws) / n`, converted via the standard logistic Elo model
-(the widely-used variant of Elo's original rating system, Elo 1978). The confidence interval reuses
-Wilson's score interval on that score rate, treating each trial as a plain Bernoulli draw.
+### Report compatibility
 
-**Known, deliberate approximation:** this overstates variance relative to the true trinomial
-(win/draw/loss) distribution, since a draw's half-point outcome carries less variance than a coin
-flip would. This is a deliberately conservative (too-wide, never too-narrow) choice - consistent
-with the project's "false pass is worse than inconclusive" bias - and the same tradeoff already
-accepted for `sign-test`. Doesn't support `--ci-method exact`/`jeffreys`: both require a true
-integer-count binomial, and Elo's win rate is fractional (a draw is half a win).
+The decision prefix is described by `decision_llr`, `decision_candidate_wins`,
+`decision_baseline_wins`, `decision_draws`, and the generic `available_*`, `analyzed_*`,
+`stopping_observation_*`, and `ignored_*_after_stop` fields.
 
-**A separate source of noise, and how to cancel it:** the approximation above is about *modeling*
-variance correctly once the trials are fixed. It says nothing about *testcase-selection* variance
-- independently sampling which starting position or which side plays which role adds noise that
-has nothing to do with the candidate's actual strength. Engine-style paired testing (same starting
-position played twice, roles/sides swapped) is the standard way to cancel that bias, and `elo`
-already supports it for free via [`--paired-by-id`](../README.md#paired-testcases): assign the
-same `id` to both games of a position-pair (independent of which side won which color) so the pair
-nets to one observation - by total points, `win=1`/`draw=0.5`/`loss=0` - instead of two independent
-ones. This is a different lever from `--ci-method`/`--bootstrap-method`: it reduces the variance
-that goes *into* the estimate, rather than changing how the interval is computed from it.
+For schema-v1 compatibility, unprefixed Wald/trinomial `llr` and outcome counts describe the full
+input. Pentanomial retains its existing analyzed-prefix meaning. Consume `verdict`, `promotion`,
+and `decision_*`; do not reconstruct a decision from legacy `llr`.
 
-## `sprt`
+## Matrix and plan
 
-**Established statistic**, three variants (`--sprt-variant`):
+`matrix` accepts candidates against a shared baseline or a general graph of head-to-head
+`--matches`. It fits Bradley-Terry strengths within each connected component and reports pairwise
+logistic-Elo differences and intervals. Cells across disconnected components have
+`status=disconnected` and null estimates because those strengths are not comparable. Matrix output
+is descriptive and has no overall pass/fail verdict.
 
-- **`wald` (default)** - the classic two-outcome sequential probability ratio test (Wald 1945).
-  Accumulates a log-likelihood ratio over *decisive* (non-draw) trials only and stops as soon as it
-  crosses one of two boundaries derived from `--alpha`/`--beta` (the test's actual guaranteed false
-  positive/negative rates, not tunable report thresholds). Draws carry no information about which
-  Elo hypothesis is true under this model and are excluded from the LLR entirely - matching the
-  same "decisive games only" convention `winrate`/`sign-test` already use.
-- **`trinomial`** - a draw-aware generalized LLR test in the BayesElo parameterization historically
-  used by chess-engine testing tools (Fishtest's `LLRlegacy`). Estimates the draw rate as a
-  nuisance parameter (`drawelo`) from the pooled win/draw/loss counts, then evaluates both
-  hypotheses at that shared estimate - this is what lets it converge faster than the plain Wald
-  test on draw-heavy data, without the caller needing to supply a separate draw-rate assumption.
-  **Units are BayesElo, not logistic Elo** - the two scales only coincide when `drawelo == 0`
-  (concretely: at `drawelo = 200`, a BayesElo gap of 10 corresponds to a logistic-Elo gap of only
-  about 7.3) - which is why the CLI exposes this through separate `--belo0`/`--belo1` flags rather
-  than reinterpreting `--elo0`/`--elo1`. At zero draws this reduces exactly to the Wald variant's
-  LLR (the algebra collapses exactly, not just in a limit).
-- **`pentanomial`** - a generalized LLR test over *paired* games (same opening, colors swapped),
-  ported from Fishtest's `LLR_logistic` (expectation-constrained multinomial MLE / "exponential
-  tilting" of the empirical pair-outcome distribution to a hypothesized mean score). **Always
-  requires `--paired-by-id`**: two records sharing an `id` are combined into one of 5 outcome
-  categories by their pair's combined candidate score (`0`/`0.5`/`1`/`1.5`/`2` - candidate points
-  summed over the pair's two games), instead of netted down to a single win/loss/draw the way
-  `--paired-by-id` works for `winrate`/`elo`. An id that doesn't appear exactly twice is a hard
-  error, not silently treated as an unpaired sample - a 5-value pair score has no meaning for a
-  lone game. Hypotheses are `--elo0`/`--elo1`, the same logistic Elo scale as `wald` - this model
-  has no `drawelo`-style nuisance parameter to make BayesElo meaningful.
+`plan` uses the same graph and a required `--min-elo` to rank comparisons by additional evidence
+needed. It is a recommendation list, not an optimizer or scheduler.
 
-  **Why this isn't just `trinomial` on twice as many games:** a pentanomial pair's entire
-  statistical value comes from the *negative correlation* between its two games. Concretely, model
-  each pair as sharing a per-pair "opening bias" `b` that shifts one game's candidate-win
-  probability up by `b` and the other's down by `b` (colors swapped, so whichever side gets the
-  opening's favorable color benefits in that one game and is disadvantaged in the other): the
-  pair's *combined* score has expectation `2p` regardless of `b` (the `+b`/`-b` terms cancel), so
-  the bias contributes zero variance to the pair total - while each individual game's own
-  *marginal* variance (averaged over the bias distribution) is inflated by the bias spread on top
-  of ordinary sampling variance. Running `trinomial`/`wald` on the ungrouped games sees that
-  inflated per-game variance directly; `pentanomial`'s per-pair scoring cancels it, which is what
-  lets it converge in *fewer pairs* than `trinomial` needs *games* on real paired data - not merely
-  "the same information, batched differently." An earlier design for this variant modeled a pair's
-  outcome as the convolution of two *independent* single-game draws instead: that sets the
-  covariance to exactly zero by construction and throws away this entire effect, which is why it
-  was rejected in favor of the approach actually shipped (treating each pair's outcome as one draw
-  from a free 5-category multinomial, whose *shape* is estimated from the empirical pair-outcome
-  frequencies directly - preserving whatever real correlation the data has - with only the *mean*
-  constrained per hypothesis).
+## Power
 
-  The report adds `sprt_variant` (present for every variant), and, only for `pentanomial`:
-  `pentanomial_counts` (the 5-bucket breakdown the LLR was computed from), `raw_trial_count`
-  (total input records before pairing), `paired_count` (pairs actually analyzed, up to the
-  sequential stopping point - see below), `available_paired_count` (total pairs present in the
-  input), `stopping_pair_count`/`stopping_reason` (where and why the walk stopped), and
-  `ignored_pairs_after_stop` (pairs present in the input but completed after the stopping point,
-  and so never analyzed). The existing `candidate_wins`/`baseline_wins`/`draws` fields stay
-  populated too, netted from the same 5 buckets by the standard "paired game" convention (`>1` net
-  candidate win, `<1` net baseline win, exactly `1` net draw) for compatibility with tooling that
-  only understands the 3-outcome shape - and, like `pentanomial_counts` itself, reflect only the
-  analyzed pairs, not the full input.
+`power` estimates evidence needs before data collection.
 
-  **Not (yet) implemented:** Fishtest's newer *normalized-Elo* pentanomial (`LLR_normalized`,
-  a `t`-value-constrained MLE with its own iterative solve) and the Siegmund discrete-time bound
-  correction some engine-testing tools apply on top of the base LLR - both real refinements, not
-  needed to get a statistically valid pentanomial test, deferred rather than rejected (see
-  `docs/research-map.md`).
+- `winrate` and `sign-test`: exact search against the selected binomial interval.
+- `elo`: binomial score search transformed to Elo. Because draws are not modeled, treat the result
+  as a lower bound in draw-heavy settings.
+- `mean-diff`: normal approximation using `--assume-sd` or a standard deviation estimated from
+  `--pilot` paired differences.
+- `--sprt`: Wald average sample number approximation under each hypothesis. It ignores boundary
+  overshoot and is therefore an expectation, not a cap. `--horizon` adds a seeded Monte Carlo
+  estimate of the probability of still having no decision by that trial count.
 
-  **Sequential replay, not a final-aggregate recompute:** unlike `wald`/`trinomial` (whose LLR is
-  a fixed-per-trial-delta sum, so the *shape* of the final win/loss/draw totals is all that ever
-  mattered), `pentanomial`'s generalized LLR re-tilts its whole empirical pair-outcome
-  distribution from the counts seen so far - a genuinely non-additive computation. A single
-  aggregate check at the end of a file is therefore not equivalent to a real sequential test: the
-  LLR could have crossed a boundary well before the file's end and drifted back within bounds by
-  the time all pairs are counted, and a naive final-aggregate check would misreport that as
-  `inconclusive`. `sprt::run` avoids this for `pentanomial` by walking completed pairs in the
-  order they complete (there is no separate `schedule` field the way `verify-run`'s manifest has
-  one, so input order *is* the schedule), recomputing the LLR from the cumulative bucket counts
-  after every pair, and stopping at the first pair that satisfies the stopping rule - the same
-  method Fishtest itself uses for live monitoring. `--min-paired-ids`/`--max-paired-ids` are
-  folded into that same walk, not applied afterward: a boundary crossed before `--min-paired-ids`
-  pairs have completed is never evaluated at all (so there is nothing to "remember" once the
-  minimum is reached), and if the walk reaches `--max-paired-ids` completed pairs without a
-  crossing, it stops there with `inconclusive` - pairs completed later, even if present in the
-  input, never affect the verdict, LLR, or bucket counts. **This makes the test strictly more
-  conservative, never less**: deferring the decision until `--min-paired-ids` pairs exist cannot
-  raise the realized false-positive/false-negative rate above the nominal `--alpha`/`--beta` the
-  report echoes - it can only delay a correct decision that would otherwise have arrived on too
-  little data, at the cost of a higher average sample number before that decision is reached.
-  `--require-complete-pairs` extends `pentanomial`'s existing unconditional "every id appears
-  exactly twice" pairing to `wald`/`trinomial`'s `--paired-by-id` mode (which otherwise tolerates a
-  lone id as an ordinary unpaired sample) - a data-integrity check, not a statistical one; `wald`/
-  `trinomial` are otherwise unaffected by any of this and remain a final-aggregate computation, as
-  before.
+`relative-diff` and `quantile-diff` power are not implemented. For proportion metrics,
+`--paired-by-id` adds a caveat but cannot estimate correlation before data exist; with a
+`mean-diff` pilot it applies the actual pairing rule. Planning inputs must be fixed before the
+confirmatory run; power estimates are not verdicts.
 
-Neither `wald` nor `trinomial` is a heuristic, and `pentanomial` isn't either - all three are the
-referenced sequential test, evaluated exactly (mod the numerical `secular`-equation solve
-`pentanomial` needs, itself a standard empirical-likelihood tilting, not an approximation) against
-the observed counts. What *is* a design choice is which variant runs by default (`wald`, since it
-needs no nuisance-parameter estimation).
+## Time-sensitive testing
 
-## `--failure-policy`
+`time-sensitive` is an experimental, one-sided, anytime-valid Bernoulli simple-vs-simple test.
+It compares fixed `p0` and `p1` under a finite budget while optimizing a declared time-value reward.
 
-**This project's own design choice, not a citation-backed method** - it controls whether a failed
-trial (`baseline_status`/`candidate_status` other than `ok`) affects the *computation*, not just
-whether it's *reported* (`failure_breakdown` tallies every failure regardless of this flag). Only
-meaningful for outcome-based metrics (`winrate`/`elo`) and `sprt`; `mean-diff`/`sign-test` have no
-win/loss/draw outcome for a failed numeric trial to become, so requesting `exclude`/`loss` with
-either is a config error (`IncompatibleFailurePolicy`), not an arbitrary numeric penalty invented
-for the occasion.
+Policies:
 
-- **`report-only`** (default) - exactly the behavior that existed before this flag did: a status-
-  only record (no `result`) already contributes nothing to any outcome-based metric, so this is a
-  no-op in the common case. The one place it's *not* a no-op: a record carrying both a failure
-  status and a `result` still has that `result` counted.
-- **`exclude`** - a failed side's `result` is never counted, even when present alongside the
-  status. This is where it actually diverges from `report-only`, and only in that same mixed-
-  field case - worth calling out explicitly so it isn't mistaken for a broader behavior change on
-  ordinary data.
-- **`loss`** - the failed side's outcome is synthesized: candidate failed -> `baseline_win`,
-  baseline failed -> `candidate_win`, both sides failed -> `draw` (a symmetric "wash", not an
-  arbitrary tie-break). This synthesized outcome *overrides* any literal `result` on the same
-  record - trusting the execution-level failure signal over a same-record `result` is the
-  conservative choice, consistent with this project's "a false pass is worse than an inconclusive
-  result" bias (a `candidate_win` result next to a `candidate_status: crash` must never silently
-  win out over the crash).
+- `bellman`: dynamic-programming policy for the configured reward.
+- `edo`: stationary expected-discount approximation, available only with `exponential` reward.
+- `gro`: growth-rate-oriented baseline; it ignores the reward schedule.
 
-Applies identically under `--paired-by-id`: the resolved outcome (literal or synthesized) is what
-gets fed into the pairing/netting logic, so a `loss`-synthesized failure inside a pair nets
-against its partner exactly the way any other outcome would - `--sprt-variant pentanomial`
-included, where a failure's synthesized outcome becomes one of the pair's two games going into the
-5-value bucket.
+Rewards are `hard-deadline`, `exponential`, or `--reward-schedule FILE`. Draws advance the trial
+clock without changing wealth, so planned reward assumes an all-decisive stream. This command does
+not accept Elo hypotheses, draw-aware trinomial hypotheses, or composite online estimation. Its exit codes are
+`0` for pass, `2` for no decision, and `3` for invalid input or configuration.
 
-## `--max-timeouts` / `--max-crashes` / `--max-invalid` (`validity`)
+## Additional report fields
 
-**This project's own design choice, not a citation-backed method** - hard, zero-tolerance-style
-caps on `compare`/`sprt`'s existing `timeouts`/`crashes`/`invalid` counts, orthogonal to
-`--failure-policy`. `--failure-policy` controls whether a failure changes *which outcome a trial
-contributes* to the computation; these caps control whether the run is trustworthy enough to read
-a `verdict` off of *at all*. Breaching a cap sets `validity: invalid`, forces `verdict:
-inconclusive` (overwriting whatever `verdict::decide`/the LLR boundary check actually produced),
-and clears `estimated_additional_trials` (more trials can't fix a technical-failure problem) -
-applied as a final pass over an already-built report (`verdict::apply_failure_caps`/
-`sprt::apply_failure_caps`), the same "mutate a finished report" shape `--claim-correction`
-already uses for a different cross-cutting concern - and must run *before* it, so an invalid
-report never counts as a legitimate claim (see the `--claim-correction` section's "processing
-order" paragraph).
+### `estimated_additional_trials`
 
-Deliberately an absolute count, not a rate: `data_quality.high_failure_rate` (over 20% of trials)
-already covers "this run's failure *rate* looks unusually high," advisory-only, never changing
-`verdict`. A cap is for the opposite case - a single technical failure that must matter regardless
-of how many thousands of clean trials surround it (`--max-crashes 0`), which no rate threshold can
-express: at n=10,000, even 5 crashes is a 0.05% rate, far under any reasonable "high failure rate"
-bar. The concrete failure mode this closes: under `--failure-policy loss`, enough crashes can tip
-a numeric `winrate`/`elo` verdict to `fail` (or, in principle, `pass`) even though the real cause
-was infrastructure, not candidate strength - `--max-crashes 0` catches that before it ever reaches
-the report, rather than requiring a human to separately notice `crashes > 0` next to a confident-
-looking `fail`.
+For an inconclusive fixed-sample metric, this estimates how many more observations might be needed
+if the current effect persists. Closed forms are used where available; bootstrap metrics use an
+`O(1/sqrt(n))` width-scaling heuristic. The field is advisory and may be `null`, including when the
+current effect lies inside the threshold dead zone.
 
-Each cap is independently optional (`None`/unset is uncapped - existing behavior for a run that
-never passes any `--max-*` flag), and all three apply identically to `sprt`, across every
-`--sprt-variant` (a `loss`-synthesized failure counts toward the same `timeouts`/`crashes`/
-`invalid` totals `sprt`'s report already carries, regardless of variant). For a `compare
---metric`-family run, `validity`/`promotion` are computed per report but the underlying
-`timeouts`/`crashes`/`invalid` counts are identical across every metric in one run (one shared
-scan over the input, see `metrics::compute_many`) - the overall `MultiReport.validity` is
-`invalid` if *any* member report's is.
+### `inconclusive_kind`
 
-See [Validity, strength, and promotion](../README.md#validity-strength-and-promotion) in the
-README for the field semantics (`validity`/`verdict`/`promotion` as three separate axes) and a
-worked example.
+- `directional`: the interval excludes zero but does not clear a decision threshold.
+- `noise`: the interval still spans zero.
+- `null`: the result is not a normal CI judgment, such as zero usable observations or a validity
+  cap breach.
 
-## `--cluster-by-id` (winrate/elo)
+### `warnings`
 
-**Established statistic - cluster bootstrap, a standard nonparametric technique (see Field &
-Welsh 2007, "Bootstrapping Clustered Data"; Cameron, Gelbach & Miller 2008 for the cluster-robust
-inference literature this generalizes), applied here rather than derived from scratch.** Every CI
-`compare` ships treats each record as an independent trial. That assumption breaks when many
-records share a common source of correlation - the same opening replayed several times, the same
-underlying testcase logged repeatedly - and the *un*-clustered CI is then too narrow: it counts
-correlated repeats as if they were independent evidence. `--cluster-by-id` treats every id (an id
-used once is its own singleton cluster) as one resampling unit instead: each bootstrap replicate
-draws whole clusters with replacement - not individual records - and recomputes the metric
-statistic (winrate's proportion, elo's score) from the pooled resampled records, the same
-`stats::sprt`-independent Wilson-vs-bootstrap distinction `matrix`'s general-graph mode already
-draws for its own Elo CIs (bootstrap when the naive closed form's independence assumption doesn't
-hold).
+Warnings identify small samples, high failure or draw rates, sparse quantile tails, wide baseline
+scales, non-finite Elo endpoints, and other known interpretation risks. They are transparent rules
+of thumb and do not modify the verdict.
 
-**Structurally different from `--paired-by-id`, not a stricter version of it.** Pairing *nets* an
-id's exactly-two records into one observation (see "Paired testcases" above); clustering *keeps*
-every record in an id group as its own resampling unit; the two describe incompatible treatments
-of a repeated id and are mutually exclusive (`ClusterByIdConflictsWithPairedById`).
+## References
 
-**`effective_sample_size`/`design_effect` come from the same bootstrap as the CI, not a separately
-computed intra-class correlation.** `design_effect = Var(cluster bootstrap) / Var(i.i.d.
-bootstrap)` - both variances estimated from the identical pooled data via the same resampling
-family (`stats::bootstrap::cluster_bootstrap_ci`/`iid_bootstrap_outcome_draws`), so the two numbers
-are directly comparable rather than mixing a closed-form binomial variance with a bootstrap one
-(which could disagree at small n for reasons that have nothing to do with clustering - the same
-internal-consistency discipline `estimate_additional_trials` already follows by searching the
-exact CI function a report displays, not a different approximation of it).
-`effective_sample_size = paired_count / design_effect` is the standard Kish (1965) deflation of a
-naive sample size under clustering - "how many truly independent trials this clustered data is
-actually worth." `design_effect` near 1.0 means little measurable clustering effect (a small
-`--cluster-by-id` CI difference from the unclustered case is expected, not a sign of a bug);
-noticeably above 1.0 means the unclustered CI would have been overconfident.
-
-**`cluster_count`/`max_cluster_size` are the plain descriptive stats underneath both** - the
-number of distinct clusters (openings/testcases) and the largest single cluster's record count
-(e.g. the most-repeated opening) - reported unconditionally alongside the CI, no estimator
-involved.
-
-**`low_id_diversity` is reinterpreted the same way `--paired-by-id` already reinterprets it**: a
-repeated id is the entire point of clustering, not a sign of a data mistake, so
-`records_with_id`/`max_id_count` tracking (and the warning built from it) is skipped entirely
-under `--cluster-by-id`, exactly as it already is under `--paired-by-id`.
-
-**`estimated_additional_trials` is `null` under `--cluster-by-id`**, not merely unpopulated: it
-would otherwise binary-search wilson/jeffreys/exact against a report whose displayed CI is a
-cluster bootstrap, the exact "different approximation of it" the paragraph above says this project
-avoids - and the independent unit under clustering is the cluster, not the trial, so `paired_count`
-isn't even the right `n` to scale a search from. See `estimated_additional_trials` below.
-
-**Only `winrate`/`elo` this round** (`IncompatibleClusterById` for any other requested metric).
-`mean-diff`/`sign-test`/`quantile-diff`/`relative-diff` are numeric-diff metrics already bootstrapped
-by record, not by outcome tally - real cluster support for them needs `DiffCollector` (not
-`OutcomeCollector`) to retain cluster structure through to resampling, a genuinely separate piece of
-wiring, not a mechanical extension of this round's work. See `docs/research-map.md`.
-
-## `matrix`'s general-graph mode
-
-**Established statistic.** Once real candidate-vs-candidate games make the observed graph
-topologically more than a star (not every game touches the shared baseline), `matrix` fits a
-general Bradley-Terry paired-comparison model (Bradley & Terry 1952) via the Zermelo (1929)/
-Hunter (2004) Minorization-Maximization fixed-point iteration, computed independently per strongly
-connected component.
-
-**Existence condition (not a numerical nicety - a real mathematical requirement):** a finite
-maximum-likelihood solution requires the "who scored any points against whom" graph to be strongly
-connected (Ford 1957). If some nonempty proper subset of competitors never lost or drew against
-anyone outside it, that subset's ratings diverge to infinity relative to the rest - there is no
-finite MLE for that pair, not merely an uncertain one. `matrix` computes strongly connected
-components first and fits each independently, rather than inferring disconnection from the solver
-failing to converge - a genuinely divergent component's relative change per iteration can decay
-like `1/n` (shrinking every step, never crossing a fixed threshold), so no choice of iteration cap
-reliably tells "slowly converging" apart from "slowly diverging" by iteration behavior alone.
-
-**Confidence intervals** on general-graph pairwise Elo differences support the same
-`--bootstrap-method percentile|basic|bca` as `mean-diff`. BCa's acceleration term needs a
-jackknife, but the underlying data is aggregate per-edge win/loss/draw tallies, not raw per-game
-records, so a literal "leave one game out" isn't directly possible. Games within one edge's outcome
-category are exchangeable, so the true per-game jackknife collapses to at most 3 distinct weighted
-replicates per edge (drop-one-a-win, drop-one-b-win, drop-one-draw) rather than a naive (and
-wrong-magnitude) leave-one-*edge*-out. On star-graph topology, `matrix` instead uses the closed
-form directly (no iterative solver, no bootstrap needed - a star graph's Bradley-Terry MLE has no
-shared terms to solve jointly).
-
-## `plan`
-
-**This project's own design choice, layered on already-established statistics** - `veridict plan`
-takes `matrix`'s exact input and output (see above) and, for each cell, estimates how many
-additional trials would narrow that pair's Elo-difference CI to `--min-elo` half-width. It
-deliberately does not reuse `verdict::estimate_additional_trials` directly: that function is keyed
-on a verdict/threshold crossing (`Inconclusive` + `Thresholds`), which has no equivalent here -
-`plan` has no verdict at all, just a target half-width to narrow toward. Its own small function
-mirrors that function's two-branch shape instead:
-
-- **Exact Wilson-CI binary search** - for a `baseline`-vs-one-candidate cell (the common star-graph
-  case), the cell's CI *is* that one candidate's own Wilson CI (see `matrix`'s star-graph closed
-  form above), so the same real, already-tested `wilson_ci_from_proportion` function is
-  recomputed at a hypothetical `n`, holding the point estimate fixed, and binary-searched to the
-  target half-width - not an approximation, real math against the same formula the report shows.
-- **`O(1/sqrt(n))` CLT-scaling fallback** - for every other cell shape: a star-graph
-  candidate-vs-candidate cell (its CI is a `hypot` of two Wilson margins, not a single proportion
-  with a closed form) and every general-graph cell (a real bootstrap CI has no CI-width-at-n
-  function at all). This is the exact model `mean-diff` already uses for the same reason, with the
-  same known bias documented under `estimated_additional_trials` below - `n` here is the bottleneck
-  side's own trial count (`min` of the two competitors' `paired_count`), since narrowing a pair's CI
-  is gated by whichever side has fewer trials.
-
-A `disconnected` pair, or a `direct`/`inferred` cell too fragile under resampling for a reliable CI
-(see `matrix`'s general-graph doc above), gets no estimate at all (`null`, with an explanatory
-`note`) rather than a number computed from a CI that doesn't exist yet - narrowing a nonexistent CI
-isn't a "how many more trials" question, it's a "you need a connecting game first" one.
-
-**Deliberately dropped from an earlier, broader idea:** a `--budget N`/`--goal identify-best`
-constrained-allocation solver (recommend an optimal *set* of matches under a fixed trial budget,
-rather than ranking every pair independently). No real algorithm for that exists anywhere in this
-codebase or its dependencies - see `docs/research-map.md` for what would need to exist before that
-ships.
-
-## `power`
-
-**Established statistic (statistical power), computed exactly against this project's own real CI
-functions rather than a textbook formula.** `veridict power` estimates how many trials
-`compare --metric winrate/sign-test/elo` would need for a `--target-power` probability of reaching
-a passing verdict *before running any of them* - the pre-experiment counterpart to
-`estimated_additional_trials` below, which only ever answers the same question *after* some trials
-already ran.
-
-**Why `--min-effect` and `--assume-effect` are both required, and why they must differ.**
-`compare`'s real decision rule (`verdict::decide`) is: pass iff a CI's lower bound clears
-`pass_above`. If power were evaluated with the *true* effect set equal to that same pass bar, the
-computed number would be the interval's own miscoverage at the boundary it was built against
-(`≈ 1 - confidence`) - flat, and it never climbs toward a target power no matter how large `n`
-gets, because a CI's lower bound crossing the *exact* true value it's centered near is fundamentally
-a coverage-guarantee question, not a sample-size question. A real power calculation needs two
-distinct values: `--min-effect` (the pass bar - identical meaning to `compare --min-effect`/
-`--pass-above`) and a strictly larger `--assume-effect` (the true effect actually being powered
-for). `power` rejects `--assume-effect <= --min-effect` as a hard error rather than silently
-returning a number that looks meaningful but isn't - the standard distinction, present in every
-real power analysis, between "the smallest effect worth caring about" and "the effect you actually
-expect or hope for."
-
-**The exact calculation:**
-
-```
-power(n) = sum_{k=0}^{n} Binomial_pmf(n, p1, k) * [CI_lower(k, n, confidence) >= p0]
-```
-
-`p0`/`p1` are `--min-effect`/`--assume-effect` converted to proportions (`0.5 + effect` for
-`winrate`/`sign-test`; `stats::sprt::score_from_elo(effect)` for `elo` - the same named
-logistic-Elo transform `sprt`'s own hypothesis handling uses, reused directly rather than
-re-derived a third time). `CI_lower` is whichever of `wilson`/`exact`/`jeffreys` `--ci-method`
-selects (`elo` accepts only `wilson`, the same restriction `compare --metric elo` itself has) -
-real, already-tested functions, the same rationale `estimated_additional_trials` already gives for
-searching against real CI math instead of an approximation. The smallest qualifying `n` is found
-via a fast normal-approximation seed, refined by an exact search against the formula above - never
-the normal approximation itself as the reported answer.
-
-**`estimated_trials` counts decisive trials, and for `elo` specifically that's a real, undocumented-
-until-now gap against draw-heavy testing.** The `Binomial(n, p1)` model above draws every trial as
-either a "success" or not - there is no draw outcome in it. For `winrate`/`sign-test` this is
-already exactly what `compare` itself does: both metrics discard draws before computing their own
-CI (`winrate.rs`'s `finish` explicitly drops the draw count), so `n` there genuinely means decisive
-trials, and `power`'s model matches `compare`'s own. For `elo`, `compare --metric elo` computes its
-score as `(candidate_wins + 0.5 * draws) / (wins + losses + draws)` - draws count as half a win and
-sit inside the denominator - which `power`'s pure win/not-win model does not represent. In a
-draw-heavy testcase (the common case in engine testing - the whole reason `--sprt-variant
-pentanomial`/`trinomial` exist), the real `compare --metric elo` run will need more total games than
-`veridict power --metric elo`'s `estimated_trials` says, since some fraction of those games resolve
-as draws rather than decisive results. Treat `power --metric elo`'s number as a lower bound on total
-games for a draw-heavy candidate, not the real game count - a draw-aware `elo` power model is a
-deferred extension (see `docs/research-map.md`), not something this round attempts.
-
-**The "sawtooth" caveat.** Exact power for a discrete CI method (Wilson, and especially
-Clopper-Pearson/Jeffreys) is not perfectly monotonic in `n` - a documented property of exact
-discrete methods, not a bug (Chernick, M.R. & Liu, C.Y. (2002), "The Saw-Toothed Behavior of Power
-Versus Sample Size and Software Solutions: Single Binomial Proportion Using Exact Methods," *The
-American Statistician* 56(2):149-155). `estimated_trials` is confirmed to hold `>= target_power`
-across a window of subsequent `n`, not just at the single point a naive search might land on -
-`achieved_power` in the report is the real exact power at `estimated_trials`, and can overshoot
-`target_power` by a nontrivial margin for exactly this reason. `tests/calibration/
-power_calibration.rs` verifies this empirically via Monte Carlo simulation, not just by trusting
-the derivation.
-
-**Why `--paired-by-id` doesn't change the number.** Pairing reduces testcase/opening variance in
-practice (see "Paired testcases" and the `pentanomial` SPRT section above), but the *actual*
-reduction depends on the data's within-pair correlation, which doesn't exist yet before any trial
-has run - there's nothing to measure it from. `power` accepts the flag and adds a caveat to the
-report's `notes` rather than silently applying an invented correction factor: treat the reported
-number as a conservative (unpaired) upper bound when pairing is planned.
-
-**`mean-diff` is a closed-form calculation, not this search** - see `### power --metric mean-diff`
-below.
-
-**Why the output is a design estimate, not a guarantee.** `estimated_trials` assumes the true
-effect is *exactly* `--assume-effect`. A smaller real effect needs more trials than this number
-says, not fewer - not a corner case, the entire reason `--assume-effect` is a required, separate,
-user-supplied assumption rather than something this tool infers from `--min-effect` alone.
-Consistent with this project's "a false pass is worse than an inconclusive result" bias: `power` is
-a design aid for choosing how much data to collect, never a substitute for the real confidence
-interval `compare` computes from whatever data is actually observed.
-
-### `power --sprt`
-
-**A structurally different question, not a variant of the search above.** Wald's SPRT guarantees
-its `alpha`/`beta` error rates by construction, regardless of `n` - there's no "target power" to
-search a sample size for. What's useful instead is the *expected* number of trials to a decision
-(Wald's own term: "Average Sample Number", ASN) under each hypothesis, given `--elo0`/`--elo1`/
-`--alpha`/`--beta` - the same inputs `veridict sprt --sprt-variant wald` itself takes
-(`SprtConfig::new` is reused directly for validation, so a bad `elo0 >= elo1` etc. here produces
-the exact same error `sprt` itself would).
-
-**The formula** (Wald's classical approximation - source: Wald (1947), *Sequential Analysis*):
-
-```
-E[N | H] ≈ [alpha'(H) * ln(A) + (1 - alpha'(H)) * ln(B)] / E[Z | H]
-```
-
-`ln(A)`/`ln(B)` are the same stopping boundaries `stats::sprt::bounds` computes for `sprt::run`'s
-real Wald loop - reused directly, not re-derived. `alpha'(H)` is the probability of stopping at the
-*upper* boundary under hypothesis `H`: `alpha` under H0, `1 - beta` under H1 (this pairing was
-backwards in an earlier draft of this feature's own proposal - it would produce a negative expected
-sample size under H1; corrected here and cited in `docs/research-map.md`). `E[Z | H]` is the
-expected per-trial log-likelihood-ratio increment under `H`, computed via `stats::sprt::llr_delta`
-- the same function that accumulates the real LLR in `sprt::run` itself.
-
-**`expected_trials_under_h0`/`expected_trials_under_h1` are the two optimistic endpoints, not the
-expected sample size for an unknown candidate.** A Wald SPRT's expected sample size is unimodal in
-the true strength and *peaks between the two hypotheses*, not at either one - so a candidate whose
-true strength lies somewhere between `elo0` and `elo1` (the common case: that uncertainty is
-precisely why SPRT is being run) needs substantially more trials than either endpoint reports. This
-isn't a small correction like the overshoot bias below - `tests/calibration/sprt_asn_calibration.rs`
-measures the gap directly: at elo0=0/elo1=20/alpha=beta=0.05, the empirical mean at the midpoint
-(true strength = 10 Elo) ran about 1.6x either endpoint's number. Budget above
-`expected_trials_under_h0`/`expected_trials_under_h1`, not at them, whenever the candidate's true
-strength is genuinely uncertain - which is the normal case, not an edge case.
-
-**A known, honest approximation, quantified rather than just cited.** Wald's ASN formula ignores
-"overshoot" - the LLR's real excess past a boundary at the moment a discrete process actually
-crosses it, versus landing exactly on the boundary the formula assumes. A real run typically needs
-somewhat more trials than this number in practice. `tests/calibration/sprt_asn_calibration.rs`
-measures this empirically via Monte Carlo rather than leaving it as an unquantified caveat: at
-elo0=0/elo1=20/alpha=beta=0.05, the real simulated mean ran about 1-2% higher than the formula's
-prediction (both under H0 and under H1) - small at this elo gap, not claimed to hold at every
-elo0/elo1/alpha/beta combination. This is the same underlying gap already listed in
-`docs/research-map.md`'s deferred "Siegmund discrete-time bound correction" entry, now actually
-surfaced by name in this context rather than left purely theoretical.
-
-**Also not modeled: draws.** Like `power --metric elo`'s own draws gap (above), this counts
-*decisive* trials only, matching `--sprt-variant wald` itself (draws don't move the LLR at all,
-same "decisive games only" convention `winrate`/`sign-test` already use). A draw-heavy testcase
-needs more real games than `expected_trials_under_h0`/`expected_trials_under_h1` says - use
-`--sprt-variant trinomial`/`pentanomial` for draw-heavy testing, and treat this number as a
-decisive-trials estimate, not a total-games one.
-
-#### `--horizon N`: probability of no decision by a fixed trial cap
-
-**This project's own design choice, not a citation-backed method.** `expected_trials_under_h0`/
-`expected_trials_under_h1` answer "how many trials, on average"; `--horizon N` answers a different,
-sharper planning question a real gate design needs: "if I stop at `N` trials no matter what, how
-often will I still have nothing?" There is no simple closed form for a random walk's boundary-
-crossing-time *distribution* at a general drift (only its *mean*, which the ASN formula above
-already gives) - so this is deliberately boring Monte Carlo simulation, not a derived formula:
-2,000 independent replications (`stats::bootstrap::DEFAULT_SEED`, so the same inputs always give
-the same answer), each simulating raw Bernoulli trials against the exact same `stats::sprt::
-{bounds, llr_delta}` math `sprt::run`'s real Wald loop decides with, counting how often the
-simulated LLR never crosses either boundary within `N` steps.
-
-**Evaluated at the midpoint, not either endpoint - the same worst case
-`expected_trials_under_h0`/`expected_trials_under_h1`'s own doc above already establishes.**
-`score_from_elo((elo0 + elo1) / 2.0)` is the true win probability simulated from; reporting this at
-`elo0`/`elo1` instead would understate the real risk for a candidate of genuinely unknown strength,
-for the same reason budgeting at the ASN endpoints understates expected sample size.
-
-**Not a stopping rule.** This is a design aid for choosing the *next* gate's trial budget/cutoff,
-exactly like `estimated_additional_trials`/`power`'s other numbers - it never changes how a real
-`veridict sprt` run should be stopped, since that run's own `--alpha`/`--beta` boundaries already
-fully and correctly determine that regardless of how long it takes.
-
-### `power --metric mean-diff`
-
-**A closed-form calculation, not the search above.** `mean-diff` has no closed-form CI-width-at-n
-function without real resampled data (the same reason `estimated_additional_trials` falls back to
-an `O(1/sqrt(n))` approximation for it post-hoc) - but pre-experiment there's no fallback
-available either, since there's no existing sample to approximate a variance from at all. Given an
-assumed standard deviation from the caller (`--assume-sd <f64>`, or estimated from real pilot data
-via `--pilot FILE`), modeling the sample mean of `n` diffs as `Normal(assume_effect,
-assume_sd^2/n)` - the standard pre-experiment assumption, since there's no real data yet to
-bootstrap - makes the power calculation continuous and monotone in `n`, unlike the discrete
-binomial case above: there's an exact closed-form solution, so `power --metric mean-diff` doesn't
-run a search at all.
-
-**The formula:**
-
-```
-z_conf  = inverse_normal_cdf((1 + confidence) / 2)   // two-sided quantile - see below
-z_power = inverse_normal_cdf(target_power)
-n       = ceil( ((z_conf + z_power) * assume_sd / (assume_effect - min_effect))^2 )
-achieved_power = Phi( (assume_effect - min_effect) * sqrt(n) / assume_sd - z_conf )
-```
-
-**`z_conf` must be the two-sided quantile - the one correctness subtlety here, and it's the same
-one that already shaped this project's design twice before.** `compare`'s own CI is built as an
-ordinary *two-sided* `(1-confidence)` interval and then read one-sidedly (only the lower bound
-matters for a pass); `wilson_ci_from_proportion` computes its own `z` the same way
-(`inverse_normal_cdf(1 - alpha/2)`, i.e. exactly `inverse_normal_cdf((1+confidence)/2)` - 1.96 at
-95% confidence, not the one-sided 1.645). Using the one-sided quantile here would compute *fewer*
-trials than actually needed - the optimistic, false-pass-prone direction this project exists to
-avoid. This is the same "a two-sided CI read one-sidedly only carries half its nominal budget in
-that tail" fact that already shaped `power`'s two-effect-value design (above) and
-`--claim-correction`'s `alpha/2` family target (see that section) - verified consistent here by
-construction, not re-derived from scratch, and confirmed independently before implementation.
-
-**This is a normal approximation of a real bootstrap decision rule, not an exact search against
-one - a different kind of estimate from `winrate`/`sign-test`/`elo`'s.** There's no real data
-pre-experiment to bootstrap, so a normal model of the paired differences is the standard
-assumption; `report.method` says `normal_approximation_closed_form`, not
-`exact_binomial_search`, and `report.ci_method` says `"normal"` (a label, not a real `--ci-method`
-choice). For skewed real diffs, the bootstrap CI `compare` actually computes and this normal
-estimate will diverge - `tests/calibration/power_mean_diff_calibration.rs` measures the real gap
-empirically (drawing synthetic normal diffs and running them through the actual bootstrap rule via
-`compare_one`, not a simulated approximation of it): at two tested configs, empirical pass rate
-tracked `target_power` within ~0.004-0.015, no systematic directional bias the way SPRT's ASN
-formula had one.
-
-**`assume_sd` is the standard deviation of the paired *difference* (`candidate - baseline`), not
-either arm's own standard deviation.** The classic paired-design mislabeling risk: using an arm's
-own SD here understates the true variance for anything but a perfectly correlated pair, silently
-corrupting every number downstream. `--pilot FILE` computes this correctly by construction - the
-same `(candidate - baseline)` diffs `compare --metric mean-diff` itself computes, via the same
-`DiffCollector` (including `--paired-by-id` netting), just without the bootstrap step (there's
-nothing to bootstrap-check pre-experiment; only the sample standard deviation of the diffs is
-needed).
-
-**`--pilot FILE`'s caveats.** Fewer than 2 usable diffs, or a pilot with zero variance (every diff
-identical), is rejected as a clear error rather than producing `NaN`/`0` silently. Fewer than 30
-diffs (the same conventional threshold `data_quality.tiny_sample` already uses elsewhere) adds a
-note: the sample standard deviation itself is a rougher estimate at that size, and normal
-quantiles (used here) slightly underestimate the required `n` relative to a small-sample
-`t`-distribution correction, which this round doesn't implement - a documented caveat, not a
-silently wrong number.
-
-## `pass` / `fail` / `inconclusive`
-
-**Not a citation-backed result - this project's own conservative design choice.** The gate
-compares the confidence interval, not the point estimate, against the thresholds: `pass` requires
-the CI's pessimistic (lower) bound to clear `--pass-above`; `fail` requires the CI's optimistic
-(upper) bound to be at or below `--fail-below`. Anything else, including zero usable trials, is
-`inconclusive`. Comparing a CI against a threshold is a standard decision rule, but *which*
-threshold to use, and the "false pass is worse than inconclusive" bias behind picking the
-pessimistic/optimistic bound rather than the point estimate, are veridict's own design decisions,
-not a theorem.
-
-## `--claim-correction`
-
-**Two different questions, two different fields.** `compare --metric elo --metric winrate
---metric sign-test` runs several metrics against the same candidate in one call, and there are two
-separate things a caller might want to know: "should this candidate be promoted overall" (the
-deployment gate: `verdict`/`promotion`, always the *unadjusted* per-metric values combined via
-`verdict::aggregate` - any `fail` sinks the run, else any `inconclusive` holds it back, else
-`pass`) and "does every metric's own improvement claim individually survive being read as part of
-a simultaneous family" (`--claim-correction`: `family_adjusted_verdict`/`family_adjusted_promotion`
-per report, and `simultaneous_claims_promotion` on a multi-metric run's overall result).
-`--claim-correction` only ever touches the second - `verdict`/`promotion` are never adjusted, no
-matter what `--claim-correction` is given. `--correction` is kept as a deprecated alias for one
-release (prints a warning to stderr; the two flags are mutually exclusive).
-
-**Why the deployment gate needs no correction of its own.** Each metric's own pass/fail decision
-is made independently at the stated `--confidence` - run enough metrics (or, across a broader
-campaign, enough candidates) and the chance that *some individual metric's own claim* clears its
-bar by luck alone climbs. But the combined `verdict`/`promotion` already requires *every* metric to
-pass: an intersection-union rule over `alpha/2`-level tests (see below for why `alpha/2`, not the
-nominal `alpha`) is itself level `alpha/2`, unconditionally (Berger 1982) - already at least as
-conservative as a single uncorrected metric, with no correction needed. Applying Bonferroni/Holm on
-top of that AND-gate wouldn't tighten its own guarantee; it would only cost power (more
-`inconclusive` verdicts, more trials needed to clear a corrected bar the aggregate never actually
-required). That's why `verdict`/`promotion` stay unadjusted regardless of `--claim-correction`.
-
-**Why `family_adjusted_verdict`/`simultaneous_claims_promotion` still need one.** The risk above is
-real for a different reading: each metric's own `verdict`/`promotion` is also its own field on its
-own `Report`, readable on its own by whatever, if anything, treats "this metric individually
-improved" as a claim in its own right - not just as an input to the combined gate. `--claim-correction`
-controls exactly that family-wise risk. `--claim-correction none` (the default) is exactly today's
-existing behavior, unchanged - correction is opt-in.
-
-**The family-error target: no worse than today's own single-metric baseline.** `compare`'s pass
-rule already reads a *two-sided* `(1-confidence)` CI's *lower* bound as a one-sided pass signal -
-a two-sided interval splits its error budget evenly between both tails, so a single, uncorrected
-metric today already has a one-sided false-pass rate of `alpha/2` (e.g. 0.025 at the default 95%
-confidence), not the nominal `alpha`. The natural, and only defensible, correction target is
-therefore "running `m` metrics together as simultaneous claims is no more dangerous than running
-one" - keep the *family's* one-sided false-pass rate at that same `alpha/2`, not the nominal
-`alpha` itself. This falls straight out of standard textbook Bonferroni simultaneous confidence
-intervals (Dunn 1961; Miller, *Simultaneous Statistical Inference*, 1966): recompute each test's
-ordinary, symmetric, two-sided CI at confidence `1 - alpha/m` (the same `alpha = 1-confidence` the
-tool already uses, split across the family - no extra factor of anything) and re-run the same
-pass/fail rule against it to get `family_adjusted_verdict`.
-
-**`--claim-correction bonferroni`**: a uniform significance budget `alpha/family_size` for every
-metric in the run, regardless of how strong or weak each one's own evidence is.
-
-**`--claim-correction holm`** (recommended over Bonferroni): sorts metrics by their own achieved
-significance ascending and steps down, comparing the `k`-th (1-based) most significant result to
-`alpha/(family_size-k+1)`, stopping at the first failure. Uniformly more powerful than Bonferroni
-for the same family-wise guarantee - it never rejects fewer true passes than Bonferroni would, and
-often rejects strictly more (Holm 1979). A report past an early failure in the ordered sequence is
-held back regardless of its own significance, because that sequential stop is what gives Holm its
-guarantee, not independent per-metric comparisons.
-
-**Correction can only downgrade a claim, never invent a fail.** Widening a CI (lower confidence
-budget per test) only ever pushes its lower bound down and its upper bound up. For a report that
-already passed (`ci_low >= pass_above`, which by construction means `ci_low > fail_below` too,
-since `pass_above > fail_below`), a wider `ci_high` can never newly satisfy `ci_high <= fail_below`.
-So `family_adjusted_verdict` only ever moves an unadjusted `pass` to `inconclusive` - it never
-fails a metric that wasn't already failing, and never touches a metric whose own `verdict` was
-already `fail` or `inconclusive` (`family_adjusted_verdict` just mirrors `verdict` for those). That
-asymmetry falls straight out of the math above; it isn't a special case.
-
-**Processing order matters: failure caps, then claim correction, then both aggregates.**
-`--claim-correction` only ever adjusts a report whose own `verdict` is `Pass` *after* any
-`--max-timeouts`/`--max-crashes`/`--max-invalid` cap has already been applied - a report forced to
-`Inconclusive` for a technical failure must never count as a legitimate statistical claim just
-because its raw numeric verdict looked clean. Concretely: (1) compute each metric's CI and
-`verdict`; (2) apply failure caps, finalizing `validity`/`verdict`/`promotion`; (3) claim-correct
-only the valid, still-`Pass` reports; (4) `verdict`/`promotion` were already finalized in step 2,
-from unadjusted values, and `--claim-correction` never revisits them; (5) aggregate
-`simultaneous_claims_promotion` from every report's `family_adjusted_promotion`.
-
-**`mean-diff`/`quantile-diff`/`relative-diff` and `--cluster-by-id` are rejected outright (a
-configuration error, exit code 3) - not silently left uncorrected while still counting toward
-`family_size`.** There is no closed-form CI-at-a-hypothetical-confidence function for any of the
-three bootstrap-CI metrics (`metrics::lacks_closed_form_ci`) without real resampled data (same
-reason `estimated_additional_trials`/`power` special-case them), nor for a cluster bootstrap CI
-(`--cluster-by-id`) - `achieved_alpha` has nothing valid to search
-against for either. Worse for `--cluster-by-id` specifically: a naive fallback reconstructing a
-plain i.i.d. CI from `successes`/`paired_count` alone comes out *narrower* than the true
-cluster-robust CI whenever there's positive intra-cluster correlation (the usual case, and the
-whole reason `--cluster-by-id` widens the CI to begin with) - it would read as more significant
-than the report actually is, so correction could *under*-downgrade a claim it should have caught,
-leniency in exactly the direction this project's own bias forbids. A family that can't get a real,
-method-consistent guarantee for every member doesn't get a `family_adjusted_verdict`/
-`simultaneous_claims_promotion` result at all; both are separate, deferred pieces of work (see
-`docs/research-map.md`).
-
-**Report fields** (all omitted, not present as `null`, unless `--claim-correction` is something
-other than the default `none`): `correction_method` (`"bonferroni"`/`"holm"`), `family_size`,
-`achieved_alpha` (the smallest one-sided significance at which this report's own CI would still
-pass), `adjusted_alpha_threshold` (the corrected threshold `achieved_alpha` was actually compared
-against), `family_adjusted_verdict` (this metric's claim, read as part of the family - see above),
-and `family_adjusted_promotion` (`Promotion::decide(validity, family_adjusted_verdict)`). A
-multi-metric run's top-level result additionally carries `simultaneous_claims_promotion`
-(`promoted` only if every report's `family_adjusted_promotion` is `promoted` too).
-
-**`unadjusted_verdict` is a deprecated compatibility alias for `verdict`, not a new field.**
-Before this split, `verdict` itself became the *adjusted* value once correction ran, and
-`unadjusted_verdict` held the pre-correction one alongside it. `verdict` is never adjusted now, so
-`unadjusted_verdict` always just equals it - kept only so an existing consumer of a corrected
-report doesn't see a field vanish out from under it, still within `REPORT_SCHEMA_VERSION` 1 for
-that reason. New consumers should read `verdict` directly; `unadjusted_verdict` is scheduled for
-removal alongside a future schema version bump, not this round.
-
-**A single-metric run degenerates to a no-op.** With `family_size=1`, both Bonferroni's and Holm's
-threshold reduce to `alpha/1 = alpha` - exactly the report's own existing, uncorrected pass
-condition, so `family_adjusted_verdict` just mirrors `verdict`. `--claim-correction` is accepted
-and reported on a single-`--metric` run for uniformity, but never changes anything about its
-outcome.
-
-**`estimated_additional_trials` stays `null` on a claim-correction-downgraded report.** It's
-computed once, from `verdict` before claim correction runs at all - a report whose
-`family_adjusted_verdict` is `inconclusive` while `verdict` is still `pass` shows `null` there,
-same as any other `pass`. The number a corrected `inconclusive` would actually need (more trials
-at the *corrected* confidence) isn't computed this round.
-
-**Out of scope for now**: `matrix`'s all-pairs correction (matrix has no verdict concept to correct
-at all today - see `docs/research-map.md`'s "matrix verdict semantics" entry), `sprt`'s own
-multiplicity question (running several simultaneous SPRTs), and Benjamini-Hochberg/FDR-style
-correction (a different, less conservative family-error target than FWER).
-
-## `estimated_additional_trials`
-
-**Mixed: exact for three metrics, a heuristic for the rest.** This is a rough estimate of how many
-*additional* trials would likely turn an `inconclusive` result decisive, assuming the effect size
-itself doesn't move.
-
-- For **`winrate`/`sign-test`/`elo`**, this binary-searches the real, already-tested CI function
-  the report itself uses (`wilson`/`jeffreys`/`exact`, per `--ci-method`), holding the point
-  estimate fixed - not an approximation, an exact search against real, already-verified math.
-- For **`mean-diff`/`quantile-diff`/`relative-diff`** (`metrics::lacks_closed_form_ci`), there is
-  no closed-form "CI width at a hypothetical n" function for a bootstrap CI without real resampled
-  data, so all three fall back to the `O(1/sqrt(n))` CLT-scaling model instead. This has a
-  documented, quantified bias for `mean-diff`: verified within ~1.5% of an actual re-run for a
-  clean 4x sample-size jump at moderate n, but a real ~18% *under*-estimate at n=100, because e.g.
-  Wilson's CI also shrinks via an `O(z^2/n)` recentering term the simple `1/sqrt(n)` model doesn't
-  capture. `quantile-diff`/`relative-diff` reuse the same model, unverified for their own bootstrap
-  CI. Treat any of the three metrics' number as "roughly this many, plausibly more," not a
-  guarantee - an approximation, not a guarantee, for `relative-diff` exactly as much as for the
-  other two.
-
-Returns `null` when there's nothing meaningful to suggest: the verdict is already `pass`/`fail`,
-there are zero paired trials, or the effect sits *inside* the pass/fail threshold band (the "dead
-zone") - shrinking the CI around a point estimate already in the dead zone can never cross either
-boundary no matter how much data is added; only a genuinely different effect size resolves that
-case, not more data alone. Also `null` whenever `--cluster-by-id` was used (see
-`--cluster-by-id` above) - none of the binary-searched CI functions describe a cluster bootstrap,
-and the independent unit is the cluster, not the trial.
-
-**A dead-zone `null` next to a zero-excluding CI is exactly `inconclusive_kind: "directional"`
-below** - a real, consistently-signed effect that's simply too small to clear the threshold, where
-by definition no amount of *additional data at the same effect size* can help. Seeing `null` here
-doesn't mean the field is unsupported for a given metric (it's computed the same way for every
-metric); it means this specific run's point estimate already sits inside the threshold band.
-
-## `inconclusive_kind`
-
-**Sub-classifies an `inconclusive` verdict by whether its CI excludes zero.** Two situations both
-serialize as `"verdict": "inconclusive"` otherwise, but call for different next steps:
-
-- **`directional`** - `ci_low`/`ci_high` share a sign (the CI excludes zero): a real,
-  consistent-direction effect that simply doesn't clear the pass/fail threshold yet. More trials
-  *can* help here, unless `estimated_additional_trials` is `null` for the dead-zone reason above.
-- **`noise`** - the CI still straddles zero (`ci_low <= 0.0 <= ci_high`, inclusive): the sign of
-  the effect itself is undetermined, indistinguishable from noise around zero.
-
-`null` (not one of the two strings above) for a `pass`/`fail` verdict, and for an `inconclusive`
-verdict that isn't a real CI judgment: zero usable trials (a data-availability problem, not a
-noise/directional question) or a `--max-timeouts`/`--max-crashes`/`--max-invalid` cap breach (see
-`FailureCaps` above - a technical-invalidity `inconclusive` isn't a statistical judgment either).
-
-**Deliberately a different test from `data_quality.effect_within_noise_floor`.** That flag is
-`abs(effect) < CI half-width`, an approximation that assumes the CI is symmetric around the point
-estimate. `inconclusive_kind` reads `ci_low`/`ci_high` directly, with no such assumption, so it
-stays exact on an asymmetric bootstrap CI - `relative-diff`'s `bca` method, in particular, can
-produce a CI that isn't symmetric around `effect`. The two fields can disagree on such a report;
-neither supersedes the other, and both are always reported.
-
-**Also shown in the Markdown report**, not just JSON: the `Verdict:` line reads
-`Verdict: inconclusive (directional)` / `Verdict: inconclusive (noise)` whenever
-`inconclusive_kind` is set, the same way it already appends `(q=0.95)` to the metric line for
-`quantile-diff`.
-
-## `warnings`
-
-**Not citation-backed - conventional rules of thumb**, computed independently of `verdict` (a
-warning never changes `pass`/`fail`/`inconclusive`):
-
-- **Tiny sample** - under 30 paired trials, the conventional threshold below which CI methods are
-  considered unreliable.
-- **High failure rate** - over 20% of trials failed to execute (timeout/crash/invalid) rather than
-  producing a usable result. Under `--failure-policy loss`, a failure's synthesized outcome is
-  counted both as a failure and as a trial in this rate's denominator, which can under-report the
-  true rate near the 20% boundary (see the `ponytail:` comment on `collect_data_quality` in
-  `src/lib.rs`) - a known, narrow gap, not a silent one.
-- **Draw-heavy** (`elo` only) - over 50% of trials were draws, leaving few decisive outcomes to
-  estimate Elo from. (Not yet extended to `winrate`/`sign-test`, which discard their tie/draw count
-  before it reaches the shared `MetricOutput` struct - a real gap, not a silent omission; see
-  `docs/research-map.md`.)
-- **Effect within noise floor** - the measured effect is smaller than the CI's own half-width
-  (could plausibly be noise around zero), guarded by *not* also tiny-sample (a wide CI from a tiny
-  sample already gets its own warning; flagging both would double-count the same underlying cause).
-- **Low id diversity** - one `id` repeated 3 or more times among at least 10 id-tagged trials,
-  unpaired mode only. `compare_one`'s CI treats every trial as independent; a heavily repeated `id`
-  suggests the same underlying test case was logged multiple times rather than actually run that
-  many independent times, which would make the CI narrower than the data really supports. Silent
-  when every `id` appears exactly twice (the common, innocent case of forgetting
-  `--paired-by-id` on genuinely paired data - flagging that would be noise, not signal) and silent
-  entirely under `--paired-by-id` (repeated ids mean something different there - see
-  [paired testcases](../README.md#paired-testcases)). This only catches literal `id` collisions -
-  it says nothing about near-duplicate trials that don't share an `id`.
-- **Thin quantile tail** (`quantile-diff` only) - fewer than 10 expected observations
-  (`paired_count * min(q, 1-q)`) in the thinner tail at the requested quantile - see the
-  `quantile-diff` section above.
-- **Diluted by ties** (`relative-diff` only, silent under `--paired-by-id`) - at least
-  `TIE_DILUTION_FRACTION` (0.5) of ingested records showed `candidate == baseline` exactly
-  (`tied_count`). If a change only affects a subset of cases, the untouched majority's exact-zero
-  diffs pull the pooled `mean(relative_diff_i)` toward zero, making a correctly-scoped,
-  conservative change look weaker than it is. `tied_count` is counted at ingest, before any
-  `--paired-by-id` netting - two opposite nonzero ratios netting to `0.0` under pairing is a
-  different phenomenon from a genuine exact match, and isn't counted here. This warning stays
-  silent entirely under `--paired-by-id` (same convention as low id diversity, below): the
-  fraction's denominator (`baseline_count`) is post-netting while `tied_count` is pre-netting, and
-  under pairing that isn't a small approximation but an unbounded skew - two records from the same
-  tied pair both count toward `tied_count` but net to a single post-netting record, so the naive
-  ratio can run past 100% (a verified case: two exact-match pairs plus one distinct
-  netted-to-zero pair produces `tied_count == 2`, `baseline_count == 2` - a 100% reading against a
-  true 50% pre-netting rate). `tied_count` itself is still reported and still exact under
-  `--paired-by-id`; only the derived warning is suppressed. See `docs/research-map.md`'s
-  "subset-only relative-diff" entry for a deferred idea to report an effect size restricted to the
-  non-tied
-  subset, which this warning only detects, not corrects for.
-
-None of these thresholds (30, 20%, 50%, 3-of-10, 10-expected-in-the-tail, 50%-tied) come from a
-specific paper - they're the kind of rule of thumb a careful practitioner would apply by hand, made
-automatic.
+- Wilson, E. B. (1927). “Probable Inference, the Law of Succession, and Statistical Inference.”
+- Clopper, C. J.; Pearson, E. S. (1934). “The Use of Confidence or Fiducial Limits Illustrated in
+  the Case of the Binomial.”
+- Efron, B.; Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*.
+- Wald, A. (1945). “Sequential Tests of Statistical Hypotheses.”
+- Elo, A. (1978). *The Rating of Chessplayers, Past and Present*.
+- Bradley, R. A.; Terry, M. E. (1952). “Rank Analysis of Incomplete Block Designs: I.”
+- Hunter, D. R. (2004). “MM Algorithms for Generalized Bradley-Terry Models.”

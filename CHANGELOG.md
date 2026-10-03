@@ -5,10 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-`veridict` is a domain-agnostic statistical decision gate: feed it paired candidate-vs-baseline
-results (JSONL or CSV) and it returns `pass`/`fail`/`inconclusive`, never a false pass dressed up
-as a pass - see [`docs/metrics.md`](docs/metrics.md) for the statistical basis of every number it
-reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberately out of scope.
+`veridict` is a domain-agnostic statistical decision gate. See
+[`docs/metrics.md`](docs/metrics.md) for shipped behavior and
+[`docs/research-map.md`](docs/research-map.md) for deferred or excluded work.
+
+## [Unreleased]
+
+## [0.19.1] - 2026-10-03
+
+### Fixed
+
+- **Wald and trinomial SPRT now retain the first boundary crossing.** Both variants replay input in
+  order and evaluate each usable trial, or each completed net pair with `--paired-by-id`. Reports
+  separate decision-prefix fields from the existing full-input compatibility aggregates. Tests
+  cover reversion after a crossing and schedules with identical totals but opposite first crossings.
+
+### Changed
+
+- Reorganized the README and statistical references around current CLI contracts, and shortened
+  the research map to unshipped candidates and their activation conditions.
 
 ## [0.19.0] - 2026-08-02
 
@@ -355,7 +370,7 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
   already-built report (`verdict::apply_failure_caps`/`apply_failure_caps_to_multi`,
   `sprt::apply_failure_caps`), the same "mutate a finished report" shape `--correction` already
   uses. Unset (the default): uncapped, existing behavior, byte-identical JSON. See
-  [Validity, strength, and promotion](README.md#validity-strength-and-promotion) and
+  [`docs/metrics.md`](docs/metrics.md#failures-and-evidence-validity) and
   `docs/metrics.md`'s `--max-timeouts`/`--max-crashes`/`--max-invalid` section.
 - **`power --sprt --horizon N`**: a Monte Carlo estimate (`probability_no_decision_by_horizon`,
   2,000 replications, fixed seed) of how often a real `veridict sprt` run still won't have reached
@@ -377,9 +392,8 @@ reports and [`docs/research-map.md`](docs/research-map.md) for what's deliberate
   `mean-diff`/`sign-test`/`quantile-diff` cluster support is deferred (see
   `docs/research-map.md`) - those metrics bootstrap by individual record today, not by outcome
   tally, so real support needs separate collector wiring. See
-  [Clustered testcases](README.md#clustered-testcases) and `docs/metrics.md`'s `--cluster-by-id`
-  section, including a worked example where the naive per-game CI reads as a confident `pass` and
-  the cluster-aware one correctly reads `inconclusive` on identical data. `estimated_additional_trials`
+  [`docs/metrics.md`](docs/metrics.md#pairing-and-clustering) and its `--cluster-by-id`
+  section. `estimated_additional_trials`
   is always `null` under `--cluster-by-id`, even when `inconclusive` - it would otherwise
   binary-search wilson/jeffreys/exact against a report whose displayed CI is a cluster bootstrap,
   and `paired_count` isn't the right `n` to scale from when the independent unit is the cluster.

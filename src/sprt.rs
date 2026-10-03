@@ -5,23 +5,16 @@
 //! error rates, by construction (see `stats::sprt` for the math and its
 //! documented "decisive games only" assumption).
 //!
-//! ponytail: `Wald`/`Trinomial` still compute their LLR once from the final aggregate win/loss/
-//! draw counts rather than replaying the sequence - this carries the *same* potential look-ahead
-//! gap `Pentanomial` used to have (a boundary crossed mid-stream and drifted back within bounds
-//! by the input's end would go unnoticed by a single final check), it just isn't closed this
-//! round: only `Pentanomial`'s `--min-paired-ids`/`--max-paired-ids` were requested. Their
-//! per-trial LLR delta being a fixed constant (see `stats::sprt::llr_delta`) only means the
-//! *final total* doesn't depend on trial order and an incremental walk would be cheap to add
-//! later - it does not make the current final-aggregate check equivalent to true sequential
-//! stopping. Upgrade these two the same way if that gap is ever reported for them.
+//! Every variant performs genuine sequential monitoring. Input order is the trial schedule:
+//! `Wald` and `Trinomial` evaluate after each usable outcome (or each completed net pair under
+//! `--paired-by-id`), while `Pentanomial` evaluates after each completed pair. Reordering an input
+//! file can therefore legitimately change its verdict. The report keeps the pre-0.20 full-input
+//! `llr`/win/loss/draw fields for compatibility and exposes the analyzed prefix separately through
+//! `decision_llr`, `decision_*` counts, and the generic observation/stopping fields.
 //!
-//! `SprtVariant::Pentanomial` performs genuine sequential monitoring: `run` walks completed
-//! pairs in the order they complete while reading the input (there's no separate `schedule`
-//! field the way `verify_run::Manifest` has one, so input order *is* the schedule here -
-//! reordering the input file legitimately changes the verdict), recomputing the generalized LLR
-//! from the cumulative bucket counts after every pair (this is a genuine re-tilt of the whole
-//! empirical distribution, not an additive accumulation - see `stats::pentanomial_sprt`'s module
-//! doc), and stops at the first pair that satisfies the stopping rule. `--min-paired-ids`/
+//! `Pentanomial` recomputes the generalized LLR from the cumulative bucket counts after every pair
+//! (a genuine re-tilt of the whole empirical distribution, not an additive accumulation - see
+//! `stats::pentanomial_sprt`'s module doc). `--min-paired-ids`/
 //! `--max-paired-ids` are folded into that same walk rather than applied as a post-hoc gate on
 //! the final aggregate: a boundary crossed before the minimum is reached is never evaluated at
 //! all (so there's nothing to "remember" once the minimum is reached), and pairs completed after
@@ -35,7 +28,7 @@ use serde::Serialize;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::metrics::{FailureBreakdown, OutcomeCollector, effective_outcome, tally_status};
+use crate::metrics::{FailureBreakdown, effective_outcome, tally_status};
 use crate::report::serde_str;
 use crate::stats::pentanomial_sprt;
 use crate::stats::sprt as math;
@@ -145,7 +138,9 @@ pub struct SprtReport {
     pub validity: Validity,
     /// Same meaning as `Report::promotion`.
     pub promotion: Promotion,
-    /// For `SprtVariant::Pentanomial`, the LLR *at the sequential stopping point* (see the
+    /// For `Wald`/`Trinomial`, this retains its historical full-input aggregate meaning; use
+    /// `decision_llr` for the sequential verdict prefix. For `SprtVariant::Pentanomial`, this is
+    /// the LLR *at the sequential stopping point* (see the
     /// module doc) - never the value a naive final-aggregate recompute over the whole input
     /// would give, which can differ whenever the true stopping point falls before the input's
     /// end. When `stopping_pair_count` is `None` (no stopping point was reached - either the
@@ -155,6 +150,10 @@ pub struct SprtReport {
     /// Callers must read `verdict`/`promotion`, never re-derive a decision from `llr` vs the
     /// bounds directly.
     pub llr: f64,
+    /// LLR at the prefix that actually determined `verdict`. Equal to `llr` for Pentanomial;
+    /// may differ for Wald/Trinomial because their legacy `llr` field intentionally remains the
+    /// full-input aggregate for backward compatibility.
+    pub decision_llr: f64,
     pub lower_bound: f64,
     pub upper_bound: f64,
     pub elo0: f64,
@@ -164,16 +163,23 @@ pub struct SprtReport {
     pub candidate_wins: u64,
     pub baseline_wins: u64,
     pub draws: u64,
+    /// Outcome counts in the prefix used by `decision_llr`. The unprefixed fields above retain
+    /// their historical full-input meaning for Wald/Trinomial.
+    pub decision_candidate_wins: u64,
+    pub decision_baseline_wins: u64,
+    pub decision_draws: u64,
     pub timeouts: u64,
     pub crashes: u64,
     pub invalid: u64,
     pub failure_breakdown: FailureBreakdown,
     pub reason: String,
-    /// The estimated draw-rate nuisance parameter, `Some` only for
-    /// `SprtVariant::Trinomial` (reported for transparency, since it's
-    /// estimated from the same data being judged) - `None` for `Wald`/
-    /// `Pentanomial`, neither of which models a draw rate.
+    /// The full-input estimated draw-rate nuisance parameter, `Some` only for
+    /// `SprtVariant::Trinomial`. Use `decision_drawelo` for the sequential verdict prefix.
+    /// `None` for `Wald`/`Pentanomial`, neither of which models a draw rate.
     pub drawelo: Option<f64>,
+    /// Trinomial nuisance estimate at the sequential stopping prefix. The unprefixed `drawelo`
+    /// remains the full-input estimate for compatibility. `None` for Wald/Pentanomial.
+    pub decision_drawelo: Option<f64>,
     /// Which variant produced this report - additive alongside the fields
     /// above (present for every variant, not just `Pentanomial`) so a
     /// consumer never has to infer it from `drawelo`'s presence.
@@ -211,6 +217,25 @@ pub struct SprtReport {
     /// a consumer can tell "no pairs ignored" from "not a pentanomial run" (the latter is
     /// `None`).
     pub ignored_pairs_after_stop: Option<u64>,
+    /// Unit used by the generic sequential-replay counts: `"trial"` for unpaired Wald/Trinomial,
+    /// `"pair"` for `--paired-by-id` Wald/Trinomial and for Pentanomial.
+    pub analysis_unit: &'static str,
+    /// Total reduced observations available in the input before sequential truncation.
+    pub available_observation_count: u64,
+    /// Reduced observations folded into `decision_llr` through the stopping prefix.
+    pub analyzed_observation_count: u64,
+    /// Observation count at a decisive boundary crossing; `None` when input ended inconclusively.
+    pub stopping_observation_count: Option<u64>,
+    /// `upper_bound_crossed`, `lower_bound_crossed`, `max_paired_ids_reached`, or
+    /// `insufficient_data`, expressed generically for all variants.
+    pub stopping_observation_reason: &'static str,
+    /// Available observations not analyzed because they occur after the stopping prefix.
+    pub ignored_observations_after_stop: u64,
+    /// Raw input records that produced the available/analyzed observations. Under pairing, one
+    /// observation usually represents two records; a tolerated lone/id-less trial represents one.
+    pub available_record_count: u64,
+    pub analyzed_record_count: u64,
+    pub ignored_records_after_stop: u64,
     /// Echoes `--min-paired-ids`, `Some` only when it was passed.
     pub min_paired_ids: Option<u64>,
     /// Echoes `--max-paired-ids`, `Some` only when it was passed.
@@ -400,12 +425,266 @@ fn net_pentanomial_buckets(buckets: &[u64; 5]) -> (u64, u64, u64) {
     (baseline_wins, candidate_wins, draws)
 }
 
+/// One Wald/Trinomial analysis unit in schedule order. With `--paired-by-id`, a unit is the
+/// net result of two records and is scheduled when the second record completes the pair.
+#[derive(Clone, Copy)]
+struct OrderedOutcome {
+    completion_line: usize,
+    outcome: Outcome,
+    raw_record_count: u64,
+}
+
+/// Order-preserving counterpart to `metrics::OutcomeCollector`, used only by SPRT because a
+/// sequential test must retain its schedule. This deliberately keeps the existing pairing
+/// contract: id-less records are single observations, a lone id is tolerated unless
+/// `require_complete_pairs` is set, and an id occurring more than twice is invalid.
+struct SequentialOutcomeCollector {
+    paired_by_id: bool,
+    require_complete_pairs: bool,
+    observations: Vec<OrderedOutcome>,
+    groups: HashMap<String, Vec<(usize, Outcome)>>,
+}
+
+impl SequentialOutcomeCollector {
+    fn new(paired_by_id: bool, require_complete_pairs: bool) -> Self {
+        Self {
+            paired_by_id,
+            require_complete_pairs,
+            observations: Vec::new(),
+            groups: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, line: usize, id: Option<&str>, outcome: Outcome) {
+        if self.paired_by_id
+            && let Some(id) = id
+        {
+            let group = self.groups.entry(id.to_string()).or_default();
+            group.push((line, outcome));
+            if group.len() == 2 {
+                self.observations.push(OrderedOutcome {
+                    completion_line: line,
+                    outcome: net_outcomes(group[0].1, group[1].1),
+                    raw_record_count: 2,
+                });
+            }
+        } else {
+            self.observations.push(OrderedOutcome {
+                completion_line: line,
+                outcome,
+                raw_record_count: 1,
+            });
+        }
+    }
+
+    fn finish(mut self) -> Result<Vec<OrderedOutcome>, VeridictError> {
+        for (id, group) in self.groups {
+            match group.as_slice() {
+                [(line, outcome)] => {
+                    if self.require_complete_pairs {
+                        return Err(VeridictError::SchemaMismatch {
+                            line: *line,
+                            context: "paired-by-id",
+                            detail: format!(
+                                "id '{id}' appears once; --require-complete-pairs requires \
+                                 exactly 2 records per id"
+                            ),
+                        });
+                    }
+                    self.observations.push(OrderedOutcome {
+                        completion_line: *line,
+                        outcome: *outcome,
+                        raw_record_count: 1,
+                    });
+                }
+                [(_, _), (_, _)] => {}
+                more => {
+                    return Err(VeridictError::SchemaMismatch {
+                        line: more[0].0,
+                        context: "paired-by-id",
+                        detail: format!(
+                            "id '{id}' appears {} times; paired mode expects at most 2 records per id",
+                            more.len()
+                        ),
+                    });
+                }
+            }
+        }
+        self.observations
+            .sort_by_key(|observation| observation.completion_line);
+        Ok(self.observations)
+    }
+}
+
+fn net_outcomes(a: Outcome, b: Outcome) -> Outcome {
+    let points = |outcome| match outcome {
+        Outcome::CandidateWin => 2,
+        Outcome::Draw => 1,
+        Outcome::BaselineWin => 0,
+    };
+    match points(a) + points(b) {
+        0 | 1 => Outcome::BaselineWin,
+        2 => Outcome::Draw,
+        3 | 4 => Outcome::CandidateWin,
+        _ => unreachable!("two outcomes can only produce 0 through 4 half-points"),
+    }
+}
+
+fn tally_outcome(
+    outcome: Outcome,
+    candidate_wins: &mut u64,
+    baseline_wins: &mut u64,
+    draws: &mut u64,
+) {
+    match outcome {
+        Outcome::CandidateWin => *candidate_wins += 1,
+        Outcome::BaselineWin => *baseline_wins += 1,
+        Outcome::Draw => *draws += 1,
+    }
+}
+
+struct OutcomeWalk {
+    llr: f64,
+    drawelo: Option<f64>,
+    candidate_wins: u64,
+    baseline_wins: u64,
+    draws: u64,
+    available_observation_count: u64,
+    analyzed_observation_count: u64,
+    stopping_observation_count: Option<u64>,
+    stopping_reason: &'static str,
+    available_record_count: u64,
+    analyzed_record_count: u64,
+}
+
+struct RunAnalysis {
+    /// Historical full-input fields. Pentanomial has always exposed only its analyzed prefix.
+    llr: f64,
+    drawelo: Option<f64>,
+    candidate_wins: u64,
+    baseline_wins: u64,
+    draws: u64,
+    /// Sequential decision prefix.
+    decision_llr: f64,
+    decision_drawelo: Option<f64>,
+    decision_candidate_wins: u64,
+    decision_baseline_wins: u64,
+    decision_draws: u64,
+    analysis_unit: &'static str,
+    available_observation_count: u64,
+    analyzed_observation_count: u64,
+    stopping_observation_count: Option<u64>,
+    stopping_observation_reason: &'static str,
+    available_record_count: u64,
+    analyzed_record_count: u64,
+    pentanomial: Option<(PentanomialWalk, u64)>,
+}
+
+fn outcome_llr(
+    variant: SprtVariant,
+    config: &SprtConfig,
+    candidate_wins: u64,
+    baseline_wins: u64,
+    draws: u64,
+) -> (f64, Option<f64>) {
+    match variant {
+        SprtVariant::Wald => {
+            let p0 = math::score_from_elo(config.elo0);
+            let p1 = math::score_from_elo(config.elo1);
+            (
+                candidate_wins as f64 * math::llr_delta(true, p0, p1)
+                    + baseline_wins as f64 * math::llr_delta(false, p0, p1),
+                None,
+            )
+        }
+        SprtVariant::Trinomial => {
+            if candidate_wins + baseline_wins + draws == 0 {
+                (0.0, Some(0.0))
+            } else {
+                let (llr, drawelo) = trinomial_sprt::llr(
+                    config.elo0,
+                    config.elo1,
+                    candidate_wins,
+                    draws,
+                    baseline_wins,
+                );
+                (llr, Some(drawelo))
+            }
+        }
+        SprtVariant::Pentanomial => unreachable!("pentanomial has its own sequential walk"),
+    }
+}
+
+fn evaluate_outcomes_sequential(
+    observations: &[OrderedOutcome],
+    config: &SprtConfig,
+    variant: SprtVariant,
+    bounds: &math::SprtBounds,
+) -> OutcomeWalk {
+    let available_observation_count = observations.len() as u64;
+    let available_record_count = observations
+        .iter()
+        .map(|observation| observation.raw_record_count)
+        .sum();
+    let (mut candidate_wins, mut baseline_wins, mut draws) = (0, 0, 0);
+    let mut analyzed_record_count = 0;
+
+    for (index, observation) in observations.iter().enumerate() {
+        tally_outcome(
+            observation.outcome,
+            &mut candidate_wins,
+            &mut baseline_wins,
+            &mut draws,
+        );
+        analyzed_record_count += observation.raw_record_count;
+        let analyzed_observation_count = (index + 1) as u64;
+        let (llr, drawelo) = outcome_llr(variant, config, candidate_wins, baseline_wins, draws);
+        let stopping_reason = if llr >= bounds.upper {
+            Some("upper_bound_crossed")
+        } else if llr <= bounds.lower {
+            Some("lower_bound_crossed")
+        } else {
+            None
+        };
+        if let Some(stopping_reason) = stopping_reason {
+            return OutcomeWalk {
+                llr,
+                drawelo,
+                candidate_wins,
+                baseline_wins,
+                draws,
+                available_observation_count,
+                analyzed_observation_count,
+                stopping_observation_count: Some(analyzed_observation_count),
+                stopping_reason,
+                available_record_count,
+                analyzed_record_count,
+            };
+        }
+    }
+
+    let (llr, drawelo) = outcome_llr(variant, config, candidate_wins, baseline_wins, draws);
+    OutcomeWalk {
+        llr,
+        drawelo,
+        candidate_wins,
+        baseline_wins,
+        draws,
+        available_observation_count,
+        analyzed_observation_count: available_observation_count,
+        stopping_observation_count: None,
+        stopping_reason: "insufficient_data",
+        available_record_count,
+        analyzed_record_count: available_record_count,
+    }
+}
+
 /// `paired_by_id`: see `metrics::compute` - two records sharing an `id` are
 /// combined into one net observation (by total points across the pair)
-/// instead of two independent trials. `records` is a streaming iterator
-/// (see `metrics::compute_many`'s doc for why) - this only ever tallies
-/// counters via `OutcomeCollector`, so memory stays bounded regardless of
-/// input size (modulo `--paired-by-id`'s in-flight-id buffering).
+/// instead of two independent trials. `records` is a streaming iterator, but sequential replay
+/// retains the reduced observation schedule until the input has been validated. This makes memory
+/// O(n); an incremental accumulator can restore O(1) for unpaired Wald in a future change without
+/// changing the report contract.
 ///
 /// `SprtVariant::Pentanomial` always requires `paired_by_id`: rejected up front rather than
 /// silently ignored, matching `resolve_sprt_hypotheses`'s existing "never silently ignore
@@ -417,7 +696,7 @@ fn net_pentanomial_buckets(buckets: &[u64; 5]) -> (u64, u64, u64) {
 /// pair nets against its partner's real result the same way any other outcome pair would.
 ///
 /// `require_complete_pairs`: only affects `Wald`/`Trinomial` (upgrades a lone id under
-/// `paired_by_id` from a tolerated unpaired sample into a hard error, via `OutcomeCollector`) -
+/// `paired_by_id` from a tolerated unpaired sample into a hard error) -
 /// a documented no-op for `Pentanomial`, which is already unconditionally this strict via
 /// `PentanomialCollector` regardless of this flag.
 ///
@@ -473,11 +752,10 @@ where
     }
 
     let mut failures = FailureBreakdown::default();
-    // Both collectors are always constructed (cheap - an empty `HashMap` allocates nothing),
-    // but only the one matching `variant` ever gets fed a record or consumed via `finish()`
-    // below; the other is simply dropped unused. Simpler than threading an `Option` through the
-    // loop for what's a single small allocation-free struct either way.
-    let mut collector = OutcomeCollector::new(paired_by_id, false, require_complete_pairs);
+    // Both collectors are always constructed, but only the one matching `variant` is fed and
+    // finished below. Keeping this branch at ingestion time also ensures every input record is
+    // still parsed and its status tallied even when the statistical walk later stops early.
+    let mut collector = SequentialOutcomeCollector::new(paired_by_id, require_complete_pairs);
     let mut pentanomial_collector = PentanomialCollector::new();
 
     for item in records {
@@ -542,37 +820,40 @@ where
     let invalid = failures.baseline.invalid + failures.candidate.invalid;
 
     let bounds = math::bounds(config.alpha, config.beta);
-    let (candidate_wins, baseline_wins, draws, llr, drawelo, unit, pentanomial) = match variant {
-        SprtVariant::Wald => {
-            let (baseline_wins, candidate_wins, draws) = collector.finish()?;
-            let p0 = math::score_from_elo(config.elo0);
-            let p1 = math::score_from_elo(config.elo1);
-            // Every candidate win contributes the same LLR delta, and
-            // likewise for every loss (draws are excluded, see stats::sprt),
-            // so the accumulated LLR is just each delta times its trial
-            // count - no need to loop.
-            let llr = candidate_wins as f64 * math::llr_delta(true, p0, p1)
-                + baseline_wins as f64 * math::llr_delta(false, p0, p1);
-            (candidate_wins, baseline_wins, draws, llr, None, "elo", None)
-        }
-        SprtVariant::Trinomial => {
-            let (baseline_wins, candidate_wins, draws) = collector.finish()?;
-            let (llr, drawelo) = trinomial_sprt::llr(
-                config.elo0,
-                config.elo1,
-                candidate_wins,
-                draws,
-                baseline_wins,
-            );
-            (
-                candidate_wins,
-                baseline_wins,
-                draws,
+    let analysis = match variant {
+        SprtVariant::Wald | SprtVariant::Trinomial => {
+            let observations = collector.finish()?;
+            let (mut candidate_wins, mut baseline_wins, mut draws) = (0, 0, 0);
+            for observation in &observations {
+                tally_outcome(
+                    observation.outcome,
+                    &mut candidate_wins,
+                    &mut baseline_wins,
+                    &mut draws,
+                );
+            }
+            let (llr, drawelo) = outcome_llr(variant, config, candidate_wins, baseline_wins, draws);
+            let walk = evaluate_outcomes_sequential(&observations, config, variant, &bounds);
+            RunAnalysis {
                 llr,
-                Some(drawelo),
-                "belo",
-                None,
-            )
+                drawelo,
+                candidate_wins,
+                baseline_wins,
+                draws,
+                decision_llr: walk.llr,
+                decision_drawelo: walk.drawelo,
+                decision_candidate_wins: walk.candidate_wins,
+                decision_baseline_wins: walk.baseline_wins,
+                decision_draws: walk.draws,
+                analysis_unit: if paired_by_id { "pair" } else { "trial" },
+                available_observation_count: walk.available_observation_count,
+                analyzed_observation_count: walk.analyzed_observation_count,
+                stopping_observation_count: walk.stopping_observation_count,
+                stopping_observation_reason: walk.stopping_reason,
+                available_record_count: walk.available_record_count,
+                analyzed_record_count: walk.analyzed_record_count,
+                pentanomial: None,
+            }
         }
         SprtVariant::Pentanomial => {
             let (completed_in_order, raw_trial_count) = pentanomial_collector.finish()?;
@@ -585,65 +866,57 @@ where
             );
             let llr = walk.llr;
             let (baseline_wins, candidate_wins, draws) = net_pentanomial_buckets(&walk.buckets);
-            (
+            RunAnalysis {
+                llr,
+                drawelo: None,
                 candidate_wins,
                 baseline_wins,
                 draws,
-                llr,
-                None,
-                "elo",
-                Some((walk, raw_trial_count)),
-            )
+                decision_llr: llr,
+                decision_drawelo: None,
+                decision_candidate_wins: candidate_wins,
+                decision_baseline_wins: baseline_wins,
+                decision_draws: draws,
+                analysis_unit: "pair",
+                available_observation_count: walk.available_paired_count,
+                analyzed_observation_count: walk.analyzed_paired_count,
+                stopping_observation_count: walk.stopping_pair_count,
+                stopping_observation_reason: walk.stopping_reason,
+                available_record_count: raw_trial_count,
+                analyzed_record_count: walk.analyzed_paired_count * 2,
+                pentanomial: Some((walk, raw_trial_count)),
+            }
         }
     };
 
-    // For every variant but Pentanomial, `llr` is the one and only value ever computed, so
-    // deriving `verdict` from it against `bounds` here is the whole story.
-    //
-    // For Pentanomial, this generic check is only safe to reuse when the walk actually stopped
-    // via a genuine boundary crossing - see `PentanomialWalk`'s doc. It is *not* safe when the
-    // walk instead ran out of data without ever deciding (`stopping_pair_count: None`): in that
-    // case the crossing check may never have been evaluated even once (e.g. `min_paired_ids`
-    // set higher than the pairs actually available), so the raw accumulated `llr` can sit past a
-    // bound purely by accident, never having been checked against it - reusing the generic path
-    // there would silently resurrect the exact look-ahead bug this module exists to close. That
-    // case is special-cased below to force `Inconclusive` unconditionally instead.
-    let pentanomial_never_decided = matches!(
-        &pentanomial,
-        Some((walk, _)) if walk.stopping_pair_count.is_none()
-    );
-    let (verdict, mut reason) = if pentanomial_never_decided {
-        (
-            Verdict::Inconclusive,
-            format!(
-                "LLR {llr:.3} is within ({:.3}, {:.3}): keep testing",
-                bounds.lower, bounds.upper
-            ),
-        )
-    } else if llr >= bounds.upper {
-        (
+    let unit = if variant == SprtVariant::Trinomial {
+        "belo"
+    } else {
+        "elo"
+    };
+    let (verdict, mut reason) = match analysis.stopping_observation_reason {
+        "upper_bound_crossed" => (
             Verdict::Pass,
             format!(
-                "LLR {llr:.3} reached the upper bound {:.3}: reject H0 ({unit} <= {:+.1}), accept H1 ({unit} >= {:+.1})",
-                bounds.upper, config.elo0, config.elo1
+                "LLR {:.3} reached the upper bound {:.3}: reject H0 ({unit} <= {:+.1}), accept H1 ({unit} >= {:+.1})",
+                analysis.decision_llr, bounds.upper, config.elo0, config.elo1
             ),
-        )
-    } else if llr <= bounds.lower {
-        (
+        ),
+        "lower_bound_crossed" => (
             Verdict::Fail,
             format!(
-                "LLR {llr:.3} reached the lower bound {:.3}: reject H1 ({unit} >= {:+.1}), accept H0 ({unit} <= {:+.1})",
-                bounds.lower, config.elo1, config.elo0
+                "LLR {:.3} reached the lower bound {:.3}: reject H1 ({unit} >= {:+.1}), accept H0 ({unit} <= {:+.1})",
+                analysis.decision_llr, bounds.lower, config.elo1, config.elo0
             ),
-        )
-    } else {
-        (
+        ),
+        "max_paired_ids_reached" | "insufficient_data" => (
             Verdict::Inconclusive,
             format!(
-                "LLR {llr:.3} is within ({:.3}, {:.3}): keep testing",
-                bounds.lower, bounds.upper
+                "LLR {:.3} is within ({:.3}, {:.3}): keep testing",
+                analysis.decision_llr, bounds.lower, bounds.upper
             ),
-        )
+        ),
+        _ => unreachable!("sequential walk returned an unknown stopping reason"),
     };
 
     let (
@@ -654,7 +927,7 @@ where
         stopping_pair_count,
         stopping_reason,
         ignored_pairs_after_stop,
-    ) = match pentanomial {
+    ) = match analysis.pentanomial {
         Some((walk, raw_trial_count)) => {
             if walk.stopping_reason == "insufficient_data"
                 && min_paired_ids.is_some_and(|min| walk.analyzed_paired_count < min)
@@ -688,21 +961,26 @@ where
         verdict,
         validity: Validity::Valid,
         promotion: Promotion::decide(Validity::Valid, verdict),
-        llr,
+        llr: analysis.llr,
+        decision_llr: analysis.decision_llr,
         lower_bound: bounds.lower,
         upper_bound: bounds.upper,
         elo0: config.elo0,
         elo1: config.elo1,
         alpha: config.alpha,
         beta: config.beta,
-        candidate_wins,
-        baseline_wins,
-        draws,
+        candidate_wins: analysis.candidate_wins,
+        baseline_wins: analysis.baseline_wins,
+        draws: analysis.draws,
+        decision_candidate_wins: analysis.decision_candidate_wins,
+        decision_baseline_wins: analysis.decision_baseline_wins,
+        decision_draws: analysis.decision_draws,
         timeouts,
         crashes,
         invalid,
         failure_breakdown: failures,
-        drawelo,
+        drawelo: analysis.drawelo,
+        decision_drawelo: analysis.decision_drawelo,
         sprt_variant: variant.label(),
         pentanomial_counts,
         raw_trial_count,
@@ -711,6 +989,17 @@ where
         stopping_pair_count,
         stopping_reason,
         ignored_pairs_after_stop,
+        analysis_unit: analysis.analysis_unit,
+        available_observation_count: analysis.available_observation_count,
+        analyzed_observation_count: analysis.analyzed_observation_count,
+        stopping_observation_count: analysis.stopping_observation_count,
+        stopping_observation_reason: analysis.stopping_observation_reason,
+        ignored_observations_after_stop: analysis.available_observation_count
+            - analysis.analyzed_observation_count,
+        available_record_count: analysis.available_record_count,
+        analyzed_record_count: analysis.analyzed_record_count,
+        ignored_records_after_stop: analysis.available_record_count
+            - analysis.analyzed_record_count,
         min_paired_ids,
         max_paired_ids,
         require_complete_pairs,
@@ -727,7 +1016,7 @@ impl SprtReport {
     pub fn to_markdown(&self) -> String {
         let b = &self.failure_breakdown.baseline;
         let c = &self.failure_breakdown.candidate;
-        let unit = if self.drawelo.is_some() {
+        let unit = if self.sprt_variant == "trinomial" {
             "belo"
         } else {
             "elo"
@@ -738,10 +1027,13 @@ impl SprtReport {
              Validity: {validity}\n\
              Promotion: {promotion}\n\n\
              H0: {unit} <= {elo0:+.1} / H1: {unit} >= {elo1:+.1} (alpha={alpha}, beta={beta})\n\
-             LLR: {llr:.4} (bounds: {lower:.4} to {upper:.4})\n\
-             {drawelo_line}\n\
+             Decision LLR: {decision_llr:.4} (bounds: {lower:.4} to {upper:.4})\n\
+             Full-input LLR: {llr:.4}\n\
+             {drawelo_line}\
              {reason}\n\n\
-             Trials: candidate_wins={candidate_wins}, baseline_wins={baseline_wins}, draws={draws}\n\
+             Schedule: {analyzed_observations} of {available_observations} {analysis_unit}(s) analyzed; stop={stopping_reason}; ignored={ignored_observations} {analysis_unit}(s) / {ignored_records} raw record(s)\n\
+             Decision outcomes: candidate_wins={decision_candidate_wins}, baseline_wins={decision_baseline_wins}, draws={decision_draws}\n\
+             Full-input outcomes: candidate_wins={candidate_wins}, baseline_wins={baseline_wins}, draws={draws}\n\
              {pentanomial_line}\n\
              Status counts:\n\
              - timeout: {timeouts} (baseline={b_timeout}, candidate={c_timeout})\n\
@@ -754,14 +1046,26 @@ impl SprtReport {
             elo1 = self.elo1,
             alpha = self.alpha,
             beta = self.beta,
+            decision_llr = self.decision_llr,
             llr = self.llr,
             lower = self.lower_bound,
             upper = self.upper_bound,
-            drawelo_line = match self.drawelo {
-                Some(d) => format!("Estimated drawelo: {d:+.1}\n"),
-                None => String::new(),
+            drawelo_line = match (self.decision_drawelo, self.drawelo) {
+                (Some(decision), Some(full)) => format!(
+                    "Decision-prefix drawelo: {decision:+.1}\nFull-input drawelo: {full:+.1}\n"
+                ),
+                _ => String::new(),
             },
             reason = self.reason,
+            analyzed_observations = self.analyzed_observation_count,
+            available_observations = self.available_observation_count,
+            analysis_unit = self.analysis_unit,
+            stopping_reason = self.stopping_observation_reason,
+            ignored_observations = self.ignored_observations_after_stop,
+            ignored_records = self.ignored_records_after_stop,
+            decision_candidate_wins = self.decision_candidate_wins,
+            decision_baseline_wins = self.decision_baseline_wins,
+            decision_draws = self.decision_draws,
             candidate_wins = self.candidate_wins,
             baseline_wins = self.baseline_wins,
             draws = self.draws,
@@ -998,6 +1302,134 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.stopping_observation_count, None);
+        assert_eq!(report.stopping_observation_reason, "insufficient_data");
+        assert_eq!(report.available_observation_count, 2);
+        assert_eq!(report.analyzed_observation_count, 2);
+        assert_eq!(report.ignored_observations_after_stop, 0);
+    }
+
+    #[test]
+    fn wald_and_trinomial_retain_the_first_crossing_even_if_the_full_input_drifts_back() {
+        let config = SprtConfig::new(0.0, 100.0, 0.4, 0.4).unwrap();
+        let records = vec![
+            (1, rec(Some("candidate_win"))),
+            (2, rec(Some("candidate_win"))),
+            (3, rec(Some("baseline_win"))),
+            (4, rec(Some("baseline_win"))),
+        ];
+
+        for variant in [SprtVariant::Wald, SprtVariant::Trinomial] {
+            let report = run(
+                ok_iter(&records),
+                &config,
+                variant,
+                false,
+                FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(report.verdict, Verdict::Pass);
+            assert!(report.decision_llr >= report.upper_bound);
+            assert!(report.llr > report.lower_bound && report.llr < report.upper_bound);
+            assert_eq!(report.candidate_wins, 2);
+            assert_eq!(report.baseline_wins, 2);
+            assert_eq!(report.decision_candidate_wins, 2);
+            assert_eq!(report.decision_baseline_wins, 0);
+            assert_eq!(report.available_observation_count, 4);
+            assert_eq!(report.analyzed_observation_count, 2);
+            assert_eq!(report.stopping_observation_count, Some(2));
+            assert_eq!(report.stopping_observation_reason, "upper_bound_crossed");
+            assert_eq!(report.ignored_observations_after_stop, 2);
+            assert_eq!(report.available_record_count, 4);
+            assert_eq!(report.analyzed_record_count, 2);
+            assert_eq!(report.ignored_records_after_stop, 2);
+        }
+    }
+
+    #[test]
+    fn wald_and_trinomial_treat_input_order_as_the_schedule() {
+        let config = SprtConfig::new(0.0, 100.0, 0.4, 0.4).unwrap();
+        let candidate_first = vec![
+            (1, rec(Some("candidate_win"))),
+            (2, rec(Some("candidate_win"))),
+            (3, rec(Some("baseline_win"))),
+            (4, rec(Some("baseline_win"))),
+        ];
+        let baseline_first = vec![
+            (1, rec(Some("baseline_win"))),
+            (2, rec(Some("baseline_win"))),
+            (3, rec(Some("candidate_win"))),
+            (4, rec(Some("candidate_win"))),
+        ];
+
+        for variant in [SprtVariant::Wald, SprtVariant::Trinomial] {
+            let first = run(
+                ok_iter(&candidate_first),
+                &config,
+                variant,
+                false,
+                FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+            let reversed = run(
+                ok_iter(&baseline_first),
+                &config,
+                variant,
+                false,
+                FailurePolicy::ReportOnly,
+                false,
+                None,
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(first.llr, reversed.llr);
+            assert_eq!(first.verdict, Verdict::Pass);
+            assert_eq!(reversed.verdict, Verdict::Fail);
+            assert_eq!(first.stopping_observation_count, Some(2));
+            assert_eq!(reversed.stopping_observation_count, Some(2));
+        }
+    }
+
+    #[test]
+    fn paired_wald_checks_boundaries_only_after_a_pair_completes() {
+        let config = SprtConfig::new(0.0, 100.0, 0.4, 0.4).unwrap();
+        let records = vec![
+            (1, rec_with_id(Some("p1"), Some("candidate_win"))),
+            (2, rec_with_id(Some("p1"), Some("candidate_win"))),
+            (3, rec_with_id(Some("p2"), Some("candidate_win"))),
+            (4, rec_with_id(Some("p2"), Some("candidate_win"))),
+            (5, rec_with_id(Some("p3"), Some("baseline_win"))),
+            (6, rec_with_id(Some("p3"), Some("baseline_win"))),
+            (7, rec_with_id(Some("p4"), Some("baseline_win"))),
+            (8, rec_with_id(Some("p4"), Some("baseline_win"))),
+        ];
+        let report = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            true,
+            FailurePolicy::ReportOnly,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.verdict, Verdict::Pass);
+        assert_eq!(report.analysis_unit, "pair");
+        assert_eq!(report.available_observation_count, 4);
+        assert_eq!(report.analyzed_observation_count, 2);
+        assert_eq!(report.available_record_count, 8);
+        assert_eq!(report.analyzed_record_count, 4);
+        assert_eq!(report.ignored_records_after_stop, 4);
     }
 
     #[test]

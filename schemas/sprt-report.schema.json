@@ -11,6 +11,7 @@
     "validity",
     "promotion",
     "llr",
+    "decision_llr",
     "lower_bound",
     "upper_bound",
     "elo0",
@@ -20,12 +21,16 @@
     "candidate_wins",
     "baseline_wins",
     "draws",
+    "decision_candidate_wins",
+    "decision_baseline_wins",
+    "decision_draws",
     "timeouts",
     "crashes",
     "invalid",
     "failure_breakdown",
     "reason",
     "drawelo",
+    "decision_drawelo",
     "sprt_variant",
     "pentanomial_counts",
     "raw_trial_count",
@@ -34,6 +39,15 @@
     "stopping_pair_count",
     "stopping_reason",
     "ignored_pairs_after_stop",
+    "analysis_unit",
+    "available_observation_count",
+    "analyzed_observation_count",
+    "stopping_observation_count",
+    "stopping_observation_reason",
+    "ignored_observations_after_stop",
+    "available_record_count",
+    "analyzed_record_count",
+    "ignored_records_after_stop",
     "min_paired_ids",
     "max_paired_ids",
     "require_complete_pairs"
@@ -59,7 +73,11 @@
     },
     "llr": {
       "type": "number",
-      "description": "Accumulated log-likelihood ratio. For --sprt-variant pentanomial, this is the LLR at the sequential stopping point (see stopping_pair_count), not a naive recompute over the whole input - the two can differ whenever the true stopping point falls before the input's end. When stopping_pair_count is null, no stopping point was reached: this is the raw running LLR over all available pairs, never compared against lower_bound/upper_bound, and it can sit past either bound while verdict is still inconclusive. Consumers must read verdict/promotion, never re-derive a decision from llr vs the bounds."
+      "description": "Backward-compatible accumulated log-likelihood ratio. For wald/trinomial this retains the full-input aggregate meaning from schema v1; use decision_llr for the sequential verdict prefix. For pentanomial this remains the stopping-prefix LLR. Consumers must read verdict/promotion, never re-derive a decision from llr vs the bounds."
+    },
+    "decision_llr": {
+      "type": "number",
+      "description": "LLR at the first eligible boundary crossing, or after all analyzed observations when no boundary was crossed. This is the LLR that determines verdict."
     },
     "lower_bound": { "type": "number" },
     "upper_bound": { "type": "number" },
@@ -80,9 +98,12 @@
       "exclusiveMaximum": 1,
       "description": "Guaranteed false-negative rate (accepting H0 when H1 is true)."
     },
-    "candidate_wins": { "type": "integer", "minimum": 0 },
-    "baseline_wins": { "type": "integer", "minimum": 0 },
-    "draws": { "type": "integer", "minimum": 0 },
+    "candidate_wins": { "type": "integer", "minimum": 0, "description": "Full-input aggregate for wald/trinomial; analyzed-prefix net count for pentanomial, preserving the existing schema v1 meaning." },
+    "baseline_wins": { "type": "integer", "minimum": 0, "description": "Full-input aggregate for wald/trinomial; analyzed-prefix net count for pentanomial, preserving the existing schema v1 meaning." },
+    "draws": { "type": "integer", "minimum": 0, "description": "Full-input aggregate for wald/trinomial; analyzed-prefix net count for pentanomial, preserving the existing schema v1 meaning." },
+    "decision_candidate_wins": { "type": "integer", "minimum": 0 },
+    "decision_baseline_wins": { "type": "integer", "minimum": 0 },
+    "decision_draws": { "type": "integer", "minimum": 0 },
     "timeouts": { "type": "integer", "minimum": 0 },
     "crashes": { "type": "integer", "minimum": 0 },
     "invalid": { "type": "integer", "minimum": 0 },
@@ -98,7 +119,11 @@
     "reason": { "type": "string" },
     "drawelo": {
       "type": ["number", "null"],
-      "description": "Estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial (reported for transparency, since it's estimated from the same data being judged); null for wald/pentanomial, neither of which models a draw rate."
+      "description": "Full-input estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial; null for wald/pentanomial."
+    },
+    "decision_drawelo": {
+      "type": ["number", "null"],
+      "description": "Estimated draw-rate nuisance parameter at the sequential decision prefix. Some only for --sprt-variant trinomial; null for wald/pentanomial."
     },
     "sprt_variant": {
       "type": "string",
@@ -151,6 +176,38 @@
       "type": ["integer", "null"],
       "minimum": 0,
       "description": "Some only for --sprt-variant pentanomial: available_paired_count - paired_count - pairs present in the input but never folded into the analysis because they completed after the sequential stopping point. 0 (not null) when nothing was ignored; null means this isn't a pentanomial run at all."
+    },
+    "analysis_unit": {
+      "type": "string",
+      "enum": ["trial", "pair"],
+      "description": "Unit used by the generic sequential counts: trial for unpaired wald/trinomial; pair for paired wald/trinomial and pentanomial."
+    },
+    "available_observation_count": { "type": "integer", "minimum": 0 },
+    "analyzed_observation_count": { "type": "integer", "minimum": 0 },
+    "stopping_observation_count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Observation count at a decisive boundary crossing or configured pentanomial maximum; null when the input ended without a stopping event."
+    },
+    "stopping_observation_reason": {
+      "type": "string",
+      "enum": ["upper_bound_crossed", "lower_bound_crossed", "max_paired_ids_reached", "insufficient_data"]
+    },
+    "ignored_observations_after_stop": { "type": "integer", "minimum": 0 },
+    "available_record_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Raw input records that produced the available statistical observations."
+    },
+    "analyzed_record_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Raw input records represented in the analyzed stopping prefix."
+    },
+    "ignored_records_after_stop": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "available_record_count - analyzed_record_count."
     },
     "min_paired_ids": {
       "type": ["integer", "null"],

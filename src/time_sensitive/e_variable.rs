@@ -81,10 +81,9 @@ pub fn log_phi(a: f64, p0: f64, success: bool) -> f64 {
 /// rather than calling into `stats::sprt`: this module's `update()` needs a live, resumable
 /// per-trial state machine with a *time*-aware threshold/report shape (draws advance time,
 /// rejection is time-stamped, `1/alpha` is compared in log-wealth space), none of which
-/// `stats::sprt`'s batch/aggregate-count API expects to provide (see `sprt.rs`'s own doc for why
-/// it computes its LLR from final aggregate counts rather than replaying a sequence). Sharing
-/// code across that shape mismatch would cost more clarity than the few lines of duplication it
-/// would save.
+/// `stats::sprt`'s stateless formula helpers provide. `sprt::run` now replays its own schedule,
+/// but it does not expose the resumable, time-aware state machine needed here. Sharing code across
+/// that shape mismatch would cost more clarity than the few lines of duplication it would save.
 pub(crate) fn gro_action(hypotheses: &BernoulliHypotheses) -> f64 {
     hypotheses.p1
 }

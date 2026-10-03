@@ -333,6 +333,92 @@ fn sprt_small_sample_stays_inconclusive() {
 }
 
 #[test]
+fn sprt_wald_keeps_the_first_crossing_and_reports_the_ignored_suffix() {
+    let output = veridict()
+        .args([
+            "sprt",
+            "tests/fixtures/sprt_cross_then_revert.jsonl",
+            "--elo0",
+            "0",
+            "--elo1",
+            "100",
+            "--alpha",
+            "0.4",
+            "--beta",
+            "0.4",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["verdict"], "pass");
+    assert_eq!(report["candidate_wins"], 2);
+    assert_eq!(report["baseline_wins"], 2);
+    assert_eq!(report["decision_candidate_wins"], 2);
+    assert_eq!(report["decision_baseline_wins"], 0);
+    assert_eq!(report["available_observation_count"], 4);
+    assert_eq!(report["analyzed_observation_count"], 2);
+    assert_eq!(report["stopping_observation_count"], 2);
+    assert_eq!(report["stopping_observation_reason"], "upper_bound_crossed");
+    assert_eq!(report["ignored_observations_after_stop"], 2);
+    assert_eq!(report["ignored_records_after_stop"], 2);
+}
+
+#[test]
+fn sprt_wald_and_trinomial_use_input_order_as_the_schedule() {
+    let wald_reversed = veridict()
+        .args([
+            "sprt",
+            "tests/fixtures/sprt_same_totals_reverse_order.jsonl",
+            "--elo0",
+            "0",
+            "--elo1",
+            "100",
+            "--alpha",
+            "0.4",
+            "--beta",
+            "0.4",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(wald_reversed.status.code(), Some(1));
+    let wald_report: serde_json::Value = serde_json::from_slice(&wald_reversed.stdout).unwrap();
+    assert_eq!(wald_report["verdict"], "fail");
+    assert_eq!(wald_report["stopping_observation_count"], 2);
+
+    for (fixture, expected_code, expected_verdict) in [
+        ("tests/fixtures/sprt_cross_then_revert.jsonl", 0, "pass"),
+        (
+            "tests/fixtures/sprt_same_totals_reverse_order.jsonl",
+            1,
+            "fail",
+        ),
+    ] {
+        let output = veridict()
+            .args([
+                "sprt",
+                fixture,
+                "--sprt-variant",
+                "trinomial",
+                "--belo0",
+                "0",
+                "--belo1",
+                "100",
+                "--alpha",
+                "0.4",
+                "--beta",
+                "0.4",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_code));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["verdict"], expected_verdict);
+        assert_eq!(report["stopping_observation_count"], 2);
+    }
+}
+
+#[test]
 fn sprt_rejects_elo0_not_less_than_elo1() {
     veridict()
         .args(["sprt", "-", "--elo0", "10", "--elo1", "0"])
