@@ -11,11 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-10-13
+
 ### Added
 
 - Added `sprt::SprtRunOptions` and `sprt::run_with_options` as an additive typed library API.
   The existing positional `sprt::run` remains a behavior-compatible wrapper, while the CLI now
   uses the typed path. Defaults and variant-specific validation are documented and tested.
+
+### Fixed
+
+- Reject SPRT configurations where `alpha + beta >= 1`, which would invert or collapse the Wald
+  decision boundaries and could produce an immediate incorrect verdict.
 
 ## [0.19.2] - 2026-10-12
 

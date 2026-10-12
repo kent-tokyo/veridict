@@ -113,6 +113,9 @@ upper = ln((1 - beta) / alpha)
 lower = ln(beta / (1 - alpha))
 ```
 
+Both rates must be in `(0, 1)` and `alpha + beta` must be less than `1`; otherwise the lower
+boundary would meet or exceed the upper boundary and the configuration is rejected.
+
 The upper boundary gives `pass`, the lower boundary gives `fail`, and no crossing gives
 `inconclusive`.
 

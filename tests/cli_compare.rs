@@ -560,6 +560,18 @@ fn sprt_rejects_elo0_not_less_than_elo1() {
 }
 
 #[test]
+fn sprt_rejects_alpha_beta_sum_at_or_above_one() {
+    veridict()
+        .args([
+            "sprt", "-", "--elo0", "0", "--elo1", "10", "--alpha", "0.9", "--beta", "0.9",
+        ])
+        .write_stdin("{\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("alpha + beta must be less than 1"));
+}
+
+#[test]
 fn sprt_trinomial_variant_reports_drawelo() {
     let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"draw\"}\n{\"result\":\"draw\"}\n{\"result\":\"baseline_win\"}\n";
     veridict()
@@ -1248,6 +1260,17 @@ fn power_sprt_rejects_elo0_greater_than_elo1_via_reused_sprt_config_validation()
         .code(3)
         .stderr(predicate::str::contains("elo0"))
         .stderr(predicate::str::contains("elo1"));
+}
+
+#[test]
+fn power_sprt_rejects_alpha_beta_sum_at_or_above_one() {
+    veridict()
+        .args([
+            "power", "--sprt", "--elo0", "0", "--elo1", "20", "--alpha", "0.5", "--beta", "0.5",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("alpha + beta must be less than 1"));
 }
 
 #[test]

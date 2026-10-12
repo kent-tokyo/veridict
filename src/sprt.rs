@@ -145,6 +145,12 @@ impl SprtConfig {
                 )));
             }
         }
+        if alpha + beta >= 1.0 {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "alpha + beta must be less than 1, got {}",
+                alpha + beta
+            )));
+        }
         Ok(Self {
             elo0,
             elo1,
@@ -1630,6 +1636,22 @@ mod tests {
             SprtConfig::new(0.0, 10.0, 0.05, 1.0),
             Err(VeridictError::InvalidThreshold(_))
         ));
+    }
+
+    #[test]
+    fn rejects_alpha_beta_sum_at_or_above_one() {
+        for (alpha, beta) in [(0.5, 0.5), (0.9, 0.9)] {
+            match SprtConfig::new(0.0, 10.0, alpha, beta) {
+                Err(error @ VeridictError::InvalidThreshold(_)) => {
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("alpha + beta must be less than 1")
+                    );
+                }
+                _ => panic!("alpha={alpha}, beta={beta} should be rejected"),
+            }
+        }
     }
 
     #[test]

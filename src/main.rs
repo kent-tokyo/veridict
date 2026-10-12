@@ -261,7 +261,8 @@ struct SprtArgs {
     #[arg(long, default_value_t = 0.05)]
     alpha: f64,
 
-    /// False-negative rate: probability of accepting H0 when H1 is true.
+    /// False-negative rate: probability of accepting H0 when H1 is true. Alpha and beta must sum
+    /// to less than 1 so the lower boundary remains below the upper boundary.
     #[arg(long, default_value_t = 0.05)]
     beta: f64,
 
@@ -518,6 +519,7 @@ struct PowerArgs {
     alpha: f64,
 
     /// False-negative rate for --sprt. Same meaning and default as `veridict sprt --beta`.
+    /// Alpha and beta must sum to less than 1.
     #[arg(long, default_value_t = 0.05)]
     beta: f64,
 
