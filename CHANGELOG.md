@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Defined the independent candidate-adoption gate scope, generic integration boundary, and
+  correctness-first development priorities in English and Japanese.
+- Generalized run-envelope schema descriptions without changing validation rules or field names.
+
 ## [0.19.3] - 2026-10-13
 
 ### Added

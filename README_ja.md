@@ -2,8 +2,13 @@
 
 [English](README.md) | 日本語
 
-`veridict` は、評価結果から `pass`、`fail`、`inconclusive` を返す用途非依存の統計ゲートです。
-ベンチマークの実行や実験履歴の管理は行いません。不十分または不正な証拠を合格にはしません。
+`veridict` は、候補の採用判断に使う独立したRustライブラリとCLIです。外部で集めた評価結果を読み、
+宣言した条件で候補と基準を比較し、理由とともに `pass`、`fail`、`inconclusive` を返します。
+統計仕様は特定の用途に依存しません。
+
+中心となる用途は、ペア比較、逐次検定、実行上の失敗を含む再現可能な回帰判定です。評価の実行と
+採用後の操作は呼び出し側が担います。責任範囲と開発の優先順位は
+[プロダクトの目的と範囲](docs/product-scope_ja.md)にまとめています。
 
 ## インストール
 
@@ -126,6 +131,7 @@ JSONが機械処理向けの契約で、Markdownは人向けの要約です。�
 
 ## ドキュメント
 
+- [`docs/product-scope_ja.md`](docs/product-scope_ja.md): 製品の目的、責任範囲、開発の優先順位。
 - [`docs/metrics_ja.md`](docs/metrics_ja.md): 実装済みの統計仕様とレポート契約。
 - [`docs/research-map_ja.md`](docs/research-map_ja.md): 未実装候補と着手条件。
 - [`CHANGELOG.md`](CHANGELOG.md): リリース履歴。

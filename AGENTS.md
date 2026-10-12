@@ -13,6 +13,20 @@ It is the statistical decision layer that consumes evaluation results and return
 
 The name means: **verify results and return a verdict**.
 
+## Product Direction
+
+The authoritative product boundaries and priorities are documented in
+[`docs/product-scope.md`](docs/product-scope.md) and its Japanese translation.
+Prioritize reliable candidate adoption decisions over expanding the statistical catalog.
+Fix incorrect passes and invalid uncertainty before adding methods. Paired and sequential
+comparisons, technical failures, and reproducible reports are central workflows.
+
+Consumer projects must depend on veridict, never the reverse. Keep private consumer names and
+internal prioritization context out of tracked or published documents, schemas, examples, and
+package metadata. Record private planning context only in Git-ignored local notes.
+When present, consult `tasks/product-direction.md` for local prioritization; never copy its
+private context into tracked files or distributions.
+
 ## Core Mission
 
 Build a lightweight Rust library and CLI that can compare two systems, models, algorithms, prompts, engines, or configurations from structured result files.
@@ -402,26 +416,18 @@ It should not own every way of producing results.
 
 ## Relationship to Other Projects
 
-`veridict` may be used by:
-
-* Sekirei for engine strength regression
-* OCR projects for accuracy regression
-* SDS extraction tools for structured output quality
-* chemistry tools for candidate ranking quality
-* LLM workflows for prompt/model comparison
-* optimization projects for algorithm comparison
-
-However, `veridict` must not depend on any of these projects.
+External evaluation tools may use veridict for regression and adoption decisions across numeric,
+outcome-based, and model-evaluation workflows. They own evaluation execution, domain-specific
+metrics, adapters, and adoption actions. Veridict owns the generic result-to-decision contract.
 
 Keep the dependency direction one-way:
 
 ```text
-sekirei / ocr / sds / llm tools
-        depend on
-veridict
+external evaluation tools -> veridict
 ```
 
-Never make `veridict` depend on them.
+Builds, tests, and runtime behavior must not require a consumer project's repository, artifacts,
+services, or credentials. Public materials describe generic workflows and contracts.
 
 ## Development Workflow
 

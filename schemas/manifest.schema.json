@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/manifest.schema.json",
   "title": "veridict verify-run manifest",
-  "description": "manifest.toml's full shape, the first argument to `veridict verify-run manifest.toml games.jsonl`. Embeds experiment-envelope.schema.json's 14 shared fields directly (this is a flat document, not nested - Sekirei's other tools vendor experiment-envelope.schema.json's field names verbatim, this file additionally declares veridict-specific fields for verify-run's own checks). Every field is an opaque declared expectation - veridict compares it against games.jsonl's per-record values (see verify-run-record.schema.json), it never computes, opens, or interprets any of them itself. additionalProperties is false deliberately: a typo'd key here must not silently skip the check it was meant to enable.",
+  "description": "Manifest for veridict verify-run: declares the expected structure and identifiers of an evaluation run. Embeds the 14 fields from experiment-envelope.schema.json directly in a flat document and adds verification settings. Supported identifiers are compared with per-record declarations in verify-run-record.schema.json; artifact files are never opened, hashed, or authenticated. additionalProperties is false so an unknown key cannot silently disable an intended check.",
   "type": "object",
   "additionalProperties": false,
   "required": ["manifest_schema_version"],

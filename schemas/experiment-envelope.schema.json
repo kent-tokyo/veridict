@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/experiment-envelope.schema.json",
-  "title": "Sekirei experiment envelope",
-  "description": "A shared, cross-repo contract of opaque identifiers/hashes/seeds - not veridict-specific. Meant to be vendored verbatim (copied, not imported as a library) into each of a pipeline's tools (e.g. a teacher-observation generator, a stability/calibration tool, a gate-priority predictor, and veridict as the final judgment layer), so a downstream tool can join a verdict back to its own provenance store without any tool needing to understand what another tool's identifiers mean. veridict treats every field here as an opaque string/scalar: compared for consistency (equality/no-drift) where a check exists for it, never computed, never interpreted, never assigned domain meaning. `manifest.schema.json` embeds these same field names directly (Sekirei's veridict manifest is a flat document, not a nested one) plus its own additional, non-envelope fields - see that file. A repo wanting fields beyond this contract should define its own extended schema alongside a verbatim copy of this one, not modify this file in place.",
+  "title": "Evaluation run envelope",
+  "description": "A reusable contract of opaque run identifiers, hashes, and seeds for external evaluation tools. Consumers may copy this schema to exchange provenance fields without interpreting one another's identifiers. veridict compares supported fields for consistency and echoes the remaining metadata; it never opens artifacts, computes their hashes, or authenticates their origin. manifest.schema.json embeds these field names in a flat document alongside verify-run configuration. Schema extensions belong in separately versioned contracts.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

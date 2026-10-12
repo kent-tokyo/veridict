@@ -3,7 +3,12 @@
 English | [日本語](research-map_ja.md)
 
 This file records plausible features that are not shipped. It is not a schedule. Shipped behavior
-belongs in [`metrics.md`](metrics.md).
+belongs in [`metrics.md`](metrics.md). Product boundaries and development priorities are defined
+in [Product scope](product-scope.md).
+
+Correctness fixes to shipped decisions take priority over these candidates. In particular, false
+passes, non-finite calculations, and degenerate confidence intervals are reliability work, not
+optional research refinements.
 
 A candidate moves into implementation only when it has a concrete workflow, a defined statistical
 claim, suitable calibration evidence, and a license-compatible implementation path. Until then,

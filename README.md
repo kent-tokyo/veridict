@@ -7,9 +7,14 @@ English | [日本語](README_ja.md)
 [![docs.rs](https://img.shields.io/docsrs/veridict)](https://docs.rs/veridict)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-`veridict` is a small, domain-agnostic statistical gate. It reads evaluation results and returns
-`pass`, `fail`, or `inconclusive`. It does not run benchmarks or track experiments, and it does not
-turn weak or invalid evidence into a pass.
+`veridict` is an independent Rust library and CLI for candidate adoption decisions. It reads
+externally collected evaluation results, compares a candidate against a baseline under declared
+criteria, and returns `pass`, `fail`, or `inconclusive` with an explanation. Its statistical
+contracts are domain-agnostic.
+
+The central workflow is a reproducible regression gate, including paired results, sequential
+testing, and execution failures. Evaluation runners and adoption actions stay with the caller.
+See [Product scope](docs/product-scope.md) for responsibilities and development priorities.
 
 ## Install
 
@@ -134,6 +139,7 @@ JSON is the machine-readable contract. Markdown is a human-readable summary. Use
 
 ## Documentation
 
+- [`docs/product-scope.md`](docs/product-scope.md): purpose, responsibilities, and development priorities.
 - [`docs/metrics.md`](docs/metrics.md): shipped statistical and report contracts.
 - [`docs/research-map.md`](docs/research-map.md): unshipped candidates and activation conditions.
 - [`CHANGELOG.md`](CHANGELOG.md): release history.
