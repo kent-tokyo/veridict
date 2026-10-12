@@ -9,6 +9,9 @@ mod binomial_coverage;
 #[path = "calibration/bootstrap_coverage.rs"]
 mod bootstrap_coverage;
 
+#[path = "calibration/paired_elo_coverage.rs"]
+mod paired_elo_coverage;
+
 #[path = "calibration/quantile_coverage.rs"]
 mod quantile_coverage;
 

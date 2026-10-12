@@ -212,6 +212,11 @@ pub enum MetricKind {
     SignTest,
     #[serde(rename = "elo")]
     Elo,
+    /// Fixed-sample logistic Elo over strict two-trial pairs, with a pair-level bootstrap CI and
+    /// all five combined-score buckets retained. This is distinct from sequential pentanomial
+    /// SPRT and does not change the existing `Elo` metric's net-pair behavior.
+    #[serde(rename = "paired-elo")]
+    PairedElo,
     #[serde(rename = "quantile-diff")]
     QuantileDiff,
     /// `(candidate - baseline) / baseline`, bootstrapped the same way `mean-diff` bootstraps
@@ -295,6 +300,13 @@ pub enum MetricConfig {
     Elo {
         failure_policy: FailurePolicy,
     },
+    /// Opt-in pair-score-aware fixed-sample Elo. Every input record must have an id and every id
+    /// must contribute exactly two usable outcomes; the CLI therefore requires
+    /// `--paired-by-id`. Kept separate so `MetricConfig::Elo` remains source- and behavior-
+    /// compatible.
+    PairedElo {
+        failure_policy: FailurePolicy,
+    },
     /// `quantile` is always in `(0, 1)` (validated in `new`) - the sample min/max has no
     /// well-behaved bootstrap distribution, so those endpoints are rejected rather than allowed
     /// through. `bootstrap_method` is never `Bca` here (also validated in `new`) - see
@@ -320,6 +332,7 @@ impl MetricConfig {
             Self::SignTest { .. } => MetricKind::SignTest,
             Self::MeanDiff { .. } => MetricKind::MeanDiff,
             Self::Elo { .. } => MetricKind::Elo,
+            Self::PairedElo { .. } => MetricKind::PairedElo,
             Self::QuantileDiff { .. } => MetricKind::QuantileDiff,
             Self::RelativeDiff { .. } => MetricKind::RelativeDiff,
         }
@@ -329,7 +342,7 @@ impl MetricConfig {
     /// same compatibility checks `compute_many` used to run on every call
     /// (`ci_method` other than `Wilson` is only valid for `WinRate`/
     /// `SignTest`; `failure_policy` other than `ReportOnly` is only valid
-    /// for `WinRate`/`Elo`; `Bca` isn't a valid `bootstrap_method` for
+    /// for `WinRate`/`Elo`/`PairedElo`; `Bca` isn't a valid `bootstrap_method` for
     /// `QuantileDiff` - see `VeridictError::IncompatibleBootstrapMethod`), now
     /// run once at construction instead of once per call. A caller that
     /// already knows which knobs its metric needs can construct a variant
@@ -367,6 +380,7 @@ impl MetricConfig {
             }
             MetricKind::MeanDiff
             | MetricKind::Elo
+            | MetricKind::PairedElo
             | MetricKind::QuantileDiff
             | MetricKind::RelativeDiff
                 if ci_method != CiMethod::Wilson =>
@@ -385,6 +399,7 @@ impl MetricConfig {
             MetricKind::SignTest => Ok(Self::SignTest { ci_method }),
             MetricKind::MeanDiff => Ok(Self::MeanDiff { bootstrap_method }),
             MetricKind::Elo => Ok(Self::Elo { failure_policy }),
+            MetricKind::PairedElo => Ok(Self::PairedElo { failure_policy }),
             MetricKind::QuantileDiff => {
                 let q = quantile.unwrap_or(0.5);
                 if !q.is_finite() || q <= 0.0 || q >= 1.0 {
@@ -412,6 +427,7 @@ impl MetricConfig {
             Self::WinRate { ci_method, .. } | Self::SignTest { ci_method } => *ci_method,
             Self::MeanDiff { .. }
             | Self::Elo { .. }
+            | Self::PairedElo { .. }
             | Self::QuantileDiff { .. }
             | Self::RelativeDiff { .. } => CiMethod::Wilson,
         }
@@ -621,6 +637,7 @@ fn build_report(
         design_effect: out.design_effect,
         scale_diagnostics: out.scale_diagnostics,
         tied_count: out.tied_count,
+        pair_score_counts: out.pair_score_counts,
         correction_method: None,
         family_size: None,
         achieved_alpha: None,
@@ -663,7 +680,12 @@ fn collect_data_quality(
     // doesn't change which side of 20% it lands on). Fix properly if this bites in practice: track
     // "outcome came from a failure" separately per aggregator and exclude it from `paired_count`
     // here, rather than trying to disentangle it from this already-summed total.
-    let total_trials = out.paired_count + out.timeouts + out.crashes + out.invalid;
+    let usable_trials = if metric == MetricKind::PairedElo {
+        out.paired_count.saturating_mul(2)
+    } else {
+        out.paired_count
+    };
+    let total_trials = usable_trials + out.timeouts + out.crashes + out.invalid;
     if total_trials > 0 {
         let failure_rate = (out.timeouts + out.crashes + out.invalid) as f64 / total_trials as f64;
         quality.high_failure_rate = failure_rate > 0.2;

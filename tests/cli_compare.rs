@@ -296,6 +296,137 @@ fn elo_metric_clear_pass_exits_zero() {
 }
 
 #[test]
+fn paired_elo_preserves_one_point_five_and_two_point_buckets() {
+    let fixture = format!(
+        "{}/tests/fixtures/paired_elo_pair_scores.jsonl",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = Command::cargo_bin("veridict")
+        .unwrap()
+        .args([
+            "compare",
+            &fixture,
+            "--metric",
+            "paired-elo",
+            "--paired-by-id",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["metric"], "paired-elo");
+    assert_eq!(report["paired_count"], 2);
+    assert_eq!(report["candidate_count"], 3);
+    assert_eq!(report["pair_score_counts"]["score_1_5"], 1);
+    assert_eq!(report["pair_score_counts"]["score_2_0"], 1);
+    assert_eq!(report["pair_score_counts"]["score_1_0"], 0);
+    assert!((report["effect"].as_f64().unwrap() - 338.04).abs() < 0.1);
+
+    // Legacy paired Elo intentionally nets both pairs to `candidate_win`; the opt-in metric must
+    // stay observably different rather than silently changing that established behavior.
+    let legacy = Command::cargo_bin("veridict")
+        .unwrap()
+        .args([
+            "compare",
+            &fixture,
+            "--metric",
+            "elo",
+            "--paired-by-id",
+            "--seed",
+            "42",
+        ])
+        .output()
+        .unwrap();
+    let legacy_report: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
+    assert_eq!(legacy_report["paired_count"], 2);
+    assert!(legacy_report.get("pair_score_counts").is_none());
+    assert!(legacy_report["effect"].as_f64().unwrap() > 1_000.0);
+}
+
+#[test]
+fn paired_elo_requires_paired_by_id() {
+    Command::cargo_bin("veridict")
+        .unwrap()
+        .args(["compare", "-", "--metric", "paired-elo"])
+        .write_stdin(
+            "{\"id\":\"p1\",\"result\":\"candidate_win\"}\n\
+             {\"id\":\"p1\",\"result\":\"draw\"}\n",
+        )
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("requires --paired-by-id"));
+}
+
+#[test]
+fn paired_elo_rejects_zero_bootstrap_resamples_without_panicking() {
+    Command::cargo_bin("veridict")
+        .unwrap()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "paired-elo",
+            "--paired-by-id",
+            "--resamples",
+            "0",
+        ])
+        .write_stdin(
+            "{\"id\":\"p1\",\"result\":\"candidate_win\"}\n\
+             {\"id\":\"p1\",\"result\":\"draw\"}\n",
+        )
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains(
+            "bootstrap resample count 0: must be at least 1",
+        ));
+}
+
+#[test]
+fn paired_elo_rejects_missing_singleton_and_triple_ids() {
+    let cases = [
+        (
+            "{\"result\":\"candidate_win\"}\n{\"id\":\"p1\",\"result\":\"draw\"}\n",
+            "requires a non-empty id",
+        ),
+        (
+            "{\"id\":\"p1\",\"result\":\"candidate_win\"}\n",
+            "appears once",
+        ),
+        (
+            "{\"id\":\"p1\",\"result\":\"candidate_win\"}\n\
+             {\"id\":\"p1\",\"result\":\"draw\"}\n\
+             {\"id\":\"p1\",\"result\":\"baseline_win\"}\n",
+            "appears more than twice",
+        ),
+    ];
+    for (input, expected) in cases {
+        Command::cargo_bin("veridict")
+            .unwrap()
+            .args(["compare", "-", "--metric", "paired-elo", "--paired-by-id"])
+            .write_stdin(input)
+            .assert()
+            .code(3)
+            .stderr(predicate::str::contains(expected));
+    }
+}
+
+#[test]
+fn paired_elo_rejects_a_pair_with_only_one_usable_outcome() {
+    Command::cargo_bin("veridict")
+        .unwrap()
+        .args(["compare", "-", "--metric", "paired-elo", "--paired-by-id"])
+        .write_stdin(
+            "{\"id\":\"p1\",\"result\":\"candidate_win\"}\n\
+             {\"id\":\"p1\",\"candidate_status\":\"timeout\"}\n",
+        )
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("has 1 usable outcome"));
+}
+
+#[test]
 fn sprt_clear_h1_stream_passes() {
     let stdin = (0..200)
         .map(|_| "{\"result\":\"candidate_win\"}\n")

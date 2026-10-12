@@ -714,6 +714,7 @@ mod tests {
             design_effect: None,
             scale_diagnostics: None,
             tied_count: None,
+            pair_score_counts: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,

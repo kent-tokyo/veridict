@@ -141,6 +141,7 @@ impl MetricAggregator for WinRateAggregator {
                 design_effect: None,
                 scale_diagnostics: None,
                 tied_count: None,
+                pair_score_counts: None,
             });
         }
         let p_hat = candidate_wins as f64 / n as f64;
@@ -197,6 +198,7 @@ impl MetricAggregator for WinRateAggregator {
             quantile: None,
             scale_diagnostics: None,
             tied_count: None,
+            pair_score_counts: None,
         })
     }
 }

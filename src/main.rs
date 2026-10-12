@@ -103,19 +103,19 @@ struct CompareArgs {
     #[arg(long, requires = "pass_above", allow_hyphen_values = true)]
     fail_below: Option<f64>,
 
-    /// Bootstrap resample count, used only by --metric mean-diff/quantile-diff/relative-diff.
+    /// Bootstrap resample count, used by bootstrap-based metrics including --metric paired-elo.
     #[arg(long, default_value_t = 10_000)]
     resamples: usize,
 
-    /// Bootstrap RNG seed, used only by --metric mean-diff/quantile-diff/relative-diff. Defaults
-    /// to a fixed seed, so the same input reproduces bit-identical output in CI.
+    /// Bootstrap RNG seed, used by bootstrap-based metrics including --metric paired-elo.
+    /// Defaults to a fixed seed, so the same input reproduces bit-identical output in CI.
     #[arg(long)]
     seed: Option<u64>,
 
     /// Confidence interval method for --metric winrate/sign-test. `exact`
     /// (Clopper-Pearson) and `jeffreys` are only valid for those two metrics;
-    /// combining either with --metric elo/mean-diff/relative-diff is a config error, not a
-    /// silent fallback.
+    /// combining either with --metric elo/paired-elo/mean-diff/relative-diff is a config error,
+    /// not a silent fallback.
     #[arg(long, value_enum, default_value = "wilson")]
     ci_method: CiMethodArg,
 
@@ -141,7 +141,8 @@ struct CompareArgs {
     /// roles swapped to cancel the testcase's own bias) and combine them
     /// into a single net observation instead of two independent ones. An id
     /// used only once is an ordinary unpaired sample; 3+ uses of the same
-    /// id is rejected as a data error.
+    /// id is rejected as a data error. `--metric paired-elo` is stricter: every record requires
+    /// an id and every id must have exactly two usable outcomes.
     #[arg(long, conflicts_with = "cluster_by_id")]
     paired_by_id: bool,
 
@@ -177,7 +178,8 @@ struct CompareArgs {
     /// (default): today's existing behavior, unchanged. `bonferroni`: uniform per-metric
     /// significance alpha/family_size. `holm`: step-down, uniformly more powerful than Bonferroni
     /// for the same family-wise guarantee. Rejected as a configuration error for a family that
-    /// includes --metric mean-diff/quantile-diff/relative-diff (no closed-form CI to correct) or
+    /// includes --metric paired-elo/mean-diff/quantile-diff/relative-diff (no closed-form CI to
+    /// correct) or
     /// was run with --cluster-by-id (correction would reconstruct the wrong CI shape).
     #[arg(long, value_enum, conflicts_with = "correction")]
     claim_correction: Option<CorrectionArg>,
@@ -688,6 +690,7 @@ enum MetricArg {
     MeanDiff,
     SignTest,
     Elo,
+    PairedElo,
     QuantileDiff,
     RelativeDiff,
 }
@@ -736,6 +739,7 @@ impl From<MetricArg> for MetricKind {
             MetricArg::MeanDiff => MetricKind::MeanDiff,
             MetricArg::SignTest => MetricKind::SignTest,
             MetricArg::Elo => MetricKind::Elo,
+            MetricArg::PairedElo => MetricKind::PairedElo,
             MetricArg::QuantileDiff => MetricKind::QuantileDiff,
             MetricArg::RelativeDiff => MetricKind::RelativeDiff,
         }
@@ -937,7 +941,9 @@ fn min_effect_unit_family(m: MetricArg) -> &'static str {
     match m {
         MetricArg::Winrate | MetricArg::SignTest => "win-rate margin off 0.5",
         MetricArg::RelativeDiff => "relative ratio",
-        MetricArg::MeanDiff | MetricArg::QuantileDiff | MetricArg::Elo => "raw units",
+        MetricArg::MeanDiff | MetricArg::QuantileDiff | MetricArg::Elo | MetricArg::PairedElo => {
+            "raw units"
+        }
     }
 }
 

@@ -31,6 +31,7 @@ statistical verdict and exits with code `3`.
 | `quantile-diff` | `candidate - baseline` | selected sample quantile | percentile or basic bootstrap |
 | `relative-diff` | `(candidate - baseline) / baseline` | arithmetic mean | percentile, basic, or BCa bootstrap |
 | `elo` | win/draw/loss score | logistic Elo transform of mean score | transformed score interval |
+| `paired-elo` | complete two-trial pair score | logistic Elo transform of mean pair score | pair-level percentile bootstrap |
 
 ### `winrate` and `sign-test`
 
@@ -93,12 +94,31 @@ The confidence interval is transformed endpoint-wise. Boundary scores may produc
 JSON represents non-finite endpoints as `null` and adds a warning. Elo here is a result-scale
 summary, not proof of strength outside the observed population.
 
+### `paired-elo`
+
+`paired-elo` is opt-in and requires `--paired-by-id`. Every record must have a non-empty ID, and
+every ID must contain exactly two usable outcomes; missing IDs, singletons, triples, and pairs with
+an excluded or absent outcome return exit code `3`.
+
+For each pair, candidate wins score `1`, draws `0.5`, and baseline wins `0`. The combined score is
+one of `{0, 0.5, 1, 1.5, 2}` and is normalized by two before applying the same logistic-Elo
+transform as `elo`. `pair_score_counts` reports all five buckets and `paired_count` reports
+completed pairs. The confidence interval is a deterministic percentile bootstrap over whole pair
+scores, controlled by `--resamples` and `--seed`; this preserves within-pair correlation.
+
+This is a fixed-sample effect and uncertainty report. It does not stop early, reuse SPRT
+boundaries, or replace `sprt --sprt-variant pentanomial`. Existing `elo --paired-by-id` continues
+to reduce each pair to a net win/draw/loss and is unchanged.
+
 ## Pairing and clustering
 
 `--paired-by-id` combines records with the same ID using the metric's pairing rule. One record is a
 valid singleton, two become one ID-level observation, and three or more are invalid. Outcome
 metrics net the two scores; numeric metrics average the two paired differences. Without pairing,
 duplicate IDs are rejected where uniqueness is required.
+
+`paired-elo` is the strict exception: it rejects singletons and missing IDs because its five-score
+model is defined only for complete two-trial pairs.
 
 `--cluster-by-id` is different: it keeps every trial but resamples whole ID clusters for `winrate`
 or `elo`. It protects the interval from treating correlated rows as independent. It requires enough
@@ -200,7 +220,9 @@ needed. It is a recommendation list, not an optimizer or scheduler.
   overshoot and is therefore an expectation, not a cap. `--horizon` adds a seeded Monte Carlo
   estimate of the probability of still having no decision by that trial count.
 
-`relative-diff` and `quantile-diff` power are not implemented. For proportion metrics,
+`paired-elo`, `relative-diff`, and `quantile-diff` power are not implemented. Paired-Elo planning
+would require a declared five-bucket pair-score distribution before data collection. For other
+proportion metrics,
 `--paired-by-id` adds a caveat but cannot estimate correlation before data exist; with a
 `mean-diff` pilot it applies the actual pairing rule. Planning inputs must be fixed before the
 confirmatory run; power estimates are not verdicts.

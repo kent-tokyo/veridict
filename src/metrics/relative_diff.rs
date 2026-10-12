@@ -145,6 +145,7 @@ impl MetricAggregator for RelativeDiffAggregator {
                 design_effect: None,
                 scale_diagnostics: None,
                 tied_count: None,
+                pair_score_counts: None,
             });
         }
         // The effect is `mean(relative_diff_i)` - the average of each pair's own ratio, not
@@ -196,6 +197,7 @@ impl MetricAggregator for RelativeDiffAggregator {
             design_effect: None,
             scale_diagnostics: Some(compute_scale_diagnostics(&self.baselines)),
             tied_count: Some(self.tied_count),
+            pair_score_counts: None,
         })
     }
 }

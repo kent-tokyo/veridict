@@ -86,13 +86,15 @@ case-004,,,,ok,timeout
 | `quantile-diff` | 対応のある数値 | 対応差の指定分位点。ブートストラップ区間 |
 | `relative-diff` | 正の `baseline` 値 | 比例変化の平均。ブートストラップ区間 |
 | `elo` | `result` | 引き分けを0.5点とするロジスティックElo差 |
+| `paired-elo` | IDごとにちょうど2件の `result` | ペア得点を保持するロジスティックElo。ペア単位のブートストラップ区間 |
 
 主なオプション:
 
 - `--ci-method wilson|exact|jeffreys`: 二項メトリクスの区間推定。
 - `--bootstrap-method percentile|basic|bca`: 対応しているブートストラップ区間。
 - `--paired-by-id`: 同じIDのレコードを、メトリクスごとの規則で1観測にまとめる。1件だけのIDは
-  そのまま使い、3件以上はエラー。
+  そのまま使い、3件以上はエラー。`paired-elo` では、全レコードにIDが必要で、各IDに利用可能な結果が
+  ちょうど2件必要。
 - `--cluster-by-id`: `winrate` または `elo` をID単位でクラスターブートストラップ。ペア化とは別機能。
 - `--failure-policy report-only|exclude|loss`: 勝敗メトリクスと逐次検定で失敗を扱う方法。
 - `--max-timeouts`、`--max-crashes`、`--max-invalid`: 無効な証拠の上限。
@@ -112,6 +114,15 @@ veridict compare results.jsonl \
 
 前提、数式、併用できないオプション、レポート項目は
 [`docs/metrics_ja.md`](docs/metrics_ja.md) にまとめています。
+
+固定標本でペア得点を保持したEloを報告する例:
+
+```bash
+veridict compare paired-results.jsonl --metric paired-elo --paired-by-id --min-effect 10
+```
+
+これは固定した標本の効果量と不確実性を報告します。逐次判定の
+`sprt --sprt-variant pentanomial` を置き換えるものではありません。
 
 ## 逐次検定
 

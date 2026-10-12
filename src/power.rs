@@ -158,6 +158,7 @@ impl PowerMetric {
                 })
             }
             MetricKind::Elo => Ok(Self::Elo),
+            MetricKind::PairedElo => Err(VeridictError::PowerUnsupportedForPairedElo),
             MetricKind::MeanDiff => Err(VeridictError::UnsupportedPowerMetric {
                 metric: crate::metrics::metric_label(kind),
             }),
@@ -588,6 +589,7 @@ impl PowerReport {
             MetricKind::WinRate => "winrate",
             MetricKind::SignTest => "sign-test",
             MetricKind::Elo => "elo",
+            MetricKind::PairedElo => "paired-elo",
             MetricKind::MeanDiff => "mean-diff",
             // Unreachable in practice - `PowerReport` is only ever built for a metric
             // `PowerMetric::new`/`PowerMetric::MeanDiff` actually accepted, and

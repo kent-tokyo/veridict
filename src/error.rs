@@ -37,14 +37,16 @@ pub enum VeridictError {
     #[error("invalid confidence level {0}: must be finite and in (0, 1)")]
     InvalidConfidence(f64),
 
+    #[error("invalid bootstrap resample count {0}: must be at least 1")]
+    InvalidResamples(usize),
+
     #[error("invalid threshold configuration: {0}")]
     InvalidThreshold(String),
 
     #[error(
         "--ci-method {method} is only supported for metric winrate or sign-test (got {metric}); \
-         elo's p_hat/n is fractional (draws count as 0.5) and mean-diff isn't a binomial \
-         proportion, so neither an exact nor a Jeffreys binomial credible interval applies to \
-         either"
+         elo metrics use fractional scores and mean-diff isn't a binomial proportion, so neither \
+         an exact nor a Jeffreys binomial credible interval applies"
     )]
     IncompatibleCiMethod {
         method: &'static str,
@@ -52,7 +54,7 @@ pub enum VeridictError {
     },
 
     #[error(
-        "--failure-policy {policy} is only supported for metric winrate or elo (got {metric}); \
+        "--failure-policy {policy} is only supported for metric winrate, elo, or paired-elo (got {metric}); \
          mean-diff/sign-test have no win/loss/draw outcome for a failed trial to become, so \
          there's no principled way to exclude or lose a numeric trial"
     )]
@@ -79,12 +81,25 @@ pub enum VeridictError {
     QuantileRequiresQuantileDiffMetric,
 
     #[error(
+        "--metric paired-elo requires --paired-by-id: every id must identify exactly two usable \
+         trials so the five pair-score buckets remain well-defined"
+    )]
+    PairedEloRequiresPairedById,
+
+    #[error(
         "power estimation for metric {metric} isn't supported via this flat (kind, ci_method) \
          constructor; winrate/sign-test/elo take a ci_method here, but mean-diff needs an assumed \
          standard deviation instead - construct PowerMetric::MeanDiff {{ assume_sd, sd_source }} \
          directly (see docs/metrics.md's power section)"
     )]
     UnsupportedPowerMetric { metric: &'static str },
+
+    #[error(
+        "power estimation isn't supported for metric paired-elo: its independent observation is \
+         a complete pair and its uncertainty comes from the empirical five-bucket pair-score \
+         distribution, which is unavailable before data collection"
+    )]
+    PowerUnsupportedForPairedElo,
 
     #[error(
         "power estimation isn't supported for metric quantile-diff; it needs an order-statistic \

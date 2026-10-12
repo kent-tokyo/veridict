@@ -46,14 +46,14 @@
     },
     "metric": {
       "type": "string",
-      "enum": ["winrate", "mean-diff", "sign-test", "elo", "quantile-diff", "relative-diff"]
+      "enum": ["winrate", "mean-diff", "sign-test", "elo", "paired-elo", "quantile-diff", "relative-diff"]
     },
     "baseline_count": { "type": "integer", "minimum": 0 },
     "candidate_count": { "type": "integer", "minimum": 0 },
     "paired_count": { "type": "integer", "minimum": 0 },
     "effect": {
       "type": "number",
-      "description": "Point estimate. Centered on 0 for winrate/sign-test/elo (deviation from a 50/50 split); in the input's own units for mean-diff/quantile-diff; a ratio (0.05 = +5%) for relative-diff."
+      "description": "Point estimate. Centered on 0 for winrate/sign-test and expressed in Elo points for elo/paired-elo; in the input's own units for mean-diff/quantile-diff; a ratio (0.05 = +5%) for relative-diff."
     },
     "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
     "ci_low": { "type": "number" },
@@ -68,7 +68,7 @@
     "estimated_additional_trials": {
       "type": ["integer", "null"],
       "minimum": 0,
-      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for mean-diff/quantile-diff/relative-diff."
+      "description": "Rough estimate of additional trials to reach a decisive verdict. null when already decided, zero trials, or the effect is inside the pass/fail threshold band (see docs/metrics.md). Exact (binary-searched against the real CI function) for winrate/sign-test/elo; an O(1/sqrt(n)) heuristic with a documented bias for paired-elo/mean-diff/quantile-diff/relative-diff."
     },
     "inconclusive_kind": {
       "type": ["string", "null"],
@@ -113,6 +113,7 @@
       "minimum": 0,
       "description": "relative-diff only: count of ingested records where candidate == baseline exactly, counted before any --paired-by-id netting. Omitted entirely (not null) for every other metric. See data_quality.diluted_by_ties."
     },
+    "pair_score_counts": { "$ref": "#/$defs/pair_score_counts" },
     "correction_method": {
       "type": "string",
       "enum": ["bonferroni", "holm"],
@@ -176,6 +177,19 @@
       "properties": {
         "baseline": { "$ref": "#/$defs/failure_counts" },
         "candidate": { "$ref": "#/$defs/failure_counts" }
+      }
+    },
+    "pair_score_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score_0_0", "score_0_5", "score_1_0", "score_1_5", "score_2_0"],
+      "description": "paired-elo only: complete-pair counts by combined candidate score. Omitted for every other metric.",
+      "properties": {
+        "score_0_0": { "type": "integer", "minimum": 0 },
+        "score_0_5": { "type": "integer", "minimum": 0 },
+        "score_1_0": { "type": "integer", "minimum": 0 },
+        "score_1_5": { "type": "integer", "minimum": 0 },
+        "score_2_0": { "type": "integer", "minimum": 0 }
       }
     },
     "data_quality": {

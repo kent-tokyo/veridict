@@ -91,6 +91,7 @@ and [`schemas/input-record.schema.json`](schemas/input-record.schema.json).
 | `quantile-diff` | paired scores | Quantile of paired differences; bootstrap interval |
 | `relative-diff` | positive baseline scores | Mean proportional change; bootstrap interval |
 | `elo` | `result` | Logistic Elo difference, with draws scored as one half |
+| `paired-elo` | exactly two `result` records per ID | Pair-score-aware logistic Elo; pair bootstrap interval |
 
 Important options:
 
@@ -98,6 +99,7 @@ Important options:
 - `--bootstrap-method percentile|basic|bca` where supported.
 - `--paired-by-id` to combine up to two records with the same ID into one metric-specific
   observation. A singleton remains usable; three or more records for one ID are invalid.
+  `paired-elo` is stricter: every record needs an ID and every ID needs exactly two usable results.
 - `--cluster-by-id` to cluster-bootstrap `winrate` or `elo`; this is not pairing.
 - `--failure-policy report-only|exclude|loss` for outcome-based metrics and sequential tests.
 - `--max-timeouts`, `--max-crashes`, and `--max-invalid` to cap invalid evidence.
@@ -117,6 +119,15 @@ veridict compare results.jsonl \
 
 The full assumptions, formulas, incompatible option combinations, and report fields are in
 [`docs/metrics.md`](docs/metrics.md).
+
+Pair-preserving fixed-sample Elo:
+
+```bash
+veridict compare paired-results.jsonl --metric paired-elo --paired-by-id --min-effect 10
+```
+
+This reports effect and uncertainty after a fixed sample. It does not replace the sequential
+`sprt --sprt-variant pentanomial` promotion decision.
 
 ## Sequential tests
 

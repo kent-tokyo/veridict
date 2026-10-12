@@ -13,6 +13,7 @@
 mod common;
 mod elo;
 mod mean_diff;
+mod paired_elo;
 mod quantile_diff;
 mod relative_diff;
 mod sign_test;
@@ -24,7 +25,7 @@ use std::collections::HashMap;
 
 use crate::error::VeridictError;
 use crate::input::Record;
-use crate::report::ScaleDiagnostics;
+use crate::report::{PairScoreCounts, ScaleDiagnostics};
 use crate::{
     BootstrapMethod, CiMethod, FailurePolicy, IntoRecordResult, MetricConfig, MetricKind, Outcome,
     TrialStatus,
@@ -99,6 +100,8 @@ pub struct MetricOutput {
     /// counted before any `--paired-by-id` netting (see `RelativeDiffAggregator::ingest`). `None`
     /// for every other metric.
     pub tied_count: Option<u64>,
+    /// `paired-elo` only: the five complete-pair score buckets. `None` for every other metric.
+    pub pair_score_counts: Option<PairScoreCounts>,
 }
 
 /// One metric's independent, incremental computation. `ingest` is called once per record
@@ -154,6 +157,9 @@ fn build_aggregator(
             resamples,
             seed,
         )),
+        MetricConfig::PairedElo { failure_policy } => Box::new(
+            paired_elo::PairedEloAggregator::new(confidence, failure_policy, resamples, seed),
+        ),
         MetricConfig::MeanDiff { bootstrap_method } => {
             Box::new(mean_diff::MeanDiffAggregator::new(
                 confidence,
@@ -227,6 +233,13 @@ where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
+    if metrics
+        .iter()
+        .any(|config| config.kind() == MetricKind::PairedElo)
+        && !paired_by_id
+    {
+        return Err(VeridictError::PairedEloRequiresPairedById);
+    }
     if cluster_by_id {
         if paired_by_id {
             return Err(VeridictError::ClusterByIdConflictsWithPairedById);
@@ -250,6 +263,19 @@ where
     }
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
+    }
+    let needs_resamples = cluster_by_id
+        || metrics.iter().any(|config| {
+            matches!(
+                config.kind(),
+                MetricKind::MeanDiff
+                    | MetricKind::PairedElo
+                    | MetricKind::QuantileDiff
+                    | MetricKind::RelativeDiff
+            )
+        });
+    if needs_resamples && resamples == 0 {
+        return Err(VeridictError::InvalidResamples(resamples));
     }
 
     let mut failures = FailureBreakdown::default();
@@ -353,6 +379,7 @@ pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
         MetricKind::MeanDiff => "metric mean-diff",
         MetricKind::SignTest => "metric sign-test",
         MetricKind::Elo => "metric elo",
+        MetricKind::PairedElo => "metric paired-elo",
         MetricKind::QuantileDiff => "metric quantile-diff",
         MetricKind::RelativeDiff => "metric relative-diff",
     }
@@ -366,7 +393,10 @@ pub(crate) fn metric_label(metric: MetricKind) -> &'static str {
 pub(crate) fn lacks_closed_form_ci(metric: MetricKind) -> bool {
     matches!(
         metric,
-        MetricKind::MeanDiff | MetricKind::QuantileDiff | MetricKind::RelativeDiff
+        MetricKind::MeanDiff
+            | MetricKind::PairedElo
+            | MetricKind::QuantileDiff
+            | MetricKind::RelativeDiff
     )
 }
 

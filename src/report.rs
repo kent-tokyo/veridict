@@ -10,6 +10,30 @@ use serde::Serialize;
 use crate::metrics::FailureBreakdown;
 use crate::{InconclusiveKind, MetricKind, Promotion, Validity, Verdict};
 
+/// Complete two-trial pairs grouped by their combined candidate score. Used by the opt-in
+/// `paired-elo` fixed-sample metric. Named fields keep the JSON self-describing; an array would
+/// make consumers remember which score an index represents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PairScoreCounts {
+    pub score_0_0: u64,
+    pub score_0_5: u64,
+    pub score_1_0: u64,
+    pub score_1_5: u64,
+    pub score_2_0: u64,
+}
+
+impl PairScoreCounts {
+    pub(crate) fn from_buckets(buckets: [u64; 5]) -> Self {
+        Self {
+            score_0_0: buckets[0],
+            score_0_5: buckets[1],
+            score_1_0: buckets[2],
+            score_1_5: buckets[3],
+            score_2_0: buckets[4],
+        }
+    }
+}
+
 /// Current JSON report schema version, for `Report`/`MultiReport`/
 /// `SprtReport`/`ComparisonMatrix` alike. Every change so far (including
 /// this sprint's) has been additive (new fields, new enum variants) - this
@@ -126,6 +150,11 @@ pub struct Report {
     /// a deferred idea to report an effect size restricted to the non-tied subset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tied_count: Option<u64>,
+    /// `paired-elo` only: counts of complete pairs scoring 0, 0.5, 1, 1.5, or 2 candidate
+    /// points. This is the information ordinary paired `elo` deliberately discards when it nets
+    /// every pair to win/draw/loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pair_score_counts: Option<PairScoreCounts>,
     /// Multiple-comparison correction fields (see `correction` module) - all `None`/omitted
     /// unless `compare --claim-correction bonferroni|holm` (or its deprecated `--correction`
     /// alias) was requested, so a default run's JSON is byte-identical to before this existed.
@@ -247,7 +276,7 @@ fn fmt_effect(metric: MetricKind, value: f64) -> String {
         // the two units don't compose (e.g. "+5.0 pp" isn't "+5.0%" of anything), so using the
         // same suffix for both would read as more comparable than they actually are.
         MetricKind::WinRate | MetricKind::SignTest => format!("{:+.1} pp", value * 100.0),
-        MetricKind::Elo => format!("{value:+.1} elo"),
+        MetricKind::Elo | MetricKind::PairedElo => format!("{value:+.1} elo"),
         MetricKind::MeanDiff | MetricKind::QuantileDiff => format!("{value:+.4}"),
         MetricKind::RelativeDiff => format!("{:+.1}%", value * 100.0),
     }
@@ -336,6 +365,17 @@ impl Report {
                 max_cluster_size = self.max_cluster_size.unwrap_or(0),
                 effective_sample_size = self.effective_sample_size.unwrap_or(0.0),
                 design_effect = self.design_effect.unwrap_or(1.0),
+            ));
+        }
+        if let Some(counts) = self.pair_score_counts {
+            body.push_str(&format!(
+                "\nPair-score counts: 0={score_0_0}, 0.5={score_0_5}, 1={score_1_0}, \
+                 1.5={score_1_5}, 2={score_2_0}\n",
+                score_0_0 = counts.score_0_0,
+                score_0_5 = counts.score_0_5,
+                score_1_0 = counts.score_1_0,
+                score_1_5 = counts.score_1_5,
+                score_2_0 = counts.score_2_0,
             ));
         }
         if let Some(family_adjusted_verdict) = self.family_adjusted_verdict {
@@ -453,6 +493,7 @@ mod tests {
             design_effect: None,
             scale_diagnostics: None,
             tied_count: None,
+            pair_score_counts: None,
             correction_method: None,
             family_size: None,
             achieved_alpha: None,

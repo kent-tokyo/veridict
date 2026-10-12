@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in `paired-elo` fixed-sample metric.** With `--paired-by-id`, every ID must contain exactly
+  two usable outcomes. The report preserves all five combined pair-score buckets
+  `{0, 0.5, 1, 1.5, 2}`, transforms their mean score to logistic Elo, and computes a deterministic
+  percentile-bootstrap interval by resampling complete pairs. Existing `elo` pairing and
+  pentanomial SPRT behavior are unchanged. Coverage calibration includes draw-heavy and positively
+  correlated pair generators.
+
 ## [0.19.1] - 2026-10-03
 
 ### Fixed

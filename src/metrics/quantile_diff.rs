@@ -106,6 +106,7 @@ impl MetricAggregator for QuantileDiffAggregator {
                 design_effect: None,
                 scale_diagnostics: None,
                 tied_count: None,
+                pair_score_counts: None,
             });
         }
         let effect = bootstrap::quantile(&diffs, self.quantile);
@@ -158,6 +159,7 @@ impl MetricAggregator for QuantileDiffAggregator {
             design_effect: None,
             scale_diagnostics: None,
             tied_count: None,
+            pair_score_counts: None,
         })
     }
 }
