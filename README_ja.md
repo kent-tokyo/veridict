@@ -2,12 +2,8 @@
 
 [English](README.md) | 日本語
 
-`veridict` は、評価結果から `pass`、`fail`、`inconclusive` を返す、用途非依存の統計ゲートです。
-ベンチマークの実行や実験履歴の管理は行いません。証拠が足りない場合は、無理に合格とせず
-`inconclusive` を返します。
-
-モデル精度、抽出品質、探索性能、ランキング品質、レイテンシ、リリース回帰など、候補と基準の比較に
-利用できます。
+`veridict` は、評価結果から `pass`、`fail`、`inconclusive` を返す用途非依存の統計ゲートです。
+ベンチマークの実行や実験履歴の管理は行いません。不十分または不正な証拠を合格にはしません。
 
 ## インストール
 
@@ -15,7 +11,7 @@
 cargo install veridict
 ```
 
-ライブラリとして利用する場合:
+ライブラリとして使う場合:
 
 ```bash
 cargo add veridict
@@ -29,32 +25,30 @@ cargo add veridict
 veridict compare results.jsonl \
   --metric winrate \
   --pass-above 0.02 \
-  --fail-below -0.01 \
-  --confidence 0.95
+  --fail-below -0.01
 ```
 
-対応のある数値スコアを比較する例:
+対応のある数値スコアを比較し、レポートを保存する例:
 
 ```bash
-veridict compare scores.jsonl --metric mean-diff --min-effect 0.01
-```
-
-JSONとMarkdownのレポートを保存する例:
-
-```bash
-veridict compare results.jsonl \
-  --metric winrate \
-  --min-effect 0.02 \
+veridict compare scores.jsonl \
+  --metric mean-diff \
+  --min-effect 0.01 \
   --report-json report.json \
   --report-md report.md
 ```
 
-標準入力は `-` で指定します。既定はJSONLです。`.csv` 拡張子または `--format csv` でCSVを
-選べます。
+Eloの逐次検定:
+
+```bash
+veridict sprt results.jsonl --elo0 0 --elo1 10
+```
+
+標準入力は `-` で指定します。既定はJSONLです。`.csv` または `--format csv` でCSVを選べます。
 
 ## 入力
 
-1行が1観測です。対応のある数値、勝敗、ステータスのいずれかを記録します。
+1レコードが1観測です。対応スコア、勝敗、ステータスを記録できます。
 
 ```json
 {"id":"case-001","baseline":0.81,"candidate":0.84}
@@ -63,160 +57,79 @@ veridict compare results.jsonl \
 {"id":"case-004","baseline_status":"ok","candidate_status":"timeout"}
 ```
 
-CSVも同じフィールドを使います。
+CSVも同じフィールドを使います。不正なJSON、必須フィールドの欠落、規則に反するID件数、非有限値、
+空入力、不正な設定は終了コード `3` です。例は [`examples/`](examples/)、形式は
+[入力スキーマ](schemas/input-record.schema.json)を参照してください。
 
-```csv
-id,baseline,candidate,result,baseline_status,candidate_status
-case-001,0.81,0.84,,,
-case-002,,,candidate_win,,
-case-004,,,,ok,timeout
-```
+## コマンド
 
-入力は厳密に検証します。不正なJSON、メトリクスに必要なフィールドの欠落、ペア化規則に反するID件数、
-非有限値、空入力、不正な設定は終了コード `3` です。例は [`examples/`](examples/)、スキーマは
-[`schemas/input-record.schema.json`](schemas/input-record.schema.json) にあります。
+| コマンド | 用途 |
+|---|---|
+| `compare` | 固定標本による候補と基準の判定 |
+| `sprt` | Wald、三項、五項の逐次検定 |
+| `matrix` | Bradley-Terry/Eloによる候補間比較 |
+| `plan` | 証拠を追加すべき比較の順位付け |
+| `power` | データ収集前の必要証拠量の見積もり |
+| `verify-run` | 実験記録の構造と整合性の検証 |
+| `time-sensitive` | 判定時刻の価値を含む実験的な片側検定 |
 
-## メトリクス
+CLIオプションの正本は `veridict <command> --help` です。統計上の前提や併用できない設定は
+[`docs/metrics_ja.md`](docs/metrics_ja.md)にまとめています。
 
-| メトリクス | 入力 | 効果量と区間 |
+## 比較メトリクス
+
+| メトリクス | 入力 | 効果量 |
 |---|---|---|
-| `winrate` | `result` | 決着時の候補勝率から `0.5` を引いた値。既定はWilson区間 |
-| `sign-test` | 対応のある数値 | 非同値ペアの正符号率から `0.5` を引いた値 |
-| `mean-diff` | 対応のある数値 | `candidate - baseline` の平均。ブートストラップ区間 |
-| `quantile-diff` | 対応のある数値 | 対応差の指定分位点。ブートストラップ区間 |
-| `relative-diff` | 正の `baseline` 値 | 比例変化の平均。ブートストラップ区間 |
-| `elo` | `result` | 引き分けを0.5点とするロジスティックElo差 |
-| `paired-elo` | IDごとにちょうど2件の `result` | ペア得点を保持するロジスティックElo。ペア単位のブートストラップ区間 |
+| `winrate` | `result` | 決着時の候補勝率から `0.5` を引いた値 |
+| `sign-test` | 対応スコア | 正符号率から `0.5` を引いた値 |
+| `mean-diff` | 対応スコア | `candidate - baseline` の平均 |
+| `quantile-diff` | 対応スコア | 対応差の指定分位点 |
+| `relative-diff` | 正の基準値 | 比例変化の平均 |
+| `elo` | `result` | 勝ち・引き分け・負けの得点から求めるロジスティックElo |
+| `paired-elo` | IDごとにちょうど2結果 | ペア得点を保持したロジスティックElo |
 
-主なオプション:
-
-- `--ci-method wilson|exact|jeffreys`: 二項メトリクスの区間推定。
-- `--bootstrap-method percentile|basic|bca`: 対応しているブートストラップ区間。
-- `--paired-by-id`: 同じIDのレコードを、メトリクスごとの規則で1観測にまとめる。1件だけのIDは
-  そのまま使い、3件以上はエラー。`paired-elo` では、全レコードにIDが必要で、各IDに利用可能な結果が
-  ちょうど2件必要。
-- `--cluster-by-id`: `winrate` または `elo` をID単位でクラスターブートストラップ。ペア化とは別機能。
-- `--failure-policy report-only|exclude|loss`: 勝敗メトリクスと逐次検定で失敗を扱う方法。
-- `--max-timeouts`、`--max-crashes`、`--max-invalid`: 無効な証拠の上限。
-- `--claim-correction bonferroni|holm`: 複数メトリクスを同時に判定する際の補正。
-
-`--metric` は複数指定できます。全体判定は、`fail`、`inconclusive`、`pass` の順に厳しい結果を
-採用します。
+ペア得点を保持する固定標本Eloの例:
 
 ```bash
-veridict compare results.jsonl \
-  --metric winrate \
-  --metric elo \
-  --min-effect winrate=0.02 \
-  --min-effect elo=10 \
-  --claim-correction holm
+veridict compare paired.jsonl \
+  --metric paired-elo \
+  --paired-by-id \
+  --min-effect 10
 ```
 
-前提、数式、併用できないオプション、レポート項目は
-[`docs/metrics_ja.md`](docs/metrics_ja.md) にまとめています。
+主な契約:
 
-固定標本でペア得点を保持したEloを報告する例:
+- `--paired-by-id` は同じIDの最大2レコードをまとめます。`paired-elo` はより厳格で、すべてのIDに
+  利用可能な結果がちょうど2件必要です。
+- `--cluster-by-id` は `winrate` または `elo` をクラスター単位で再標本化します。ペア化とは別機能です。
+- `--failure-policy` は勝敗への反映方法を決めます。失敗件数と妥当性上限は常に報告します。
+- `--metric` を繰り返すと複数項目をまとめて判定します。優先順位は
+  `fail > inconclusive > pass` です。
+- `--claim-correction bonferroni|holm` は、対応するメトリクスに一群補正結果を追加します。
 
-```bash
-veridict compare paired-results.jsonl --metric paired-elo --paired-by-id --min-effect 10
-```
+## 判定と出力
 
-これは固定した標本の効果量と不確実性を報告します。逐次判定の
-`sprt --sprt-variant pentanomial` を置き換えるものではありません。
+信頼区間を使う場合、下限が合格しきい値以上なら `pass`、上限が不合格しきい値以下なら `fail`、
+それ以外の有効な結果は `inconclusive` です。妥当性上限を超えた結果は昇格できません。
 
-## 逐次検定
+`compare` と `sprt` の終了コードは次のとおりです。
 
-`sprt` は入力を順番に評価し、最初に境界へ到達した時点で判定を確定します。
-
-```bash
-veridict sprt results.jsonl --elo0 0 --elo1 10 --alpha 0.05 --beta 0.05
-```
-
-バリアント:
-
-- `wald`（既定）: 決着した結果のみ。ロジスティックEloで仮説を指定。
-- `trinomial`: 引き分けを考慮。`--belo0` と `--belo1` でBayesElo仮説を指定。
-- `pentanomial`: 2試行のペア結果を利用。`--paired-by-id` が必要。
-
-すべてのバリアントが入力順に再生します。`wald` と `trinomial` は利用可能な観測ごと、
-`--paired-by-id` 指定時は正味ペアの完了ごとに評価します。`pentanomial` はペア完了ごとに評価します。
-停止後のレコードは判定時点のLLRや勝敗件数を変えませんが、入力検証と失敗集計の対象にはなります。
-失敗上限を超えた場合、最終判定は `inconclusive` になります。
-
-判定時点の値は `decision_*`、利用可能件数や解析件数は `available_*`、`analyzed_*`、停止位置は
-`stopping_*`、停止後の件数は `ignored_*_after_stop` に記録します。schema v1との互換性のため、
-`wald` と `trinomial` の従来の `llr` と勝敗件数は入力全体を表します。判定には `verdict` を使用して
-ください。
-
-## その他のコマンド
-
-### `matrix` と `plan`
-
-```bash
-veridict matrix --matches examples/matches_head_to_head.jsonl
-veridict plan --matches examples/matches_head_to_head.jsonl --min-elo 20
-```
-
-`matrix` は候補間のElo差を推定します。`plan` は証拠を追加すべき比較を順位付けします。試行の実行や
-スケジュール管理は行いません。`matrix` は、共通の基準に対する複数の候補ファイルも扱えます。
-
-### `power`
-
-```bash
-veridict power --metric elo --min-effect 20 --assume-effect 35 --target-power 0.80
-veridict power --metric mean-diff --min-effect 0.02 --assume-effect 0.10 --assume-sd 0.15
-veridict power --sprt --elo0 0 --elo1 20
-```
-
-`mean-diff` では `--assume-sd` または `--pilot FILE` を指定します。`power` の結果はモデルに基づく
-計画値であり、保証ではありません。
-
-### 実行記録の検証
-
-```bash
-veridict verify-run examples/manifest.toml run.jsonl
-```
-
-`verify-run` は、ペア、順序、データ混入と、manifestの値と記録内の不透明な識別子・ハッシュ値との
-整合性を調べます。成果物を開いてハッシュを再計算する機能ではなく、ベンチマークの質や候補の強さも
-証明しません。
-
-### 時間価値付き検定
-
-```bash
-veridict time-sensitive examples/chess_engine_time_sensitive.jsonl \
-  --p0 0.50 --p1 0.55 --policy bellman \
-  --reward hard-deadline --deadline 400
-```
-
-実験的な `time-sensitive` は、早い判定ほど価値が高いBernoulli単純仮説間の検定です。方策は
-`bellman`、`edo`、`gro`、報酬は `hard-deadline`、`exponential`、またはカスタムスケジュールです。
-片側検定であり、Elo SPRTとは別機能です。
-
-## 判定と終了コード
-
-信頼区間を使うゲートは、下限が合格しきい値以上なら `pass`、上限が不合格しきい値以下なら `fail`、
-それ以外は `inconclusive` です。妥当性の上限を超えると `validity=invalid`、
-`verdict=inconclusive`、`promotion=not_promoted` になります。警告や計画値は参考情報です。
-
-`compare` と `sprt` の終了コード:
-
-| 終了コード | 意味 |
+| コード | 意味 |
 |---|---|
 | `0` | pass |
 | `1` | fail |
 | `2` | inconclusive |
 | `3` | 入力または設定が不正 |
 
-`verify-run` は構造違反を `1` で返します。`time-sensitive` には統計的なfailがなく、判定前に報酬の
-期間が終わった場合は `2` です。
+JSONが機械処理向けの契約で、Markdownは人向けの要約です。中間値から判定を再構成せず、
+`verdict` と `promotion` を使用してください。
 
 ## ドキュメント
 
-- [`docs/metrics_ja.md`](docs/metrics_ja.md): 統計仕様とレポート項目。
+- [`docs/metrics_ja.md`](docs/metrics_ja.md): 実装済みの統計仕様とレポート契約。
 - [`docs/research-map_ja.md`](docs/research-map_ja.md): 未実装候補と着手条件。
 - [`CHANGELOG.md`](CHANGELOG.md): リリース履歴。
-- `veridict <command> --help`: 現在のCLIオプション。
+- [JSON Schemas](schemas/): 入出力形式の機械可読な契約。
 
 ## 開発
 

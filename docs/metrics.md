@@ -2,268 +2,183 @@
 
 English | [日本語](metrics_ja.md)
 
-This document defines the statistical contract of the shipped commands. For examples and basic
-CLI use, start with the [README](../README.md). For unshipped ideas, see the
-[research map](research-map.md).
+This document defines shipped statistical behavior. Start with the [README](../README.md) for
+examples. Unshipped ideas belong in the [research map](research-map.md).
 
-## Common decision rule
+## Decision contract
 
-For confidence-interval metrics, let `[L, U]` be the interval for the reported effect.
+For a reported effect interval `[L, U]`:
 
-- `pass` when `L >= pass_above`.
-- `fail` when `U <= fail_below`.
+- `pass` when `L >= pass_above`;
+- `fail` when `U <= fail_below`;
 - `inconclusive` otherwise.
 
-`--min-effect x` is the symmetric form: `pass_above = x` and `fail_below = -x`. In a multi-metric
-run, use `metric=value` thresholds when units differ. Invalid input or configuration is not a
-statistical verdict and exits with code `3`.
+`--min-effect x` means `pass_above = x` and `fail_below = -x`. Use `metric=value` thresholds in a
+multi-metric run when units differ. Input or configuration errors exit with code `3`; they are not
+statistical verdicts.
 
-`promotion` is stricter than `verdict`: validity checks may demote a statistical pass to
-`inconclusive`, but cannot create a pass or convert a result to `fail`.
+`promotion` also includes evidence-validity checks. A breached validity cap can demote a
+statistical pass to `inconclusive`, but cannot create a pass or a fail.
 
-## Comparison metrics
+## Fixed-sample metrics
 
-| Metric | Observation | Point estimate | Interval |
+| Metric | Observation | Effect | Interval |
 |---|---|---|---|
-| `winrate` | decisive `result` | candidate win rate minus `0.5` | Wilson, exact, or Jeffreys |
-| `sign-test` | paired numeric record | positive-sign rate minus `0.5` | Wilson, exact, or Jeffreys |
-| `mean-diff` | `candidate - baseline` | arithmetic mean | percentile, basic, or BCa bootstrap |
-| `quantile-diff` | `candidate - baseline` | selected sample quantile | percentile or basic bootstrap |
-| `relative-diff` | `(candidate - baseline) / baseline` | arithmetic mean | percentile, basic, or BCa bootstrap |
-| `elo` | win/draw/loss score | logistic Elo transform of mean score | transformed score interval |
-| `paired-elo` | complete two-trial pair score | logistic Elo transform of mean pair score | pair-level percentile bootstrap |
+| `winrate` | decisive outcome | candidate win rate minus `0.5` | Wilson, exact, or Jeffreys |
+| `sign-test` | non-tied paired score | positive-sign rate minus `0.5` | Wilson, exact, or Jeffreys |
+| `mean-diff` | paired score | mean `candidate - baseline` | percentile, basic, or BCa bootstrap |
+| `quantile-diff` | paired score | selected quantile of paired differences | percentile or basic bootstrap |
+| `relative-diff` | paired score with `baseline > 0` | mean per-record proportional change | percentile, basic, or BCa bootstrap |
+| `elo` | win/draw/loss score | logistic Elo of mean score | transformed score interval |
+| `paired-elo` | complete two-trial pair | logistic Elo of mean pair score | pair-level percentile bootstrap |
 
-### `winrate` and `sign-test`
+### Metric-specific rules
 
-Draws and exact numeric ties are excluded, respectively. Effects and interval endpoints are
-centered on zero by subtracting `0.5`; therefore `--min-effect 0.02` means a 52% decisive win or
-positive-sign rate. `baseline_count` and `candidate_count` are side-specific decisive counts;
-`paired_count` is their sum.
+- `winrate` excludes draws; `sign-test` excludes exact ties. `--ci-method` selects `wilson`
+  (default), Clopper-Pearson `exact`, or `jeffreys`. No decisive observation gives
+  `inconclusive`.
+- `mean-diff` resamples paired differences, never the two columns independently.
+- `quantile-diff` defaults to the median; specify `--quantile` in automation. BCa is rejected
+  because current calibration does not justify it for a non-smooth sample quantile.
+- `relative-diff` averages `(candidate - baseline) / baseline`. `tied_count` and
+  `data_quality.diluted_by_ties` are diagnostics and do not change the verdict.
+- Bootstrap metrics use `--resamples` and a reproducible `--seed`. `percentile` is the default;
+  `basic` reflects its endpoints around the estimate; BCa adds bias and acceleration correction.
+- `mean-diff` may report a baseline-scale warning. Choose absolute or proportional effects before
+  inspecting outcomes; the warning is advisory.
 
-`--ci-method` selects:
+### Elo
 
-- `wilson` (default): Wilson score interval.
-- `exact`: Clopper-Pearson interval.
-- `jeffreys`: equal-tailed beta posterior interval with Jeffreys prior.
-
-Exact and Jeffreys require integer binomial counts. If no decisive observation remains, the result
-is `inconclusive`.
-
-### `mean-diff`
-
-Each record contributes one paired difference. Bootstrap resampling is over those differences, not
-over the baseline and candidate columns independently. `--resamples` controls the number of draws;
-`--seed` makes the result reproducible.
-
-`percentile` is the default. `basic` reflects percentile endpoints around the point estimate. `bca`
-adds bias and acceleration corrections and requires enough non-degenerate data for jackknife terms.
-
-### `quantile-diff`
-
-The metric takes the selected sample quantile of recordwise paired differences. The default is
-`0.5` (the median); use `--quantile` explicitly for stable automation.
-
-BCa is rejected for this metric. Sample quantiles are non-smooth, and current calibration did not
-show a coverage improvement that justifies exposing the method. Use percentile or basic.
-
-### `relative-diff`
-
-Every usable record must have `baseline > 0`. The reported effect is the mean of per-record ratios,
-not the ratio of aggregate means. An effect of `0.03` means a mean relative increase of 3%.
-
-`tied_count` reports exact zero differences. `data_quality.diluted_by_ties` warns when unchanged
-records may dilute an effect that only touches a subset. This diagnostic does not alter the metric
-or verdict.
-
-### Scale diagnostic
-
-For `mean-diff`, `scale_diagnostics` inspects baseline magnitudes only. A wide-scale warning means
-large cases may dominate an absolute mean. It is advisory and never changes the verdict. Choose
-`relative-diff` before examining outcomes when proportional change is the intended claim.
-
-### `elo`
-
-Each candidate win scores `1`, draw `0.5`, and baseline win `0`. With score `p`, the point estimate
-is the logistic-Elo transform:
+Candidate wins score `1`, draws `0.5`, and baseline wins `0`. For mean score `p`:
 
 ```text
 Elo = 400 * log10(p / (1 - p))
 ```
 
-The confidence interval is transformed endpoint-wise. Boundary scores may produce infinite Elo;
-JSON represents non-finite endpoints as `null` and adds a warning. Elo here is a result-scale
-summary, not proof of strength outside the observed population.
+Scores are clamped to `[0.0001, 0.9999]` before conversion, so shutouts remain finite (about
+`+/-1600` Elo). Elo summarizes the observed result population; it does not establish strength
+outside that population.
 
-### `paired-elo`
+`paired-elo` requires `--paired-by-id`, a non-empty ID on every record, and exactly two usable
+outcomes per ID. It retains combined scores `{0, 0.5, 1, 1.5, 2}`, reports them in
+`pair_score_counts`, divides by two before Elo conversion, and bootstraps whole pairs. Missing IDs,
+singletons, triples, and incomplete outcomes are input errors.
 
-`paired-elo` is opt-in and requires `--paired-by-id`. Every record must have a non-empty ID, and
-every ID must contain exactly two usable outcomes; missing IDs, singletons, triples, and pairs with
-an excluded or absent outcome return exit code `3`.
+`paired-elo` is fixed-sample analysis. It does not replace pentanomial SPRT. Existing
+`elo --paired-by-id` still reduces each pair to a net win/draw/loss.
 
-For each pair, candidate wins score `1`, draws `0.5`, and baseline wins `0`. The combined score is
-one of `{0, 0.5, 1, 1.5, 2}` and is normalized by two before applying the same logistic-Elo
-transform as `elo`. `pair_score_counts` reports all five buckets and `paired_count` reports
-completed pairs. The confidence interval is a deterministic percentile bootstrap over whole pair
-scores, controlled by `--resamples` and `--seed`; this preserves within-pair correlation.
+## Pairing, clustering, and failures
 
-This is a fixed-sample effect and uncertainty report. It does not stop early, reuse SPRT
-boundaries, or replace `sprt --sprt-variant pentanomial`. Existing `elo --paired-by-id` continues
-to reduce each pair to a net win/draw/loss and is unchanged.
+`--paired-by-id` combines records according to the selected metric. Normally one record remains a
+singleton, two records become one ID-level observation, and three or more are invalid. Outcome
+metrics net the two scores; numeric metrics average the two differences. `paired-elo` is the strict
+complete-pair exception described above.
 
-## Pairing and clustering
+`--cluster-by-id` instead keeps all rows and bootstraps whole ID clusters. It supports only
+`winrate` and `elo`, needs enough distinct clusters, and is incompatible with `--paired-by-id`.
 
-`--paired-by-id` combines records with the same ID using the metric's pairing rule. One record is a
-valid singleton, two become one ID-level observation, and three or more are invalid. Outcome
-metrics net the two scores; numeric metrics average the two paired differences. Without pairing,
-duplicate IDs are rejected where uniqueness is required.
+Statuses are `ok`, `timeout`, `crash`, and `invalid`.
 
-`paired-elo` is the strict exception: it rejects singletons and missing IDs because its five-score
-model is defined only for complete two-trial pairs.
-
-`--cluster-by-id` is different: it keeps every trial but resamples whole ID clusters for `winrate`
-or `elo`. It protects the interval from treating correlated rows as independent. It requires enough
-distinct clusters, is incompatible with `--paired-by-id`, and is not supported for numeric metrics.
-
-## Failures and evidence validity
-
-`baseline_status` and `candidate_status` accept `ok`, `timeout`, `crash`, and `invalid`.
-
-| `--failure-policy` | Metric treatment |
+| `--failure-policy` | Outcome treatment |
 |---|---|
-| `report-only` | Count failures; use a literal `result` if present |
-| `exclude` | Ignore any outcome on a record where either side failed |
-| `loss` | Candidate failure becomes a baseline win, baseline failure becomes a candidate win, and dual failure becomes a draw |
+| `report-only` | Count failures and use a literal result when present |
+| `exclude` | Exclude an outcome if either side failed |
+| `loss` | Convert a one-sided failure to a loss; convert dual failure to a draw |
 
-The policy does not hide counts. `exclude` and `loss` are accepted only by outcome-based metrics
-and sequential tests; numeric metrics reject them as configuration errors.
+Failure counts are never hidden. `exclude` and `loss` apply only to outcome metrics and sequential
+tests. `--max-timeouts`, `--max-crashes`, and `--max-invalid` are validity caps; breaching one
+prevents promotion.
 
-`--max-timeouts`, `--max-crashes`, and `--max-invalid` define validity caps. A breached cap records
-the reason and prevents promotion. In multi-metric runs, validity and promotion are summarized at
-the overall level as well as per metric.
+## Multiple metrics
 
-## Multiple metrics and claim correction
-
-Repeat `--metric` to evaluate several claims from one input. Overall verdict precedence is
+Repeat `--metric` to evaluate several claims. Overall verdict precedence is
 `fail > inconclusive > pass`.
 
-`--claim-correction` controls family-wise confidence:
+`--claim-correction` adds family-adjusted fields without replacing ordinary `verdict` or
+`promotion`:
 
-- `none`: each metric uses the requested confidence independently.
-- `bonferroni`: equal alpha allocation across claims.
-- `holm`: ordered Holm adjustment; never less powerful than Bonferroni for the same family.
+- `none`: no family adjustment;
+- `bonferroni`: equal alpha allocation;
+- `holm`: ordered Holm adjustment.
 
-Correction does not replace the ordinary `verdict` or `promotion`. It populates the separate
-`family_adjusted_verdict`, `family_adjusted_promotion`, and multi-report
-`simultaneous_claims_promotion` fields. Corrected claims can only be preserved or demoted. Families
-containing bootstrap metrics or `--cluster-by-id` are rejected because the required adjusted
-interval cannot be reconstructed from the closed-form binomial model.
+Families containing bootstrap metrics or `--cluster-by-id` are rejected because their adjusted
+intervals cannot be reconstructed from the supported closed-form binomial model.
 
-## SPRT
+## Sequential tests
 
-`sprt` compares two simple hypotheses using log-likelihood ratio boundaries:
+`sprt` compares simple hypotheses with boundaries:
 
 ```text
 upper = ln((1 - beta) / alpha)
 lower = ln(beta / (1 - alpha))
 ```
 
-Crossing the upper boundary returns `pass`; crossing the lower boundary returns `fail`; otherwise
-the result is `inconclusive`.
+The upper boundary gives `pass`, the lower boundary gives `fail`, and no crossing gives
+`inconclusive`.
 
-### Variants
+| Variant | Data and hypotheses |
+|---|---|
+| `wald` | Decisive outcomes; logistic Elo via `--elo0` and `--elo1` |
+| `trinomial` | Win/draw/loss generalized LLR; BayesElo via `--belo0` and `--belo1` |
+| `pentanomial` | Complete pair scores `{0, 0.5, 1, 1.5, 2}`; logistic Elo and `--paired-by-id` |
 
-- `wald`: binary test over decisive outcomes. Hypotheses are logistic Elo (`--elo0`, `--elo1`).
-- `trinomial`: win/draw/loss generalized LLR with an estimated draw nuisance parameter. Hypotheses
-  are BayesElo (`--belo0`, `--belo1`), not logistic Elo.
-- `pentanomial`: generalized LLR over paired two-trial scores `{0, 0.5, 1, 1.5, 2}`. It requires
-  `--paired-by-id` and exactly two records per completed pair.
+All variants replay input order and retain the first eligible crossing. Wald and trinomial evaluate
+each usable trial, or each completed net pair with pairing; pentanomial evaluates each completed
+pair. Records after stopping do not change the decision prefix but are still validated and counted
+for failure caps. `--min-paired-ids`, `--max-paired-ids`, and `--require-complete-pairs` further
+constrain supported paired modes.
 
-All variants replay the input sequentially and retain the first eligible crossing. Input order is
-therefore part of the experiment schedule. Wald and trinomial evaluate after each usable trial, or
-after each completed net pair with `--paired-by-id`; pentanomial evaluates after each completed
-pair. Later records cannot change the decision LLR or outcome prefix, but they are still parsed and
-included in failure counts; a breached failure cap can force the final verdict to `inconclusive`.
-`--min-paired-ids` and `--max-paired-ids` constrain pentanomial evaluation. With
-`--require-complete-pairs`, incomplete pairs are rejected where supported.
+Use `verdict`, `promotion`, and `decision_*` for the decision. Generic `available_*`, `analyzed_*`,
+`stopping_*`, and `ignored_*_after_stop` fields describe the replay. For schema-v1 compatibility,
+unprefixed Wald/trinomial counts and `llr` still describe the full input; do not reconstruct the
+decision from them.
 
-### Report compatibility
+## Supporting commands
 
-The decision prefix is described by `decision_llr`, `decision_candidate_wins`,
-`decision_baseline_wins`, `decision_draws`, and the generic `available_*`, `analyzed_*`,
-`stopping_observation_*`, and `ignored_*_after_stop` fields.
+### `matrix` and `plan`
 
-For schema-v1 compatibility, unprefixed Wald/trinomial `llr` and outcome counts describe the full
-input. Pentanomial retains its existing analyzed-prefix meaning. Consume `verdict`, `promotion`,
-and `decision_*`; do not reconstruct a decision from legacy `llr`.
+`matrix` fits Bradley-Terry strengths within each connected component and reports pairwise
+logistic-Elo estimates. Cross-component cells are `disconnected` with null estimates. The output
+is descriptive and has no overall verdict.
 
-## Matrix and plan
+`plan` ranks comparisons by additional evidence needed for a required `--min-elo`. It is not an
+optimizer, scheduler, or trial runner.
 
-`matrix` accepts candidates against a shared baseline or a general graph of head-to-head
-`--matches`. It fits Bradley-Terry strengths within each connected component and reports pairwise
-logistic-Elo differences and intervals. Cells across disconnected components have
-`status=disconnected` and null estimates because those strengths are not comparable. Matrix output
-is descriptive and has no overall pass/fail verdict.
+### `power`
 
-`plan` uses the same graph and a required `--min-elo` to rank comparisons by additional evidence
-needed. It is a recommendation list, not an optimizer or scheduler.
+`power` estimates evidence needs before collection:
 
-## Power
+- exact interval search for `winrate` and `sign-test`;
+- binomial score search for `elo`, which is a lower bound when draws are common;
+- normal approximation for `mean-diff`, using `--assume-sd` or `--pilot`;
+- Wald average-sample-number approximation with `--sprt`.
 
-`power` estimates evidence needs before data collection.
+`paired-elo`, `relative-diff`, and `quantile-diff` power are not implemented. Power outputs are
+planning estimates, not verdicts or sample-size guarantees.
 
-- `winrate` and `sign-test`: exact search against the selected binomial interval.
-- `elo`: binomial score search transformed to Elo. Because draws are not modeled, treat the result
-  as a lower bound in draw-heavy settings.
-- `mean-diff`: normal approximation using `--assume-sd` or a standard deviation estimated from
-  `--pilot` paired differences.
-- `--sprt`: Wald average sample number approximation under each hypothesis. It ignores boundary
-  overshoot and is therefore an expectation, not a cap. `--horizon` adds a seeded Monte Carlo
-  estimate of the probability of still having no decision by that trial count.
+### `verify-run`
 
-`paired-elo`, `relative-diff`, and `quantile-diff` power are not implemented. Paired-Elo planning
-would require a declared five-bucket pair-score distribution before data collection. For other
-proportion metrics,
-`--paired-by-id` adds a caveat but cannot estimate correlation before data exist; with a
-`mean-diff` pilot it applies the actual pairing rule. Planning inputs must be fixed before the
-confirmatory run; power estimates are not verdicts.
+`verify-run` validates pairing, order, contamination, and consistency between manifest values and
+recorded opaque identifiers or hashes. It does not open artifacts, recompute hashes, or prove
+benchmark quality.
 
-## Time-sensitive testing
+### `time-sensitive`
 
-`time-sensitive` is an experimental, one-sided, anytime-valid Bernoulli simple-vs-simple test.
-It compares fixed `p0` and `p1` under a finite budget while optimizing a declared time-value reward.
+`time-sensitive` is an experimental, one-sided, anytime-valid Bernoulli simple-vs-simple test with
+a finite reward horizon. Policies are `bellman`, `edo`, and `gro`; rewards are `hard-deadline`,
+`exponential`, or a custom schedule. Draws advance time without changing wealth. The command does
+not support Elo, draw-aware hypotheses, or online composite alternatives.
 
-Policies:
+## Report interpretation
 
-- `bellman`: dynamic-programming policy for the configured reward.
-- `edo`: stationary expected-discount approximation, available only with `exponential` reward.
-- `gro`: growth-rate-oriented baseline; it ignores the reward schedule.
+- `estimated_additional_trials` is an advisory projection for an inconclusive fixed-sample result.
+  Bootstrap metrics use an `O(1/sqrt(n))` interval-width heuristic. It may be `null`.
+- `inconclusive_kind` is `directional` when the interval excludes zero, `noise` when it spans zero,
+  and `null` when no ordinary interval judgment exists.
+- `warnings` expose interpretation risks such as small samples, failures, draws, sparse tails, or
+  wide scales. Warnings do not change the verdict.
 
-Rewards are `hard-deadline`, `exponential`, or `--reward-schedule FILE`. Draws advance the trial
-clock without changing wealth, so planned reward assumes an all-decisive stream. This command does
-not accept Elo hypotheses, draw-aware trinomial hypotheses, or composite online estimation. Its exit codes are
-`0` for pass, `2` for no decision, and `3` for invalid input or configuration.
-
-## Additional report fields
-
-### `estimated_additional_trials`
-
-For an inconclusive fixed-sample metric, this estimates how many more observations might be needed
-if the current effect persists. Closed forms are used where available; bootstrap metrics use an
-`O(1/sqrt(n))` width-scaling heuristic. The field is advisory and may be `null`, including when the
-current effect lies inside the threshold dead zone.
-
-### `inconclusive_kind`
-
-- `directional`: the interval excludes zero but does not clear a decision threshold.
-- `noise`: the interval still spans zero.
-- `null`: the result is not a normal CI judgment, such as zero usable observations or a validity
-  cap breach.
-
-### `warnings`
-
-Warnings identify small samples, high failure or draw rates, sparse quantile tails, wide baseline
-scales, non-finite Elo endpoints, and other known interpretation risks. They are transparent rules
-of thumb and do not modify the verdict.
+JSON Schemas in [`schemas/`](../schemas/) are the machine-readable field contracts.
 
 ## References
 

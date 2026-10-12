@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.2] - 2026-10-12
+
 ### Added
 
 - **Opt-in `paired-elo` fixed-sample metric.** With `--paired-by-id`, every ID must contain exactly
@@ -19,6 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   percentile-bootstrap interval by resampling complete pairs. Existing `elo` pairing and
   pentanomial SPRT behavior are unchanged. Coverage calibration includes draw-heavy and positively
   correlated pair generators.
+
+### Changed
+
+- Reorganized the English and Japanese documentation by audience: the READMEs now cover setup and
+  first use, the metrics references hold shipped statistical contracts, and the research maps use
+  compact activation-condition tables for unshipped work. Corrected the Elo documentation to match
+  the implemented finite shutout clamp.
 
 ## [0.19.1] - 2026-10-03
 
