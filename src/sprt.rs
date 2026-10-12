@@ -66,6 +66,56 @@ impl SprtVariant {
     }
 }
 
+/// Typed policy options for [`run_with_options`]. Statistical hypotheses and error rates remain
+/// in [`SprtConfig`]; this type groups the execution policies that previously occupied six
+/// positional arguments in [`run`].
+///
+/// The default is an unpaired Wald run with failures reported but not synthesized into outcomes,
+/// incomplete IDs tolerated, and no paired-ID limits. Variant-specific requirements are validated
+/// centrally by [`run_with_options`]; for example, pentanomial runs must opt into pairing.
+///
+/// ```
+/// use veridict::sprt::{SprtRunOptions, SprtVariant};
+///
+/// let options = SprtRunOptions {
+///     variant: SprtVariant::Pentanomial,
+///     paired_by_id: true,
+///     min_paired_ids: Some(100),
+///     ..SprtRunOptions::default()
+/// };
+/// assert_eq!(options.max_paired_ids, None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SprtRunOptions {
+    pub variant: SprtVariant,
+    pub paired_by_id: bool,
+    pub failure_policy: FailurePolicy,
+    pub require_complete_pairs: bool,
+    pub min_paired_ids: Option<u64>,
+    pub max_paired_ids: Option<u64>,
+}
+
+impl SprtRunOptions {
+    /// Creates options for `variant` with every optional policy disabled and
+    /// [`FailurePolicy::ReportOnly`].
+    pub const fn new(variant: SprtVariant) -> Self {
+        Self {
+            variant,
+            paired_by_id: false,
+            failure_policy: FailurePolicy::ReportOnly,
+            require_complete_pairs: false,
+            min_paired_ids: None,
+            max_paired_ids: None,
+        }
+    }
+}
+
+impl Default for SprtRunOptions {
+    fn default() -> Self {
+        Self::new(SprtVariant::Wald)
+    }
+}
+
 pub struct SprtConfig {
     /// H0 hypothesis gap. Logistic Elo for `SprtVariant::Wald`/`Pentanomial`,
     /// BayesElo for `SprtVariant::Trinomial` - see `SprtVariant`'s doc for
@@ -679,6 +729,41 @@ fn evaluate_outcomes_sequential(
     }
 }
 
+/// Compatibility entry point for callers using the original positional API.
+///
+/// New integrations should prefer [`run_with_options`]. This wrapper constructs
+/// [`SprtRunOptions`] and delegates to the same validation and execution path, so report and error
+/// behavior remain identical.
+#[allow(clippy::too_many_arguments)]
+pub fn run<I>(
+    records: I,
+    config: &SprtConfig,
+    variant: SprtVariant,
+    paired_by_id: bool,
+    failure_policy: FailurePolicy,
+    require_complete_pairs: bool,
+    min_paired_ids: Option<u64>,
+    max_paired_ids: Option<u64>,
+) -> Result<SprtReport, VeridictError>
+where
+    I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
+{
+    run_with_options(
+        records,
+        config,
+        SprtRunOptions {
+            variant,
+            paired_by_id,
+            failure_policy,
+            require_complete_pairs,
+            min_paired_ids,
+            max_paired_ids,
+        },
+    )
+}
+
+/// Runs an SPRT with a typed set of execution policies.
+///
 /// `paired_by_id`: see `metrics::compute` - two records sharing an `id` are
 /// combined into one net observation (by total points across the pair)
 /// instead of two independent trials. `records` is a streaming iterator, but sequential replay
@@ -705,20 +790,22 @@ fn evaluate_outcomes_sequential(
 /// "never silently ignore invalid data" precedent as the `paired_by_id` check above. Folded
 /// directly into the sequential walk (see the module doc and `evaluate_pentanomial_sequential`),
 /// not applied as a post-hoc gate on the final aggregate.
-#[allow(clippy::too_many_arguments)]
-pub fn run<I>(
+pub fn run_with_options<I>(
     records: I,
     config: &SprtConfig,
-    variant: SprtVariant,
-    paired_by_id: bool,
-    failure_policy: FailurePolicy,
-    require_complete_pairs: bool,
-    min_paired_ids: Option<u64>,
-    max_paired_ids: Option<u64>,
+    options: SprtRunOptions,
 ) -> Result<SprtReport, VeridictError>
 where
     I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
 {
+    let SprtRunOptions {
+        variant,
+        paired_by_id,
+        failure_policy,
+        require_complete_pairs,
+        min_paired_ids,
+        max_paired_ids,
+    } = options;
     let mut records = records.into_iter().peekable();
     if records.peek().is_none() {
         return Err(VeridictError::EmptyInput);
@@ -1145,6 +1232,76 @@ mod tests {
             baseline_status: None,
             candidate_status: None,
         }
+    }
+
+    #[test]
+    fn run_options_defaults_are_explicit() {
+        assert_eq!(
+            SprtRunOptions::default(),
+            SprtRunOptions {
+                variant: SprtVariant::Wald,
+                paired_by_id: false,
+                failure_policy: FailurePolicy::ReportOnly,
+                require_complete_pairs: false,
+                min_paired_ids: None,
+                max_paired_ids: None,
+            }
+        );
+        assert_eq!(
+            SprtRunOptions::new(SprtVariant::Trinomial).variant,
+            SprtVariant::Trinomial
+        );
+    }
+
+    #[test]
+    fn typed_options_match_the_positional_compatibility_wrapper() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records: Vec<_> = (0..200)
+            .map(|i| (i + 1, rec(Some("candidate_win"))))
+            .collect();
+        let positional = run(
+            ok_iter(&records),
+            &config,
+            SprtVariant::Wald,
+            false,
+            FailurePolicy::ReportOnly,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let typed =
+            run_with_options(ok_iter(&records), &config, SprtRunOptions::default()).unwrap();
+
+        assert_eq!(typed.to_json_pretty(), positional.to_json_pretty());
+    }
+
+    #[test]
+    fn typed_options_centrally_validate_wald_trinomial_and_pentanomial() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records = [(1, rec_with_id(Some("pair-1"), Some("candidate_win")))];
+
+        for variant in [SprtVariant::Wald, SprtVariant::Trinomial] {
+            let error = run_with_options(
+                ok_iter(&records),
+                &config,
+                SprtRunOptions {
+                    variant,
+                    min_paired_ids: Some(1),
+                    ..SprtRunOptions::default()
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, VeridictError::InvalidThreshold(_)));
+        }
+
+        let error = run_with_options(
+            ok_iter(&records),
+            &config,
+            SprtRunOptions::new(SprtVariant::Pentanomial),
+        )
+        .unwrap_err();
+        assert!(matches!(error, VeridictError::InvalidThreshold(_)));
     }
 
     #[test]

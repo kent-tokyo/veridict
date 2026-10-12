@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use veridict::correction::Correction;
-use veridict::sprt::{SprtConfig, SprtVariant};
+use veridict::sprt::{SprtConfig, SprtRunOptions, SprtVariant};
 use veridict::stats::bootstrap::{DEFAULT_SEED, sample_sd};
 use veridict::verdict::{self, Thresholds};
 use veridict::{
@@ -1148,15 +1148,17 @@ fn run_sprt(args: SprtArgs) -> Result<ExitCode, VeridictError> {
     let records = read_records(&args.input, format)?;
     let failure_policy: FailurePolicy = args.failure_policy.into();
 
-    let mut report = veridict::sprt::run(
+    let mut report = veridict::sprt::run_with_options(
         records,
         &config,
-        variant,
-        args.paired_by_id,
-        failure_policy,
-        args.require_complete_pairs,
-        args.min_paired_ids,
-        args.max_paired_ids,
+        SprtRunOptions {
+            variant,
+            paired_by_id: args.paired_by_id,
+            failure_policy,
+            require_complete_pairs: args.require_complete_pairs,
+            min_paired_ids: args.min_paired_ids,
+            max_paired_ids: args.max_paired_ids,
+        },
     )?;
     let caps = FailureCaps {
         max_timeouts: args.max_timeouts,

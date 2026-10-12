@@ -123,6 +123,11 @@ lower = ln(beta / (1 - alpha))
 `ignored_*_after_stop` は再生状況を示します。schema v1との互換性のため、Wald/trinomialの接頭辞なし
 件数と `llr` は入力全体を表します。これらから判定を再構成しないでください。
 
+ライブラリからは、`SprtRunOptions` を渡す
+`sprt::run_with_options(records, config, options)` を推奨します。既定値はWald、非ペア、
+`FailurePolicy::ReportOnly`、不完全IDを許容、ペアID上下限なしです。従来の位置引数版
+`sprt::run` も互換ラッパーとして残り、同じ検証経路を使います。
+
 ## 補助コマンド
 
 ### `matrix` と `plan`

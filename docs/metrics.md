@@ -133,6 +133,11 @@ Use `verdict`, `promotion`, and `decision_*` for the decision. Generic `availabl
 unprefixed Wald/trinomial counts and `llr` still describe the full input; do not reconstruct the
 decision from them.
 
+Library callers should prefer `sprt::run_with_options(records, config, options)` with
+`SprtRunOptions`. Its default is Wald, unpaired, `FailurePolicy::ReportOnly`, incomplete IDs
+tolerated, and no paired-ID limits. The original positional `sprt::run` remains available as a
+compatibility wrapper and uses the same validation path.
+
 ## Supporting commands
 
 ### `matrix` and `plan`
