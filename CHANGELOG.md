@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- GitHub Actions workflows now use `actions/checkout@v7`, avoiding the deprecated Node.js 20
+  runtime used by v4.
 - SPRT reports now declare schema version 2 because `warnings` and `data_quality` are required.
   The original strict v1 contract remains available as `schemas/sprt-report-v1.schema.json`; there
   is no legacy-output mode.
