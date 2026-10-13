@@ -3,6 +3,8 @@
 //! block that hosted Actions executes rather than a second copy that can drift.
 
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +64,17 @@ fn run_gate(
     manifest: &str,
     arguments_json: &str,
 ) -> GateRun {
+    run_gate_impl(case, command, input, manifest, arguments_json, false)
+}
+
+fn run_gate_impl(
+    case: &str,
+    command: &str,
+    input: &str,
+    manifest: &str,
+    arguments_json: &str,
+    simulate_legacy_usage_error: bool,
+) -> GateRun {
     let root = unique_temp_dir(case);
     fs::create_dir_all(&root).unwrap();
     let script = root.join("run-gate.sh");
@@ -69,7 +82,24 @@ fn run_gate(
     fs::write(&script, extracted_gate_script()).unwrap();
 
     let binary = Path::new(env!("CARGO_BIN_EXE_veridict"));
-    let mut paths = vec![binary.parent().unwrap().to_path_buf()];
+    let binary_dir = if simulate_legacy_usage_error {
+        let stub_dir = root.join("stub-bin");
+        fs::create_dir(&stub_dir).unwrap();
+        let stub = stub_dir.join("veridict");
+        fs::write(
+            &stub,
+            "#!/usr/bin/env bash\nprintf 'error: invalid value from legacy clap\\n' >&2\nexit 2\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(not(unix))]
+        panic!("legacy CLI stub execution requires Unix permissions");
+        stub_dir
+    } else {
+        binary.parent().unwrap().to_path_buf()
+    };
+    let mut paths = vec![binary_dir];
     paths.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
@@ -159,6 +189,25 @@ fn workflow_runner_supports_sprt_and_verify_run() {
         "[]",
     );
     assert_evidence(&verify, 0, true);
+}
+
+#[test]
+#[cfg(unix)]
+fn workflow_normalizes_legacy_cli_usage_errors_to_invalid() {
+    let run = run_gate_impl(
+        "invalid-cli-argument",
+        "compare",
+        "tests/fixtures/action_pass.jsonl",
+        "",
+        r#"["--metric","not-a-metric"]"#,
+        true,
+    );
+    assert_evidence(&run, 3, false);
+    assert!(
+        fs::read_to_string(run.report_dir().join("stderr.txt"))
+            .unwrap()
+            .contains("invalid value from legacy clap")
+    );
 }
 
 #[test]

@@ -1352,7 +1352,7 @@ fn power_horizon_requires_sprt() {
             "500",
         ])
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::contains("--sprt"));
 }
 
@@ -1609,7 +1609,7 @@ fn cluster_by_id_conflicts_with_paired_by_id() {
         ])
         .write_stdin("{\"result\":\"candidate_win\"}\n")
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
@@ -2802,7 +2802,7 @@ fn correction_rejects_an_unknown_method() {
         ])
         .write_stdin(marginal_winrate_stdin())
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::contains("invalid value"));
 }
 
@@ -2906,7 +2906,7 @@ fn claim_correction_and_deprecated_correction_together_is_a_config_error() {
         ])
         .write_stdin(marginal_winrate_stdin())
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::contains("cannot be used with"));
 }
 
@@ -3669,10 +3669,7 @@ fn min_effect_duplicate_metric_override_exits_three() {
 }
 
 #[test]
-fn min_effect_unknown_metric_name_exits_two() {
-    // A clap-level parse failure (exit 2), not run_compare's own semantic check (exit 3) - and 2
-    // also happens to be this project's own "inconclusive" exit code, so assert the stderr text
-    // too rather than trusting the exit code alone to prove a parse failure actually happened.
+fn min_effect_unknown_metric_name_exits_three() {
     veridict()
         .args([
             "compare",
@@ -3684,8 +3681,32 @@ fn min_effect_unknown_metric_name_exits_two() {
         ])
         .write_stdin(min_effect_multi_metric_stdin())
         .assert()
-        .code(2)
+        .code(3)
         .stderr(predicate::str::contains("invalid value"));
+}
+
+#[test]
+fn clap_usage_errors_do_not_collide_with_inconclusive_exit_code() {
+    veridict()
+        .args(["compare", "-"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("--metric"));
+}
+
+#[test]
+fn clap_help_and_version_still_exit_successfully() {
+    veridict()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage:"));
+
+    veridict()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]

@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI argument and usage errors now exit with code 3 instead of colliding with the statistical
+  `inconclusive` exit code 2. Help and version output still exit successfully. The reusable
+  workflow also normalizes report-less exit code 2 from its pinned v0.19.5 binary to code 3.
 - Mean and bootstrap aggregation now applies compensated summation consistently, including
   mixed-sign inputs whose cancellation error was previously below a magnitude-ratio trigger.
 

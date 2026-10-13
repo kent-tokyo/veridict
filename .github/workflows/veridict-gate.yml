@@ -131,6 +131,15 @@ jobs:
             report_generated=true
           fi
 
+          # v0.19.5 inherits clap's exit 2 for CLI usage errors. In veridict's
+          # public contract, 2 means a statistical inconclusive result, which
+          # always produces both managed reports. Normalize a report-less 2 to
+          # the invalid input/configuration code while this workflow is pinned
+          # to that release.
+          if [ "$exit_code" -eq 2 ] && [ "$report_generated" = false ]; then
+            exit_code=3
+          fi
+
           # shellcheck disable=SC2016 # jq variables below are intentional.
           jq -n \
             --arg command "$VERIDICT_COMMAND" \

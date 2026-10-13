@@ -5,7 +5,7 @@ use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
 
 use veridict::correction::Correction;
 use veridict::sprt::{SprtConfig, SprtRunOptions, SprtVariant};
@@ -853,7 +853,19 @@ enum RewardKindArg {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = match error.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
+                _ => 3,
+            };
+            if let Err(print_error) = error.print() {
+                eprintln!("error: could not print command-line diagnostic: {print_error}");
+            }
+            return ExitCode::from(exit_code);
+        }
+    };
     match run(cli.command) {
         Ok(code) => code,
         Err(e) => {
