@@ -9,7 +9,7 @@
   "properties": {
     "schema_version": {
       "const": 1,
-      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+      "description": "Identifies this strict report shape. Because additionalProperties is false, future emitted fields require an explicit schema-version compatibility review."
     },
     "confidence": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
     "candidates": {

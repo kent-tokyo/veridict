@@ -40,7 +40,7 @@ jobs:
     outputs:
       exit_code: ${{ steps.run-gate.outputs.exit_code }}
     env:
-      VERIDICT_VERSION: "0.19.5"
+      VERIDICT_VERSION: "0.19.6"
     steps:
       - name: Check out caller repository
         uses: actions/checkout@v7
@@ -131,11 +131,9 @@ jobs:
             report_generated=true
           fi
 
-          # v0.19.5 inherits clap's exit 2 for CLI usage errors. In veridict's
-          # public contract, 2 means a statistical inconclusive result, which
-          # always produces both managed reports. Normalize a report-less 2 to
-          # the invalid input/configuration code while this workflow is pinned
-          # to that release.
+          # In veridict's public contract, 2 means a statistical inconclusive
+          # result, which always produces both managed reports. Defensively
+          # normalize a report-less 2 to the invalid input/configuration code.
           if [ "$exit_code" -eq 2 ] && [ "$report_generated" = false ]; then
             exit_code=3
           fi

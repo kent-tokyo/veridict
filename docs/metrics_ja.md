@@ -2,8 +2,9 @@
 
 [English](metrics.md) | 日本語
 
-この文書は実装済みの統計仕様を定めます。使用例は[README](../README_ja.md)、未実装の候補は
-[リサーチマップ](research-map_ja.md)を参照してください。
+この文書は公開版`0.19.6`の仕様を定めます。対応するソースは
+[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6)に残しています。
+使用例は[README](../README_ja.md)、未実装の候補は[リサーチマップ](research-map_ja.md)を参照してください。
 
 ## 判定契約
 
@@ -102,6 +103,8 @@ ID単位の1観測、3件以上なら不正です。勝敗メトリクスは2件
 
 ## 逐次検定
 
+### 判定規則とバリアント
+
 `sprt` は単純仮説を次の境界で比較します。
 
 ```text
@@ -123,33 +126,38 @@ lower = ln(beta / (1 - alpha))
 | `trinomial` | 勝ち・引き分け・負けの一般化LLR。`--belo0` と `--belo1` のBayesElo |
 | `pentanomial` | 完了ペア得点 `{0, 0.5, 1, 1.5, 2}`。ロジスティックEloと `--paired-by-id` |
 
-すべてのバリアントが入力順に再生し、最初の有効な境界到達を保持します。Waldとtrinomialは利用可能な
-試行ごと、ペア化時は正味ペアの完了ごとに評価し、pentanomialは完了ペアごとに評価します。停止後の
-レコードは判定プレフィックスを変えませんが、入力検証と失敗上限の集計対象です。
+すべてのバリアントが入力順に再生し、最初の有効な境界到達を保持します。`wald`と`trinomial`は利用可能な
+試行ごと、ペア化時は正味ペアの完了ごとに評価し、`pentanomial`は完了ペアごとに評価します。停止後の
+レコードは判定時点の値を変えませんが、入力検証と失敗上限の集計対象です。
 `--min-paired-ids`、`--max-paired-ids`、`--require-complete-pairs` は、対応するペアモードを制約します。
 
+### レポート項目と入力の再生
+
 判定には `verdict`、`promotion`、`decision_*` を使います。`available_*`、`analyzed_*`、`stopping_*`、
-`ignored_*_after_stop` は再生状況を示します。schema v1との互換性のため、Wald/trinomialの接頭辞なし
-件数と `llr` は入力全体を表します。これらから判定を再構成しないでください。
+`ignored_*_after_stop` は再生状況を示します。schema v1との互換性のため、`wald`と`trinomial`では、
+接頭辞のない件数と `llr` が入力全体の値を表します。これらから判定を再構成しないでください。
 
 SPRTレポートは、非ペアモードでID付きレコードが10件以上あり、同じIDが3回以上現れた場合に、
 `data_quality.low_id_diversity` と対応する `warnings` を出します。判定材料はIDの構造だけで、
 LLR、`verdict`、`validity`、`promotion` は変えません。各IDがちょうど2回ずつ現れる場合と、
 `--paired-by-id` の使用時は、重複IDにペアとしての意味があるため警告しません。
 
+### ライブラリAPIとチェックポイント
+
 ライブラリからは、`SprtRunOptions` を渡す
-`sprt::run_with_options(records, config, options)` を推奨します。既定値はWald、非ペア、
+`sprt::run_with_options(records, config, options)` を推奨します。既定値は`wald`、非ペア、
 `FailurePolicy::ReportOnly`、不完全IDを許容、ペアID上下限なしです。従来の位置引数版
 `sprt::run` も互換ラッパーとして残り、同じ検証経路を使います。
 
-長時間動くデータ生成側では、`sprt::SprtAccumulator` にレコードを1件ずつ追加できます。
-`snapshot()` が返す `SprtCheckpoint` をserdeで保存し、再起動後に復号して
+長時間動くデータ生成側では、`sprt::SprtAccumulator` にレコードを追加し、`snapshot()` が返す
+`SprtCheckpoint` を保存できます。再開時は、生成側が別に保存したカーソルを `expected_position` として
 `SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)` に渡します。
-`expected_position` は、生成側がcheckpointとは別に永続化したcursorから取得してください。
-checkpoint version、仮説、option、レコード数、最終行、prefix fingerprintのいずれかが異なる場合は
-復元を拒否します。増分の `push` は、実際の入力順どおりに単調増加する行番号を渡す必要があります。
-最初の境界到達、不完全ペア、失敗集計も再起動をまたいで保持します。prefix fingerprintは取り違えの
-検出用であり、改ざん検知や認証には使えません。
+
+チェックポイントの版、仮説、オプション、レコード数、最終行、先頭部分のフィンガープリントが異なる
+場合は復元を拒否します。`push` の行番号は入力順に増加させてください。最初の境界到達、不完全ペア、
+失敗集計は再開後も維持します。フィンガープリントは入力の取り違えを検出するもので、認証には使えません。
+失敗上限はチェックポイントのオプションに含まれません。CLIと同じ妥当性・昇格判定が必要な場合は、
+完了した一括レポートと再開レポートへ同じ `FailureCaps` を適用してください。
 
 ## 補助コマンド
 
@@ -180,7 +188,8 @@ checkpoint version、仮説、option、レコード数、最終行、prefix fing
 
 ### `time-sensitive`
 
-`time-sensitive` は有限の報酬期間を持つ、実験的なBernoulli単純仮説間の片側・任意停止妥当な検定です。
+`time-sensitive` は、ベルヌーイ分布の2つの単純仮説を比べる実験的な片側検定です。有限の報酬期間を持ち、
+任意の停止時点でも妥当性を保ちます。
 方策は `bellman`、`edo`、`gro`、報酬は `hard-deadline`、`exponential`、カスタムスケジュールです。
 引き分けはwealthを変えずに時間だけ進めます。Elo、引き分けを分けた仮説、複合仮説のオンライン推定には
 対応しません。
@@ -192,19 +201,22 @@ checkpoint version、仮説、option、レコード数、最終行、prefix fing
 - `inconclusive_kind` は、区間がゼロを除外すれば `directional`、ゼロをまたげば `noise`、通常の
   区間判定が成立しなければ `null` です。
 - `warnings` は小標本、失敗、引き分け、疎な裾、広いスケールなどの解釈リスクを示します。
-  通常は判定を変えません。ただし、固定標本レポートの独立した分析単位が2件未満の場合は、
-  1件だけでは経験的な不確実性を推定できないため、warningとは別の判定規則で`inconclusive`に
-  します。`paired-elo`では完成ペア、その他のペアモードではIDグループまたはIDなしの観測、
-  クラスタ分析ではクラスタが独立単位です。公平な2試行1組を全列挙すると、従来は同確率の4通り中
-  1通りが誤passでしたが、この下限により4通りとも
-  `inconclusive`になります。30件未満のwarningは引き続き出します。2件あれば小標本の誤判定率が
-  一般に保証される、という意味ではありません。
+  通常は判定を変えません。
 
-機械可読なフィールド契約は [`schemas/`](../schemas/) のJSON Schemaです。SPRTレポートは、
-`warnings`と`data_quality`を必須項目にした`0.19.5`後の出力からschema v2を使います。以前の厳格な
-consumer向けには [`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) を残します。
-v1出力モードは設けません。consumerはレポートの`schema_version`に対応するschemaを選び、v2を
-受理する前に移行してください。
+### 小標本の下限
+
+固定標本レポートでは、独立した分析単位が2件未満なら `inconclusive` にします。1件だけでは経験的な
+不確実性を推定できないためです。`paired-elo`では完成ペア、その他のペアモードではIDグループまたは
+IDなしの観測、クラスタ分析ではクラスタを1単位と数えます。30件未満では引き続き警告します。
+2件あれば小標本の誤判定率が保証される、という意味ではありません。
+
+[`schemas/`](../schemas/) のJSON Schemaは、記載された入出力形式を対象とします。ただし、実験的な
+`time-sensitive` レポートにはまだ対応スキーマがありません。現在のソースツリーのSPRTレポートは、
+`warnings`と`data_quality`を必須にしたschema v2です。
+[`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) は、これらの項目を追加する前の厳格な
+形を保存します。公開版`0.19.5`はversion番号1のまま両項目を出力したため、この厳格な旧スキーマには
+適合しません。現在のソースツリーにv1出力モードはありません。履歴データを検証するときは、生成元の
+版を固定したうえで `schema_version` に対応するスキーマを選んでください。
 
 ## 参考文献
 

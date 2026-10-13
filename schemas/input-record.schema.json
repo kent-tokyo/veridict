@@ -2,9 +2,30 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/input-record.schema.json",
   "title": "veridict input record",
-  "description": "One JSONL line (or CSV row) for `veridict compare`, `sprt`, or `matrix` legacy per-file mode. Every field is optional at the schema level. The selected metric determines which combination is usable; see README.md#input. At least one of result, baseline+candidate, baseline_status, or candidate_status must be present.",
+  "description": "One JSONL line (or CSV row) for `veridict compare`, `sprt`, or `matrix` legacy per-file mode. The selected metric determines which combination is usable; see README.md#input. At least one non-null result, baseline+candidate pair, baseline_status, or candidate_status must be present. Unknown fields are accepted as caller metadata and ignored by these commands.",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": ["result"],
+      "properties": { "result": { "type": "string" } }
+    },
+    {
+      "required": ["baseline", "candidate"],
+      "properties": {
+        "baseline": { "type": "number" },
+        "candidate": { "type": "number" }
+      }
+    },
+    {
+      "required": ["baseline_status"],
+      "properties": { "baseline_status": { "type": "string" } }
+    },
+    {
+      "required": ["candidate_status"],
+      "properties": { "candidate_status": { "type": "string" } }
+    }
+  ],
   "properties": {
     "id": {
       "type": ["string", "null"],

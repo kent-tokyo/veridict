@@ -10,6 +10,9 @@
 採用後の操作は呼び出し側が担います。責任範囲と開発の優先順位は
 [プロダクトの目的と範囲](docs/product-scope_ja.md)にまとめています。
 
+リポジトリ内の文書は現在のソースツリーを説明します。このリリースは`0.19.6`です。対応するソースと
+文書は[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6)を参照してください。
+
 ## インストール
 
 ```bash
@@ -110,7 +113,10 @@ veridict compare paired.jsonl \
 - `--failure-policy` は勝敗への反映方法を決めます。失敗件数と妥当性上限は常に報告します。
 - `--metric` を繰り返すと複数項目をまとめて判定します。優先順位は
   `fail > inconclusive > pass` です。
-- `--claim-correction bonferroni|holm` は、対応するメトリクスに一群補正結果を追加します。
+- `--claim-correction bonferroni|holm` は、対応するメトリクスに複数の主張をまとめて補正した結果を
+  追加します。
+- 固定標本で決定的な判定を出すには、独立した分析単位が2件以上必要です。2件未満なら
+  `inconclusive` になります。
 
 ## 判定と出力
 
@@ -137,18 +143,23 @@ veridictの版をインストールし、呼び出し側が用意した結果だ
 ```yaml
 jobs:
   gate:
-    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@master
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.6
     with:
       command: compare
       input_path: results.jsonl
       arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
 ```
 
-本番ではworkflowの参照先をrelease tagまたはcommit SHAに固定してください。`veridict-report` artifactを
-保存してから、終了コード `0`、`1`、`2`、`3` をjobへ反映します。有効な統計処理では
-`report.json`と`report.md`を保存します。入力不正の場合は統計レポートを作らず、`gate.json`、
-`gate.md`、`stderr.txt`を証拠として残します。`arguments_json`はJSON文字列配列で指定するため、
-shellによる再評価は行いません。
+このworkflowはveridict `0.19.6`をインストールします。本番利用では、次の点を守ってください。
+
+- workflowの参照先をrelease tagまたは完全なcommit SHAに固定する。
+- 有効な統計処理では、終了コード `0`、`1`、`2`、`3` をjobへ反映する前に
+  `report.json`と`report.md`を保存する。
+- 入力不正では統計レポートを作らず、`gate.json`、`gate.md`、`stderr.txt`を証拠として残す。
+- `arguments_json`はJSON文字列配列で渡す。各引数の境界は維持され、shellでは再評価されない。
+
+`compare`と`sprt`の終了コード`0`〜`3`は、順にpass、fail、inconclusive、入力・設定不正です。
+`verify-run`の`1`は構造上の不備を表し、統計的な`fail`ではありません。
 
 ## ドキュメント
 
@@ -157,7 +168,8 @@ shellによる再評価は行いません。
 - [`docs/performance_ja.md`](docs/performance_ja.md): ストリーミング、保持状態、ベンチマーク契約。
 - [`docs/research-map_ja.md`](docs/research-map_ja.md): 未実装候補と着手条件。
 - [`CHANGELOG.md`](CHANGELOG.md): リリース履歴。
-- [JSON Schemas](schemas/): 入出力形式の機械可読な契約。
+- [JSON Schemas](schemas/): 記載された入出力形式の版付き契約。`time-sensitive`のレポートスキーマは
+  まだありません。
 
 ## 開発
 

@@ -2,9 +2,9 @@
 
 English | [日本語](research-map_ja.md)
 
-This file records plausible features that are not shipped. It is not a schedule. Shipped behavior
-belongs in [`metrics.md`](metrics.md). Product boundaries and development priorities are defined
-in [Product scope](product-scope.md).
+This file records plausible but unimplemented features; it is not a schedule. Current-source
+behavior belongs in [`metrics.md`](metrics.md). Product boundaries and priorities are defined in
+[Product scope](product-scope.md).
 
 Correctness fixes to shipped decisions take priority over these candidates. In particular, false
 passes, non-finite calculations, and degenerate confidence intervals are reliability work, not
@@ -56,11 +56,9 @@ If numeric clustering is activated, priority is `mean-diff`, `relative-diff`, `q
 
 ## Out of scope
 
-- Benchmark or match runners, domain-specific judges, and metric producers.
-- Experiment databases, dashboards, cloud services, and distributed workers.
-- Prediction-set construction, local-risk models, and threshold-selection systems.
-- Causal discovery, intervention selection, and adaptive experiment control.
-- Presets tied to a particular engine, model, or dataset.
+The exclusions in [Product scope](product-scope.md#work-owned-by-other-tools) apply here. In
+particular, runners, domain-specific judges, experiment infrastructure, adaptive control, and
+presets tied to one engine, model, or dataset do not move into the core through this research map.
 
 External tools may emit generic scores, outcomes, statuses, or run envelopes for `veridict` to
 judge. The dependency remains one-way.

@@ -111,7 +111,7 @@ fn run_gate_impl(
         .env("PATH", path)
         .env("RUNNER_TEMP", &root)
         .env("GITHUB_OUTPUT", &output_file)
-        .env("VERIDICT_VERSION", "0.19.5")
+        .env("VERIDICT_VERSION", "0.19.6")
         .env("VERIDICT_COMMAND", command)
         .env("VERIDICT_INPUT", input)
         .env("VERIDICT_MANIFEST", manifest)
@@ -213,7 +213,7 @@ fn workflow_normalizes_legacy_cli_usage_errors_to_invalid() {
 #[test]
 fn workflow_pins_the_crate_and_requires_no_consumer_secret() {
     let workflow = fs::read_to_string(WORKFLOW).unwrap();
-    assert!(workflow.contains("VERIDICT_VERSION: \"0.19.5\""));
+    assert!(workflow.contains("VERIDICT_VERSION: \"0.19.6\""));
     assert!(workflow.contains("cargo install veridict --version \"=$VERIDICT_VERSION\" --locked"));
     assert!(workflow.contains("uses: actions/upload-artifact@v4"));
     assert!(workflow.contains("if: always()"));

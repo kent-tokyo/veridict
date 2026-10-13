@@ -6,16 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 `veridict` is a domain-agnostic statistical decision gate. See
-[`docs/metrics.md`](docs/metrics.md) for shipped behavior and
+[`docs/metrics.md`](docs/metrics.md) for current-source behavior and
 [`docs/research-map.md`](docs/research-map.md) for deferred or excluded work.
 
 ## [Unreleased]
+
+## [0.19.6] - 2026-10-14
 
 ### Added
 
 - Added `sprt::SprtAccumulator` and serializable `SprtCheckpoint` for incremental, resumable Wald,
   trinomial, and pentanomial runs. Resume validates checkpoint version, hypotheses, execution
-  options, and a separately persisted stream position; batch and resumed reports are identical.
+  options, and a separately persisted stream position. Core batch and resumed reports are
+  identical; callers apply the same `FailureCaps` afterward when they need CLI-equivalent
+  validity and promotion.
 - Added a reusable GitHub Actions workflow for pinned-version `compare`, `sprt`, and `verify-run`
   gates. It uploads JSON/Markdown reports before preserving verdict exit codes, retains explicit
   error evidence for invalid input, and requires no consumer secret.
@@ -33,12 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is no legacy-output mode.
 - Fixed-sample comparisons with fewer than two independent trials, completed pairs, or clusters
   now return `inconclusive` instead of deriving a decisive verdict from a one-point interval.
+- Documentation now separates versioned release contracts from current-source behavior, states
+  command-specific workflow exit codes, and consolidates the roadmap and metric reference.
+- Strict JSON schemas now require an explicit version-compatibility review when a report adds
+  emitted fields. The generic input-record schema now rejects empty records while accepting the
+  extra caller metadata that the CLI ignores.
 
 ### Fixed
 
 - CLI argument and usage errors now exit with code 3 instead of colliding with the statistical
   `inconclusive` exit code 2. Help and version output still exit successfully. The reusable
-  workflow also normalizes report-less exit code 2 from its pinned v0.19.5 binary to code 3.
+  workflow defensively normalizes any report-less exit code 2 to code 3.
 - Mean and bootstrap aggregation now applies compensated summation consistently, including
   mixed-sign inputs whose cancellation error was previously below a magnitude-ratio trigger.
 
@@ -57,7 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - JSONL parsing now reuses its line buffer, and unpaired Wald/Trinomial SPRT keeps incremental
   full-input and decision-prefix counters instead of retaining every outcome. The first-crossing,
-  complete-input validation, and report contracts are unchanged.
+  complete-input validation, and decision semantics are unchanged. Reports add the ID-diversity
+  advisory fields described above while retaining schema version 1 in this release.
 
 ### Fixed
 
@@ -468,7 +478,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already-built report (`verdict::apply_failure_caps`/`apply_failure_caps_to_multi`,
   `sprt::apply_failure_caps`), the same "mutate a finished report" shape `--correction` already
   uses. Unset (the default): uncapped, existing behavior, byte-identical JSON. See
-  [`docs/metrics.md`](docs/metrics.md#failures-and-evidence-validity) and
+  [`docs/metrics.md`](docs/metrics.md#pairing-clustering-and-failures) and
   `docs/metrics.md`'s `--max-timeouts`/`--max-crashes`/`--max-invalid` section.
 - **`power --sprt --horizon N`**: a Monte Carlo estimate (`probability_no_decision_by_horizon`,
   2,000 replications, fixed seed) of how often a real `veridict sprt` run still won't have reached
@@ -490,7 +500,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `mean-diff`/`sign-test`/`quantile-diff` cluster support is deferred (see
   `docs/research-map.md`) - those metrics bootstrap by individual record today, not by outcome
   tally, so real support needs separate collector wiring. See
-  [`docs/metrics.md`](docs/metrics.md#pairing-and-clustering) and its `--cluster-by-id`
+  [`docs/metrics.md`](docs/metrics.md#pairing-clustering-and-failures) and its `--cluster-by-id`
   section. `estimated_additional_trials`
   is always `null` under `--cluster-by-id`, even when `inconclusive` - it would otherwise
   binary-search wilson/jeffreys/exact against a report whose displayed CI is a cluster bootstrap,

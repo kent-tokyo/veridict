@@ -33,7 +33,7 @@
   "properties": {
     "schema_version": {
       "const": 1,
-      "description": "Stays 1 across additive changes (new fields/variants); bumps only when a field is removed or renamed."
+      "description": "Identifies this strict report shape. Because additionalProperties is false, future emitted fields require an explicit schema-version compatibility review."
     },
     "verdict": { "$ref": "#/$defs/verdict" },
     "validity": {

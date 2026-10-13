@@ -2,8 +2,10 @@
 
 English | [日本語](metrics_ja.md)
 
-This document defines shipped statistical behavior. Start with the [README](../README.md) for
-examples. Unshipped ideas belong in the [research map](research-map.md).
+This document defines behavior in release `0.19.6`. The exact source remains in the
+[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6). Start with the
+[README](../README.md) for examples; unimplemented ideas belong in the
+[research map](research-map.md).
 
 ## Decision contract
 
@@ -109,6 +111,8 @@ intervals cannot be reconstructed from the supported closed-form binomial model.
 
 ## Sequential tests
 
+### Decision rule and variants
+
 `sprt` compares simple hypotheses with boundaries:
 
 ```text
@@ -137,6 +141,8 @@ pair. Records after stopping do not change the decision prefix but are still val
 for failure caps. `--min-paired-ids`, `--max-paired-ids`, and `--require-complete-pairs` further
 constrain supported paired modes.
 
+### Report fields and input replay
+
 Use `verdict`, `promotion`, and `decision_*` for the decision. Generic `available_*`, `analyzed_*`,
 `stopping_*`, and `ignored_*_after_stop` fields describe the replay. For schema-v1 compatibility,
 unprefixed Wald/trinomial counts and `llr` still describe the full input; do not reconstruct the
@@ -148,20 +154,24 @@ unpaired mode. The signal depends only on ID structure and never changes the LLR
 validity, or promotion. It stays silent when every ID appears exactly twice and whenever
 `--paired-by-id` is active, because repeated IDs have pairing semantics there.
 
+### Library API and checkpoints
+
 Library callers should prefer `sprt::run_with_options(records, config, options)` with
 `SprtRunOptions`. Its default is Wald, unpaired, `FailurePolicy::ReportOnly`, incomplete IDs
 tolerated, and no paired-ID limits. The original positional `sprt::run` remains available as a
 compatibility wrapper and uses the same validation path.
 
-Long-running producers can use `sprt::SprtAccumulator` to add one record at a time. Call
-`snapshot()` and serialize the returned `SprtCheckpoint` with serde; after a restart, deserialize
-it and call `SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)`.
-The expected `SprtStreamPosition` must come from the producer's separately persisted cursor. A
-resume is rejected when the checkpoint version, hypotheses, options, record count, last line, or
-prefix fingerprint differs. Incremental `push` calls must use strictly increasing line numbers in
-the exact input order. This preserves the first boundary crossing and retains incomplete-pair and
-failure state across restarts. The prefix fingerprint detects accidental mix-ups; it is not an
-authentication mechanism.
+Long-running producers can add records through `sprt::SprtAccumulator` and serialize a
+`SprtCheckpoint` returned by `snapshot()`. Resume with
+`SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)`, using a
+separately persisted producer cursor for `expected_position`.
+
+Resume rejects changes to the checkpoint version, hypotheses, options, record count, last line,
+or prefix fingerprint. `push` line numbers must increase in input order. Checkpoints preserve the
+first crossing, incomplete pairs, and failure counts. The fingerprint detects accidental stream
+mix-ups; it does not authenticate data. Failure caps are not checkpoint options; callers that need
+CLI-equivalent validity and promotion must apply the same `FailureCaps` to the finished batch or
+resumed report.
 
 ## Supporting commands
 
@@ -206,20 +216,23 @@ not support Elo, draw-aware hypotheses, or online composite alternatives.
 - `inconclusive_kind` is `directional` when the interval excludes zero, `noise` when it spans zero,
   and `null` when no ordinary interval judgment exists.
 - `warnings` expose interpretation risks such as small samples, failures, draws, sparse tails, or
-  wide scales. Warnings normally do not change the verdict; independently, a fixed-sample report
-  with fewer than two independent analysis units is forced to `inconclusive` because a single
-  observation cannot estimate empirical uncertainty. `paired-elo` uses a completed pair;
-  other paired modes use an ID group or id-less observation; clustering uses a cluster. Exact
-  enumeration of one fair two-trial pair gives one raw
-  false pass among four equally likely outcomes; the floor changes all four reports to
-  `inconclusive`. Samples below 30 still carry a warning, but two units are not a general
-  small-sample error-rate guarantee.
+  wide scales. They normally do not change the verdict.
 
-JSON Schemas in [`schemas/`](../schemas/) are the machine-readable field contracts. SPRT reports
-use schema v2 beginning after `0.19.5`, when `warnings` and `data_quality` became required fields;
-[`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) remains available for strict
-consumers of the earlier shape. There is no v1 output mode; consumers should select the schema by
-the report's `schema_version` and migrate before accepting v2.
+### Small-sample floor
+
+A fixed-sample report with fewer than two independent analysis units is forced to `inconclusive`.
+One observation cannot estimate empirical uncertainty. For `paired-elo`, the unit is a completed
+pair; for other paired modes, it is an ID group or an ID-less observation; for clustering, it is a
+cluster. Samples below 30 still carry a warning. Two units permit evaluation but do not guarantee
+adequate small-sample error rates.
+
+JSON Schemas in [`schemas/`](../schemas/) cover the listed record and report formats, except the
+experimental `time-sensitive` report. Current-source SPRT reports use schema v2 because `warnings`
+and `data_quality` are required. [`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json)
+captures the strict shape before those fields were added; published `0.19.5` reports used version
+number 1 with those extra fields and therefore do not satisfy that strict archived schema. There
+is no v1 output mode in the current source tree. Select schemas by `schema_version`; pin the
+producer version when validating historical output.
 
 ## References
 

@@ -131,12 +131,11 @@ pub struct Report {
     /// strings derived from the same computation as `data_quality`'s flags
     /// (see `collect_data_quality`) - kept for backward compatibility.
     pub warnings: Vec<String>,
-    /// Structured counterpart to `warnings`, additive alongside it (not a
-    /// replacement - `REPORT_SCHEMA_VERSION`'s policy is to stay at `1`
-    /// until a field is removed/renamed, and this is a pure addition).
+    /// Structured counterpart to `warnings`, retained alongside it rather
+    /// than replacing the human-readable messages.
     pub data_quality: DataQuality,
     /// The quantile `quantile-diff` measured (e.g. `0.95` for p95) - `None` for every other
-    /// metric. Additive alongside every other field, same `REPORT_SCHEMA_VERSION` policy.
+    /// metric. Additive alongside every other field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quantile: Option<f64>,
     /// `--cluster-by-id` only (winrate/elo) - number of distinct resampling clusters. `None`

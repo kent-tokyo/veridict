@@ -25,7 +25,7 @@
   "properties": {
     "schema_version": {
       "const": 1,
-      "description": "Same REPORT_SCHEMA_VERSION every other report uses - stays 1 across additive changes."
+      "description": "Identifies this strict report shape. Because additionalProperties is false, future emitted fields require an explicit schema-version compatibility review."
     },
     "validity": {
       "type": "string",

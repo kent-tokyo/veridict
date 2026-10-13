@@ -1,5 +1,7 @@
 # Performance and memory
 
+English | [日本語](performance_ja.md)
+
 Performance work must preserve the verdict contract. Benchmarks are local diagnostics, not claims
 about other tools or hardware.
 
@@ -12,14 +14,14 @@ about other tools or hardware.
 | `sign-test`, unpaired | Counters plus distinct IDs for duplicate validation |
 | Numeric bootstrap metrics | All usable differences and bootstrap draws |
 | `--paired-by-id` / `--cluster-by-id` | Groups keyed by ID until pairing or resampling is complete |
-| Wald / trinomial SPRT, unpaired | Full-input and decision-prefix counters; no outcome schedule |
+| Wald / trinomial SPRT, unpaired | Full-input and decision-prefix counters; supplied IDs additionally retain counts per distinct ID for advisories |
 | Wald / trinomial SPRT, paired | ID groups and the completed-pair schedule for validation and ordered replay |
 | Pentanomial SPRT | ID pairs and completed-pair buckets |
 
 The CLI still parses and validates the entire input after an SPRT boundary crossing. It freezes the
 decision-prefix counters at the first crossing while continuing full-input counts and status checks.
 
-## Reproducing the diagnostics
+## Benchmark contract
 
 ```bash
 cargo bench --bench io_sprt -- --noplot
@@ -44,7 +46,9 @@ final distribution sort and percentile lookup. The isolated times are diagnostic
 added together as an end-to-end estimate: production interleaves resampling and accumulation, so
 cache behavior differs.
 
-## 2026-10-13 local diagnostic
+## Measured baselines
+
+### JSONL and SPRT (2026-10-13)
 
 - Source: changes released in `0.19.5`, measured from the working tree based on commit `027431a`.
 - Hardware: Apple M4, 16 GiB memory.
@@ -60,7 +64,7 @@ The before measurements were noisy, and the optimized SPRT runs also show run-to
 Both optimized runs remained below the before interval, but the result does not support a single
 universal speedup number. Re-run on the target host before using these values for capacity planning.
 
-## 2026-10-14 bootstrap profile
+### Bootstrap (2026-10-14)
 
 - Hardware: Apple M4, 16 GiB memory.
 - Platform: arm64 macOS (Darwin 27.0.1), Rust 1.97.0.

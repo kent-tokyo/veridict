@@ -55,7 +55,7 @@
   "properties": {
     "schema_version": {
       "const": 1,
-      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+      "description": "Archived strict v1 shape from before warnings and data_quality were emitted. Published 0.19.5 reports retained schema_version 1 while adding those fields and therefore do not satisfy this strict snapshot."
     },
     "verdict": {
       "type": "string",

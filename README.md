@@ -16,6 +16,9 @@ The central workflow is a reproducible regression gate, including paired results
 testing, and execution failures. Evaluation runners and adoption actions stay with the caller.
 See [Product scope](docs/product-scope.md) for responsibilities and development priorities.
 
+Repository documentation describes the current source tree. This release is `0.19.6`; use the
+[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6) for its exact source and docs.
+
 ## Install
 
 ```bash
@@ -118,6 +121,8 @@ Important contracts:
 - Repeating `--metric` creates a joint gate. Overall precedence is
   `fail > inconclusive > pass`.
 - `--claim-correction bonferroni|holm` adds family-adjusted results where supported.
+- Fixed-sample reports need at least two independent analysis units for a decisive verdict;
+  otherwise they are `inconclusive`.
 
 ## Verdicts and output
 
@@ -146,18 +151,26 @@ and requires no consumer secret.
 ```yaml
 jobs:
   gate:
-    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@master
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.6
     with:
       command: compare
       input_path: results.jsonl
       arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
 ```
 
-Pin the workflow to a release tag or commit SHA in production. The `veridict-report` artifact is
-uploaded before the job preserves exit code `0`, `1`, `2`, or `3`. Valid statistical runs include
-`report.json` and `report.md`; invalid input includes `gate.json`, `gate.md`, and `stderr.txt`
-without fabricating a statistical report. `arguments_json` must be a JSON array so each CLI
-argument keeps its boundary without shell evaluation.
+This workflow revision installs veridict `0.19.6`. For production use:
+
+- Pin the workflow to a release tag or full commit SHA.
+- Valid statistical runs upload `report.json` and `report.md` before preserving exit code `0`,
+  `1`, `2`, or `3`.
+- Invalid input uploads `gate.json`, `gate.md`, and `stderr.txt` without fabricating a statistical
+  report.
+- Pass `arguments_json` as a JSON array. Each argument retains its boundary and is never evaluated
+  by a shell.
+
+For `compare` and `sprt`, exit codes mean pass, fail, inconclusive, and invalid configuration in
+the order `0` through `3`. For `verify-run`, code `1` means structural invalidity; it is not a
+statistical `fail` verdict.
 
 ## Documentation
 
@@ -166,7 +179,8 @@ argument keeps its boundary without shell evaluation.
 - [`docs/performance.md`](docs/performance.md): streaming, retained-state, and benchmark contract.
 - [`docs/research-map.md`](docs/research-map.md): unshipped candidates and activation conditions.
 - [`CHANGELOG.md`](CHANGELOG.md): release history.
-- [JSON Schemas](schemas/): machine-readable input and report contracts.
+- [JSON Schemas](schemas/): versioned contracts for the listed input and report formats;
+  `time-sensitive` does not yet have a report schema.
 
 ## Development
 

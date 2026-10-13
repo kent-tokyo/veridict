@@ -1,7 +1,7 @@
 //! `TimeSensitiveReport`: this module's own report shape, independent of `report::Report`/
 //! `MultiReport`/`sprt::SprtReport` (different questions need different fields), but reusing the
-//! crate-wide `report::REPORT_SCHEMA_VERSION` for its `schema_version` field, the same convention
-//! every other report struct in this crate follows (`SprtReport`, `VerifyRunReport`).
+//! crate-wide `report::REPORT_SCHEMA_VERSION` for its `schema_version` field. SPRT reports use a
+//! separate version constant because their strict JSON contract has advanced independently.
 
 use serde::Serialize;
 

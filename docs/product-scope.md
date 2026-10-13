@@ -18,10 +18,9 @@ whether to adopt it. The relevant evidence may be paired numeric scores, win/los
 or execution failures. Some evaluations have a fixed sample size; others collect observations in
 order until a sequential rule reaches a decision.
 
-The product should make this workflow reproducible and usable in CI. Success means fewer
-unsupported adoption decisions, explicit reasons to continue collecting evidence, and a report
-that can be traced to the supplied results and declared configuration. Method count and breadth
-of unrelated statistical analysis are not measures of product success.
+The product should make this workflow reproducible and usable in CI. Success means traceable
+decisions, explicit reasons to collect more evidence, and fewer unsupported adoptions. Method
+count and unrelated statistical breadth are not success measures.
 
 ## Responsibilities stay at the result-to-decision boundary
 
@@ -42,10 +41,10 @@ into experiment orchestration.
 
 ## Real workflows guide generic interfaces
 
-Development priorities come from concrete, repeatable adoption decisions. A feature must express
-its statistical meaning through generic trials, pairs, scores, outcomes, statuses, hypotheses, or
-opaque identifiers. Paired outcomes, draws, Elo, and sequential stopping are useful beyond a
-single application and remain within scope when their assumptions are explicit.
+Development priorities come from repeatable adoption decisions. Features express their
+statistical meaning through generic trials, pairs, scores, outcomes, statuses, hypotheses, or
+opaque identifiers. Paired outcomes, draws, Elo, and sequential stopping remain in scope when
+their assumptions are explicit.
 
 Consumers produce their own metrics and records, either using the library or invoking the CLI.
 Domain adapters, runner settings, model access, and application-specific adoption policies stay
