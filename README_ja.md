@@ -129,6 +129,27 @@ veridict compare paired.jsonl \
 JSONが機械処理向けの契約で、Markdownは人向けの要約です。中間値から判定を再構成せず、
 `verdict` と `promotion` を使用してください。
 
+## GitHub Actionsから再利用する
+
+`compare`、`sprt`、`verify-run`を呼び出せる再利用workflowを同梱しています。workflow内で指定した
+veridictの版をインストールし、呼び出し側が用意した結果だけを判定します。利用側のsecretは不要です。
+
+```yaml
+jobs:
+  gate:
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@master
+    with:
+      command: compare
+      input_path: results.jsonl
+      arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
+```
+
+本番ではworkflowの参照先をrelease tagまたはcommit SHAに固定してください。`veridict-report` artifactを
+保存してから、終了コード `0`、`1`、`2`、`3` をjobへ反映します。有効な統計処理では
+`report.json`と`report.md`を保存します。入力不正の場合は統計レポートを作らず、`gate.json`、
+`gate.md`、`stderr.txt`を証拠として残します。`arguments_json`はJSON文字列配列で指定するため、
+shellによる再評価は行いません。
+
 ## ドキュメント
 
 - [`docs/product-scope_ja.md`](docs/product-scope_ja.md): 製品の目的、責任範囲、開発の優先順位。

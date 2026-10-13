@@ -1,0 +1,176 @@
+name: Veridict gate
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: "veridict command: compare, sprt, or verify-run"
+        required: true
+        type: string
+      input_path:
+        description: "Caller-repository path to results (or games for verify-run)"
+        required: true
+        type: string
+      manifest_path:
+        description: "Caller-repository manifest path; required only for verify-run"
+        required: false
+        default: ""
+        type: string
+      arguments_json:
+        description: "Additional CLI arguments as a JSON string array"
+        required: false
+        default: "[]"
+        type: string
+      artifact_name:
+        description: "Name of the uploaded report artifact"
+        required: false
+        default: "veridict-report"
+        type: string
+    outputs:
+      exit_code:
+        description: "veridict exit code: 0 pass, 1 fail, 2 inconclusive, 3 invalid"
+        value: ${{ jobs.gate.outputs.exit_code }}
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      exit_code: ${{ steps.run-gate.outputs.exit_code }}
+    env:
+      VERIDICT_VERSION: "0.19.5"
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pinned veridict
+        run: cargo install veridict --version "=$VERIDICT_VERSION" --locked
+
+      - name: Run gate and retain its exit code
+        id: run-gate
+        shell: bash
+        env:
+          VERIDICT_COMMAND: ${{ inputs.command }}
+          VERIDICT_INPUT: ${{ inputs.input_path }}
+          VERIDICT_MANIFEST: ${{ inputs.manifest_path }}
+          VERIDICT_ARGUMENTS_JSON: ${{ inputs.arguments_json }}
+        run: |
+          set -o pipefail
+          REPORT_DIR="$RUNNER_TEMP/veridict-report"
+          mkdir -p "$REPORT_DIR"
+          : > "$REPORT_DIR/stdout.json"
+          : > "$REPORT_DIR/stderr.txt"
+
+          exit_code=3
+          report_generated=false
+          config_error=""
+
+          if [ "$VERIDICT_INPUT" = "-" ]; then
+            config_error="input_path must name a file; reusable workflows cannot provide stdin"
+          elif ! jq -e 'type == "array" and all(.[]; type == "string" and (contains("\n") | not) and (contains("\r") | not))' <<< "$VERIDICT_ARGUMENTS_JSON" >/dev/null; then
+            config_error="arguments_json must be an array of strings without line breaks"
+          fi
+
+          arguments=()
+          if [ -z "$config_error" ]; then
+            while IFS= read -r argument; do
+              arguments+=("$argument")
+            done < <(jq -r '.[]' <<< "$VERIDICT_ARGUMENTS_JSON")
+
+            for argument in "${arguments[@]}"; do
+              case "$argument" in
+                --report-json|--report-json=*|--report-md|--report-md=*)
+                  config_error="arguments_json cannot override managed report paths"
+                  ;;
+              esac
+            done
+          fi
+
+          if [ -n "$config_error" ]; then
+            printf 'error: %s\n' "$config_error" > "$REPORT_DIR/stderr.txt"
+          else
+            set +e
+            case "$VERIDICT_COMMAND" in
+              compare|sprt)
+                veridict "$VERIDICT_COMMAND" "$VERIDICT_INPUT" \
+                  "${arguments[@]}" \
+                  --report-json "$REPORT_DIR/report.json" \
+                  --report-md "$REPORT_DIR/report.md" \
+                  > "$REPORT_DIR/stdout.json" \
+                  2> "$REPORT_DIR/stderr.txt"
+                exit_code=$?
+                ;;
+              verify-run)
+                if [ -z "$VERIDICT_MANIFEST" ]; then
+                  printf 'error: manifest_path is required for verify-run\n' > "$REPORT_DIR/stderr.txt"
+                  exit_code=3
+                else
+                  veridict verify-run "$VERIDICT_MANIFEST" "$VERIDICT_INPUT" \
+                    "${arguments[@]}" \
+                    --report-json "$REPORT_DIR/report.json" \
+                    --report-md "$REPORT_DIR/report.md" \
+                    > "$REPORT_DIR/stdout.json" \
+                    2> "$REPORT_DIR/stderr.txt"
+                  exit_code=$?
+                fi
+                ;;
+              *)
+                printf 'error: command must be compare, sprt, or verify-run\n' > "$REPORT_DIR/stderr.txt"
+                exit_code=3
+                ;;
+            esac
+            set -e
+          fi
+
+          if [ -s "$REPORT_DIR/report.json" ] && [ -s "$REPORT_DIR/report.md" ]; then
+            report_generated=true
+          fi
+
+          # shellcheck disable=SC2016 # jq variables below are intentional.
+          jq -n \
+            --arg command "$VERIDICT_COMMAND" \
+            --arg input_path "$VERIDICT_INPUT" \
+            --arg manifest_path "$VERIDICT_MANIFEST" \
+            --arg version "$VERIDICT_VERSION" \
+            --argjson exit_code "$exit_code" \
+            --argjson report_generated "$report_generated" \
+            '{schema_version: 1, command: $command, input_path: $input_path, manifest_path: (if $manifest_path == "" then null else $manifest_path end), veridict_version: $version, exit_code: $exit_code, report_generated: $report_generated}' \
+            > "$REPORT_DIR/gate.json"
+
+          {
+            printf '# Veridict Gate\n\n'
+            printf -- "- command: \`%s\`\n" "$VERIDICT_COMMAND"
+            printf -- "- veridict version: \`%s\`\n" "$VERIDICT_VERSION"
+            printf -- "- exit code: \`%s\`\n" "$exit_code"
+            printf -- "- statistical report generated: \`%s\`\n" "$report_generated"
+            if [ "$report_generated" = false ]; then
+              printf "\nNo statistical report was generated. See \`stderr.txt\` for invalid input or configuration evidence.\n"
+            fi
+          } > "$REPORT_DIR/gate.md"
+
+          printf 'exit_code=%s\n' "$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ runner.temp }}/veridict-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Preserve veridict gate result
+        if: always()
+        shell: bash
+        env:
+          VERIDICT_EXIT_CODE: ${{ steps.run-gate.outputs.exit_code }}
+        run: |
+          case "$VERIDICT_EXIT_CODE" in
+            0|1|2|3) exit "$VERIDICT_EXIT_CODE" ;;
+            *) echo "veridict gate did not produce an exit code" >&2; exit 3 ;;
+          esac

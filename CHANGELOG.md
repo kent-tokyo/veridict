@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `sprt::SprtAccumulator` and serializable `SprtCheckpoint` for incremental, resumable Wald,
   trinomial, and pentanomial runs. Resume validates checkpoint version, hypotheses, execution
   options, and a separately persisted stream position; batch and resumed reports are identical.
+- Added a reusable GitHub Actions workflow for pinned-version `compare`, `sprt`, and `verify-run`
+  gates. It uploads JSON/Markdown reports before preserving verdict exit codes, retains explicit
+  error evidence for invalid input, and requires no consumer secret.
+- Added Criterion diagnostics that isolate bootstrap random-index generation, compensated mean
+  aggregation, and interval sorting/selection without exposing benchmark-only library APIs.
+- Added golden Markdown reports for pass, fail, inconclusive, and validity-invalid comparisons,
+  with an independent test that reconstructs every rendered value from the JSON report.
 
 ### Changed
 

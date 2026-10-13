@@ -19,9 +19,14 @@
 //! fresh `Record` per line anyway (via `serde_json`/`csv`
 //! deserialization), so this isn't measuring something unrealistic.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use veridict::input::Record;
 use veridict::metrics::{compute, compute_many};
+use veridict::stats::bootstrap::mean;
 use veridict::{BootstrapMethod, CiMethod, FailurePolicy, MetricConfig};
 
 const N: usize = 20_000;
@@ -190,12 +195,74 @@ fn bench_mean_diff_release_workload(c: &mut Criterion) {
     });
 }
 
+/// Diagnostic decomposition of the release workload above. These three
+/// microbenchmarks deliberately keep the production API closed: they measure
+/// the same amount of RNG index generation, the real compensated `mean`, and
+/// the final distribution sort/percentile lookup separately. Their times are
+/// not expected to add up exactly to the end-to-end benchmark because the
+/// production loop interleaves index generation and accumulation, while this
+/// diagnostic isolates them and therefore has different cache behavior.
+fn bench_mean_diff_bootstrap_components(c: &mut Criterion) {
+    const RESAMPLES: usize = 10_000;
+    const DRAWS: usize = BOOTSTRAP_N * RESAMPLES;
+
+    let values: Vec<f64> = (0..BOOTSTRAP_N)
+        .map(|i| (i % 7) as f64 + if i % 2 == 0 { 0.5 } else { -0.25 })
+        .collect();
+    let distribution: Vec<f64> = (0..RESAMPLES)
+        .map(|i| ((i * 7_919) % RESAMPLES) as f64 / RESAMPLES as f64)
+        .collect();
+
+    let mut group = c.benchmark_group("mean-diff bootstrap components");
+    group.sample_size(20);
+
+    group.bench_function("resampling indices (20m draws)", |b| {
+        b.iter(|| {
+            let mut rng = StdRng::seed_from_u64(0x5EED);
+            let mut sink = 0usize;
+            for _ in 0..DRAWS {
+                sink ^= rng.random_range(0..BOOTSTRAP_N);
+            }
+            black_box(sink)
+        });
+    });
+
+    group.bench_function("compensated mean (10000 x N=2000)", |b| {
+        b.iter(|| {
+            let mut sink = 0.0;
+            for _ in 0..RESAMPLES {
+                sink += mean(black_box(&values));
+            }
+            black_box(sink)
+        });
+    });
+
+    group.bench_function("interval sort and lookup (N=10000)", |b| {
+        b.iter_batched(
+            || distribution.clone(),
+            |mut draws| {
+                draws.sort_by(f64::total_cmp);
+                let lo = ((0.025 * RESAMPLES as f64).floor() as usize).min(RESAMPLES - 1);
+                let hi = ((0.975 * RESAMPLES as f64).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(RESAMPLES - 1)
+                    .max(lo);
+                black_box((draws[lo], draws[hi]))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_single_pass_all_metrics,
     bench_independent_calls_all_metrics,
     bench_single_pass_cheap_metrics,
     bench_independent_calls_cheap_metrics,
-    bench_mean_diff_release_workload
+    bench_mean_diff_release_workload,
+    bench_mean_diff_bootstrap_components
 );
 criterion_main!(benches);

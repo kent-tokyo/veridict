@@ -137,6 +137,28 @@ For confidence-interval gates, `pass` requires the lower bound to clear the pass
 JSON is the machine-readable contract. Markdown is a human-readable summary. Use `verdict` and
 `promotion` rather than reconstructing decisions from intermediate fields.
 
+## Reusable GitHub Actions gate
+
+The repository includes a reusable workflow for `compare`, `sprt`, and `verify-run`. It installs
+the exact veridict version declared by the workflow, reads results already produced by the caller,
+and requires no consumer secret.
+
+```yaml
+jobs:
+  gate:
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@master
+    with:
+      command: compare
+      input_path: results.jsonl
+      arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
+```
+
+Pin the workflow to a release tag or commit SHA in production. The `veridict-report` artifact is
+uploaded before the job preserves exit code `0`, `1`, `2`, or `3`. Valid statistical runs include
+`report.json` and `report.md`; invalid input includes `gate.json`, `gate.md`, and `stderr.txt`
+without fabricating a statistical report. `arguments_json` must be a JSON array so each CLI
+argument keeps its boundary without shell evaluation.
+
 ## Documentation
 
 - [`docs/product-scope.md`](docs/product-scope.md): purpose, responsibilities, and development priorities.
