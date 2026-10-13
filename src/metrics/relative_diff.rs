@@ -90,10 +90,16 @@ impl MetricAggregator for RelativeDiffAggregator {
             if c == b {
                 self.tied_count += 1;
             }
-            let relative = (c - b) / b;
-            // `b > 0` and `c` finite doesn't guarantee `(c - b) / b` is finite - a large finite `c`
-            // over a tiny finite `b` (e.g. candidate=1e300, baseline=1e-300) can overflow to
-            // infinity even though every raw input value was itself a legal, finite number.
+            let difference = c - b;
+            // Preserve the established arithmetic for ordinary values. Dividing first is
+            // algebraically equivalent and avoids an overflowing subtraction at extreme scales.
+            let relative = if difference.is_finite() {
+                difference / b
+            } else {
+                c / b - 1.0
+            };
+            // `b > 0` and `c` finite still do not guarantee a finite ratio: a large finite `c`
+            // over a tiny finite `b` (e.g. candidate=1e300, baseline=1e-300) can overflow.
             if !relative.is_finite() {
                 return Err(VeridictError::InvalidValue {
                     line,

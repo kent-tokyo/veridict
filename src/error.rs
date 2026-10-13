@@ -180,6 +180,16 @@ pub enum VeridictError {
     },
 
     #[error(
+        "{metric} produced a non-finite derived field '{field}': {value}; rescale numeric inputs \
+         or choose less extreme settings so every reported statistic remains representable"
+    )]
+    NonFiniteStatistic {
+        metric: &'static str,
+        field: &'static str,
+        value: f64,
+    },
+
+    #[error(
         "line {line}: relative-diff requires baseline > 0 (got {baseline}); this isn't only about \
          avoiding division by zero - a percentage change relative to a negative baseline doesn't \
          have a stable interpretation (the same underlying improvement can read as a positive or \

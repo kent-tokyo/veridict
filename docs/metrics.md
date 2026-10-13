@@ -38,6 +38,9 @@ statistical pass to `inconclusive`, but cannot create a pass or a fail.
   (default), Clopper-Pearson `exact`, or `jeffreys`. No decisive observation gives
   `inconclusive`.
 - `mean-diff` resamples paired differences, never the two columns independently.
+- Numeric inputs and every derived difference, effect, and interval bound must remain finite.
+  An unrepresentable result is an input/configuration error (exit code `3`), never a `pass` with
+  JSON `null` fields. Rescale the input values and thresholds without changing their meaning.
 - `quantile-diff` defaults to the median; specify `--quantile` in automation. BCa is rejected
   because current calibration does not justify it for a non-smooth sample quantile.
 - `relative-diff` averages `(candidate - baseline) / baseline`. `tied_count` and
@@ -115,6 +118,9 @@ lower = ln(beta / (1 - alpha))
 
 Both rates must be in `(0, 1)` and `alpha + beta` must be less than `1`; otherwise the lower
 boundary would meet or exceed the upper boundary and the configuration is rejected.
+Hypothesis values must map to representable probabilities, and both bounds must remain finite.
+Any non-finite LLR or draw-rate intermediate is a configuration error (exit code `3`), not a
+verdict with JSON `null` numeric fields.
 
 The upper boundary gives `pass`, the lower boundary gives `fail`, and no crossing gives
 `inconclusive`.
@@ -135,6 +141,12 @@ Use `verdict`, `promotion`, and `decision_*` for the decision. Generic `availabl
 `stopping_*`, and `ignored_*_after_stop` fields describe the replay. For schema-v1 compatibility,
 unprefixed Wald/trinomial counts and `llr` still describe the full input; do not reconstruct the
 decision from them.
+
+SPRT reports also expose the advisory `data_quality.low_id_diversity` flag and a matching
+`warnings` entry when one ID occurs at least three times among at least ten ID-tagged records in
+unpaired mode. The signal depends only on ID structure and never changes the LLR, verdict,
+validity, or promotion. It stays silent when every ID appears exactly twice and whenever
+`--paired-by-id` is active, because repeated IDs have pairing semantics there.
 
 Library callers should prefer `sprt::run_with_options(records, config, options)` with
 `SprtRunOptions`. Its default is Wald, unpaired, `FailurePolicy::ReportOnly`, incomplete IDs

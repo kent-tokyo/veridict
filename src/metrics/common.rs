@@ -274,7 +274,17 @@ impl DiffCollector {
         for (id, group) in groups {
             match group.as_slice() {
                 [(_, d)] => self.diffs.push(*d),
-                [(_, a), (_, b)] => self.diffs.push((a + b) / 2.0),
+                [(_, a), (_, b)] => {
+                    let sum = a + b;
+                    // Preserve the established result for ordinary values. Only fall back to the
+                    // convex mean when the addition itself overflows.
+                    let paired_mean = if sum.is_finite() {
+                        sum / 2.0
+                    } else {
+                        bootstrap::mean(&[*a, *b])
+                    };
+                    self.diffs.push(paired_mean);
+                }
                 more => {
                     return Err(VeridictError::SchemaMismatch {
                         line: more[0].0,
@@ -367,7 +377,7 @@ impl SignCounts {
         for (id, group) in std::mem::take(&mut self.groups) {
             match group.as_slice() {
                 [(_, d)] => self.tally(*d),
-                [(_, a), (_, b)] => self.tally((a + b) / 2.0),
+                [(_, a), (_, b)] => self.tally(bootstrap::mean(&[*a, *b])),
                 more => {
                     return Err(VeridictError::SchemaMismatch {
                         line: more[0].0,

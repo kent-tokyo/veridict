@@ -11,6 +11,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.5] - 2026-10-14
+
+### Added
+
+- SPRT reports now expose the same structural duplicate-ID advisory as fixed-sample comparison:
+  `data_quality.low_id_diversity` plus a matching `warnings` entry in JSON and Markdown. It is
+  outcome-independent, stays silent for exactly-two-record IDs and paired mode, and never changes
+  the LLR or decision.
+- Added reproducible Criterion diagnostics for 100,000-record JSONL parsing and unpaired Wald SPRT,
+  plus an English/Japanese memory-retention contract.
+
+### Changed
+
+- JSONL parsing now reuses its line buffer, and unpaired Wald/Trinomial SPRT keeps incremental
+  full-input and decision-prefix counters instead of retaining every outcome. The first-crossing,
+  complete-input validation, and report contracts are unchanged.
+
+### Fixed
+
+- Numeric comparison metrics now fail closed when finite inputs produce an unrepresentable paired
+  difference, effect, or confidence bound. Stable mean, quantile interpolation, and bootstrap
+  calculations preserve representable extreme values instead of emitting JSON `null` fields that
+  threshold logic could incorrectly promote.
+- Mean and bootstrap aggregation now recover small residuals under severe mixed-sign cancellation
+  while preserving established arithmetic for ordinary inputs.
+- SPRT now rejects hypothesis/error-rate settings that cannot produce finite probabilities or
+  decision bounds, and checks every computed LLR/draw-rate value before it reaches a report.
+
 ## [0.19.4] - 2026-10-13
 
 ### Documentation

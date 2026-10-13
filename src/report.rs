@@ -61,6 +61,26 @@ pub const WIDE_BASELINE_SCALE_ORDERS: f64 = 1.0;
 /// sensitive or too quiet in practice.
 pub const TIE_DILUTION_FRACTION: f64 = 0.5;
 
+/// Builds the shared duplicate-ID advisory used by fixed-sample comparison and SPRT reports.
+/// The thresholds are intentionally structural: outcomes, effects, LLRs, and verdicts are not
+/// inputs, so changing the candidate's observed performance cannot change this signal.
+pub(crate) fn id_diversity_advisory(
+    records_with_id: u64,
+    max_id_count: u64,
+) -> (bool, Option<String>) {
+    // >= 3 (not >= 2) is load-bearing: exactly-two records per id is ordinary paired data that
+    // may simply have been run without --paired-by-id. >= 10 avoids judging a tiny id sample.
+    let low_id_diversity = records_with_id >= 10 && max_id_count >= 3;
+    let warning = low_id_diversity.then(|| {
+        format!(
+            "low id diversity: one id repeated {max_id_count} times among {records_with_id} \
+             id-tagged trial(s) - looks like the same test case was logged multiple times, not \
+             independent samples"
+        )
+    });
+    (low_id_diversity, warning)
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub schema_version: u32,

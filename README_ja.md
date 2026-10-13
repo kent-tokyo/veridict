@@ -133,6 +133,7 @@ JSONが機械処理向けの契約で、Markdownは人向けの要約です。�
 
 - [`docs/product-scope_ja.md`](docs/product-scope_ja.md): 製品の目的、責任範囲、開発の優先順位。
 - [`docs/metrics_ja.md`](docs/metrics_ja.md): 実装済みの統計仕様とレポート契約。
+- [`docs/performance_ja.md`](docs/performance_ja.md): ストリーミング、保持状態、ベンチマーク契約。
 - [`docs/research-map_ja.md`](docs/research-map_ja.md): 未実装候補と着手条件。
 - [`CHANGELOG.md`](CHANGELOG.md): リリース履歴。
 - [JSON Schemas](schemas/): 入出力形式の機械可読な契約。

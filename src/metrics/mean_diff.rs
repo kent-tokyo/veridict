@@ -4,7 +4,9 @@
 use crate::error::VeridictError;
 use crate::input::Record;
 use crate::metrics::common::{DiffCollector, compute_scale_diagnostics};
-use crate::metrics::{FailureBreakdown, MetricAggregator, MetricOutput, metric_label};
+use crate::metrics::{
+    FailureBreakdown, MetricAggregator, MetricOutput, checked_difference, metric_label,
+};
 use crate::stats::bootstrap;
 use crate::{BootstrapMethod, MetricKind, TrialStatus};
 
@@ -65,7 +67,8 @@ impl MetricAggregator for MeanDiffAggregator {
             }
             used = true;
             self.baselines.push(b);
-            self.collector.record(line, record.id.as_deref(), c - b)?;
+            let diff = checked_difference(line, b, c)?;
+            self.collector.record(line, record.id.as_deref(), diff)?;
         }
         if !used {
             return Err(VeridictError::SchemaMismatch {

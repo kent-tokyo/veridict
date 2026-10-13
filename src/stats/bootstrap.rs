@@ -24,12 +24,12 @@ fn bootstrap_means(diffs: &[f64], resamples: usize, seed: u64) -> Vec<f64> {
     let mut means: Vec<f64> = Vec::with_capacity(resamples);
 
     for _ in 0..resamples {
-        let mut sum = 0.0;
+        let mut accumulator = MeanAccumulator::default();
         for _ in 0..n {
             let idx = rng.random_range(0..n);
-            sum += diffs[idx];
+            accumulator.push(diffs[idx]);
         }
-        means.push(sum / n as f64);
+        means.push(accumulator.finish());
     }
     means.sort_by(f64::total_cmp);
     means
@@ -248,7 +248,8 @@ pub fn bootstrap_mean_diff_ci(
 /// Basic (a.k.a. "reflected" or "reverse-percentile") bootstrap CI for the
 /// mean of `diffs`: reflects the percentile interval around the original
 /// sample's point estimate (`effect`, not a resample mean) -
-/// `(2*effect - perc_hi, 2*effect - perc_lo)`. Unlike BCa, this applies no
+/// `(effect + (effect - perc_hi), effect + (effect - perc_lo))`, an
+/// overflow-safer form of `(2*effect - perc_hi, 2*effect - perc_lo)`. Unlike BCa, this applies no
 /// bias-correction or acceleration - it's the "obvious" fix for percentile's
 /// known bias problem, but a naive one: on skewed data it reflects the
 /// *same* skew that made the percentile interval biased, so it moves the
@@ -269,7 +270,12 @@ pub fn bootstrap_mean_diff_ci_basic(
 
     let effect = mean(diffs);
     let (perc_lo, perc_hi) = bootstrap_mean_diff_ci(diffs, confidence, resamples, seed);
-    (2.0 * effect - perc_hi, 2.0 * effect - perc_lo)
+    let doubled = 2.0 * effect;
+    if doubled.is_finite() {
+        (doubled - perc_hi, doubled - perc_lo)
+    } else {
+        (effect + (effect - perc_hi), effect + (effect - perc_lo))
+    }
 }
 
 /// Bias-correction `z0` from the count of bootstrap draws strictly below the
@@ -297,17 +303,66 @@ pub(crate) fn bias_correction_z0(below_count: f64, resamples: usize) -> f64 {
 /// shared with `bradley_terry`'s graph-jackknife BCa for the same reason as
 /// [`bias_correction_z0`].
 pub(crate) fn weighted_acceleration(replicates: &[(f64, f64)]) -> f64 {
-    let total_weight: f64 = replicates.iter().map(|&(_, w)| w).sum();
+    let mut total_weight = 0.0;
+    let mut weighted_mean = 0.0;
+    let mut weighted_sum = 0.0;
+    for &(value, weight) in replicates {
+        if weight <= 0.0 {
+            continue;
+        }
+        weighted_sum += value * weight;
+        let next_weight = total_weight + weight;
+        weighted_mean =
+            weighted_mean * (total_weight / next_weight) + value * (weight / next_weight);
+        total_weight = next_weight;
+    }
     if total_weight <= 0.0 {
         // No valid replicates (e.g. every one excluded by the caller for
         // disconnecting the pair being estimated) - the well-defined limit
         // is no acceleration, same as the constant/zero-variance case below.
         return 0.0;
     }
-    let weighted_mean: f64 = replicates.iter().map(|&(v, w)| v * w).sum::<f64>() / total_weight;
+
+    // Keep the established arithmetic for ordinary inputs, including fixed reference fixtures.
+    // The convex update above is the fallback when the weighted sum is not representable.
+    if weighted_sum.is_finite() {
+        weighted_mean = weighted_sum / total_weight;
+    }
+    let (mut raw_num, mut raw_den) = (0.0, 0.0);
+    for &(value, weight) in replicates {
+        if weight <= 0.0 {
+            continue;
+        }
+        let delta = weighted_mean - value;
+        raw_num += weight * delta.powi(3);
+        raw_den += weight * delta.powi(2);
+    }
+    if raw_num.is_finite() && raw_den.is_finite() {
+        if raw_den < 1e-12 {
+            return 0.0;
+        }
+        let raw_scale = 6.0 * raw_den.powf(1.5);
+        if raw_scale.is_finite() {
+            return raw_num / raw_scale;
+        }
+    }
+
+    // Acceleration is scale-invariant. Normalize before subtracting and raising deltas to the
+    // second/third powers so finite extreme replicates cannot overflow those intermediates.
+    let scale = replicates
+        .iter()
+        .filter(|&&(_, weight)| weight > 0.0)
+        .map(|&(value, _)| value.abs())
+        .fold(weighted_mean.abs(), f64::max);
+    if scale == 0.0 {
+        return 0.0;
+    }
     let (mut num, mut den) = (0.0, 0.0);
     for &(v, w) in replicates {
-        let delta = weighted_mean - v;
+        if w <= 0.0 {
+            continue;
+        }
+        let delta = weighted_mean / scale - v / scale;
         num += w * delta.powi(3);
         den += w * delta.powi(2);
     }
@@ -379,13 +434,42 @@ pub fn bootstrap_mean_diff_ci_bca(
     let below = means.iter().filter(|&&m| m < original_mean).count() as f64;
     let z0 = bias_correction_z0(below, resamples);
 
-    // Acceleration a, via the jackknife - every replicate is equally likely
-    // (weight 1.0), the textbook unweighted case of `weighted_acceleration`.
-    let total: f64 = diffs.iter().sum();
-    let jack_replicates: Vec<(f64, f64)> = diffs
+    // Preserve the established arithmetic whenever every leave-one-out mean is finite. If the
+    // total or subtraction overflows, use O(n) prefix/suffix means and convex combination.
+    let mut total_accumulator = MeanAccumulator::default();
+    for &value in diffs {
+        total_accumulator.push(value);
+    }
+    let total = total_accumulator.sum_for_subtraction();
+    let direct_jack: Vec<(f64, f64)> = diffs
         .iter()
         .map(|d| ((total - d) / (n - 1) as f64, 1.0))
         .collect();
+    let jack_replicates = if direct_jack.iter().all(|(value, _)| value.is_finite()) {
+        direct_jack
+    } else {
+        let mut prefix_means = vec![0.0; n + 1];
+        for (i, &value) in diffs.iter().enumerate() {
+            prefix_means[i + 1] = update_mean(prefix_means[i], value, i + 1);
+        }
+        let mut suffix_means = vec![0.0; n + 1];
+        for i in (0..n).rev() {
+            suffix_means[i] = update_mean(suffix_means[i + 1], diffs[i], n - i);
+        }
+        (0..n)
+            .map(|skip| {
+                let left_count = skip;
+                let right_count = n - skip - 1;
+                let leave_one_out = combine_means(
+                    prefix_means[skip],
+                    left_count,
+                    suffix_means[skip + 1],
+                    right_count,
+                );
+                (leave_one_out, 1.0)
+            })
+            .collect()
+    };
     let a = weighted_acceleration(&jack_replicates);
 
     let (p_lo, p_hi) = bca_adjusted_percentiles(z0, a, confidence);
@@ -394,8 +478,89 @@ pub fn bootstrap_mean_diff_ci_bca(
     (means[lo_idx], means[hi_idx])
 }
 
+fn update_mean(current: f64, value: f64, count: usize) -> f64 {
+    let count = count as f64;
+    current * ((count - 1.0) / count) + value / count
+}
+
+fn combine_means(left: f64, left_count: usize, right: f64, right_count: usize) -> f64 {
+    match (left_count, right_count) {
+        (0, _) => right,
+        (_, 0) => left,
+        _ => {
+            let total = (left_count + right_count) as f64;
+            left * (left_count as f64 / total) + right * (right_count as f64 / total)
+        }
+    }
+}
+
+/// Keeps the established left-to-right sum for ordinary inputs, adds a Neumaier correction for
+/// severe mixed-sign cancellation, and retains the online-mean overflow fallback. The selective
+/// correction avoids changing pinned bootstrap output merely because harmless rounding differs by
+/// an ulp, while recovering information in inputs such as `[1e16, 1, -1e16]`.
+#[derive(Default)]
+struct MeanAccumulator {
+    sum: f64,
+    correction: f64,
+    online_mean: f64,
+    count: usize,
+    max_abs: f64,
+    min_nonzero_abs: f64,
+    has_positive: bool,
+    has_negative: bool,
+}
+
+impl MeanAccumulator {
+    fn push(&mut self, value: f64) {
+        let next = self.sum + value;
+        if self.sum.abs() >= value.abs() {
+            self.correction += (self.sum - next) + value;
+        } else {
+            self.correction += (value - next) + self.sum;
+        }
+        self.sum = next;
+        self.count += 1;
+        self.online_mean = update_mean(self.online_mean, value, self.count);
+
+        let magnitude = value.abs();
+        self.max_abs = self.max_abs.max(magnitude);
+        if magnitude > 0.0 && (self.min_nonzero_abs == 0.0 || magnitude < self.min_nonzero_abs) {
+            self.min_nonzero_abs = magnitude;
+        }
+        self.has_positive |= value > 0.0;
+        self.has_negative |= value < 0.0;
+    }
+
+    fn corrected_sum(&self) -> Option<f64> {
+        let corrected = self.sum + self.correction;
+        let severe_cancellation_risk = self.has_positive
+            && self.has_negative
+            && self.min_nonzero_abs > 0.0
+            && self.max_abs / self.min_nonzero_abs >= 1e12;
+        (severe_cancellation_risk && corrected.is_finite()).then_some(corrected)
+    }
+
+    fn sum_for_subtraction(&self) -> f64 {
+        self.corrected_sum().unwrap_or(self.sum)
+    }
+
+    fn finish(&self) -> f64 {
+        debug_assert!(self.count > 0, "mean accumulator is empty");
+        if self.sum.is_finite() {
+            self.corrected_sum().unwrap_or(self.sum) / self.count as f64
+        } else {
+            self.online_mean
+        }
+    }
+}
+
 pub fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
+    debug_assert!(!values.is_empty(), "mean called on an empty sample");
+    let mut accumulator = MeanAccumulator::default();
+    for &value in values {
+        accumulator.push(value);
+    }
+    accumulator.finish()
 }
 
 /// Bessel-corrected (`n-1` denominator) sample variance - the standard unbiased estimator, not
@@ -439,7 +604,12 @@ fn sorted_quantile(sorted: &[f64], q: f64) -> f64 {
         return sorted[lo];
     }
     let frac = h - lo as f64;
-    sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    let delta = sorted[hi] - sorted[lo];
+    if delta.is_finite() {
+        sorted[lo] + frac * delta
+    } else {
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+    }
 }
 
 /// Resampled quantiles, sorted ascending - the quantile analogue of `bootstrap_means`.
@@ -495,7 +665,12 @@ pub fn bootstrap_quantile_diff_ci_basic(
 
     let effect = quantile(diffs, q);
     let (perc_lo, perc_hi) = bootstrap_quantile_diff_ci(diffs, q, confidence, resamples, seed);
-    (2.0 * effect - perc_hi, 2.0 * effect - perc_lo)
+    let doubled = 2.0 * effect;
+    if doubled.is_finite() {
+        (doubled - perc_hi, doubled - perc_lo)
+    } else {
+        (effect + (effect - perc_hi), effect + (effect - perc_lo))
+    }
 }
 
 /// BCa bootstrap CI for the `q`-th quantile of `diffs` - the quantile analogue of
@@ -610,6 +785,41 @@ mod tests {
     #[test]
     fn mean_of_known_values() {
         assert!((mean(&[0.1, 0.2, -0.05]) - 0.08333333333333333).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mean_of_extreme_values_stays_finite() {
+        assert_eq!(mean(&[f64::MAX, f64::MAX]), f64::MAX);
+        assert_eq!(mean(&[f64::MAX, -f64::MAX]), 0.0);
+    }
+
+    #[test]
+    fn mean_recovers_a_small_residual_after_severe_cancellation() {
+        assert_close(mean(&[1e16, 1.0, -1e16]), 1.0 / 3.0, 1e-15);
+    }
+
+    #[test]
+    fn quantile_interpolation_of_opposite_extremes_stays_finite() {
+        assert_eq!(quantile(&[-f64::MAX, f64::MAX], 0.5), 0.0);
+    }
+
+    #[test]
+    fn bootstrap_mean_intervals_stay_finite_for_constant_extreme_values() {
+        let diffs = [f64::MAX, f64::MAX];
+        for interval in [
+            bootstrap_mean_diff_ci(&diffs, 0.95, 100, DEFAULT_SEED),
+            bootstrap_mean_diff_ci_basic(&diffs, 0.95, 100, DEFAULT_SEED),
+            bootstrap_mean_diff_ci_bca(&diffs, 0.95, 100, DEFAULT_SEED),
+        ] {
+            assert_eq!(interval, (f64::MAX, f64::MAX));
+        }
+    }
+
+    #[test]
+    fn weighted_acceleration_stays_finite_for_extreme_replicates() {
+        let acceleration = weighted_acceleration(&[(f64::MAX, 1.0), (-f64::MAX, 1.0), (0.0, 1.0)]);
+        assert!(acceleration.is_finite());
+        assert_close(acceleration, 0.0, 1e-12);
     }
 
     // --- resample_edge_multinomial ---

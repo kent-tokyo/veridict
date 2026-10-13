@@ -815,19 +815,13 @@ fn collect_data_quality(
         }
     }
 
-    // records_with_id/max_id_count are 0 when --paired-by-id is set - paired
-    // mode already has its own meaning for a repeated id, so this is skipped
-    // there (see MetricOutput's doc). >= 3 (not >= 2) is load-bearing:
-    // someone who simply forgot --paired-by-id on genuinely paired data has
-    // every id at exactly 2, and that must stay silent - firing on it would
-    // be noise on a common, innocent mistake. >= 10 is a floor so the signal
-    // isn't computed from a handful of records.
-    quality.low_id_diversity = out.records_with_id >= 10 && out.max_id_count >= 3;
-    if quality.low_id_diversity {
-        warnings.push(format!(
-            "low id diversity: one id repeated {} times among {} id-tagged trial(s) - looks like the same test case was logged multiple times, not independent samples",
-            out.max_id_count, out.records_with_id
-        ));
+    // records_with_id/max_id_count are 0 when --paired-by-id is set - paired mode already has its
+    // own meaning for a repeated id, so the shared advisory remains silent there.
+    let (low_id_diversity, id_warning) =
+        report::id_diversity_advisory(out.records_with_id, out.max_id_count);
+    quality.low_id_diversity = low_id_diversity;
+    if let Some(warning) = id_warning {
+        warnings.push(warning);
     }
 
     (quality, warnings)

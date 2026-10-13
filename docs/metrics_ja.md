@@ -36,6 +36,9 @@
 - `winrate` は引き分け、`sign-test` は同値を除外します。`--ci-method` は `wilson`（既定）、
   Clopper-Pearsonの `exact`、`jeffreys` から選びます。決着した観測がなければ `inconclusive` です。
 - `mean-diff` は対応差を再標本化し、2列を別々には再標本化しません。
+- 数値入力だけでなく、対応差・効果量・区間の各端点も有限値でなければなりません。表現できない値が
+  生じた場合は終了コード `3` の入力・設定エラーとし、JSONの値を `null` にしたまま `pass` には
+  しません。意味を変えない範囲で入力値と閾値の尺度を調整してください。
 - `quantile-diff` の既定値は中央値です。自動処理では `--quantile` を明示してください。非平滑な
   標本分位点に対して現在の較正で利点を確認できていないため、BCaは拒否します。
 - `relative-diff` は `(candidate - baseline) / baseline` の平均です。`tied_count` と
@@ -108,6 +111,9 @@ lower = ln(beta / (1 - alpha))
 
 両方とも `(0, 1)` の範囲で、かつ `alpha + beta < 1` でなければなりません。下側境界が
 上側境界以上になる設定はエラーとして拒否します。
+仮説値は表現可能な確率に変換でき、両方の境界が有限値でなければなりません。LLRまたはdraw-rateの
+中間値が非有限になった場合は、数値フィールドがJSON `null` の判定を返さず、終了コード `3` の
+設定エラーにします。
 
 上側境界で `pass`、下側境界で `fail`、どちらにも達しなければ `inconclusive` です。
 
@@ -125,6 +131,11 @@ lower = ln(beta / (1 - alpha))
 判定には `verdict`、`promotion`、`decision_*` を使います。`available_*`、`analyzed_*`、`stopping_*`、
 `ignored_*_after_stop` は再生状況を示します。schema v1との互換性のため、Wald/trinomialの接頭辞なし
 件数と `llr` は入力全体を表します。これらから判定を再構成しないでください。
+
+SPRTレポートは、非ペアモードでID付きレコードが10件以上あり、同じIDが3回以上現れた場合に、
+`data_quality.low_id_diversity` と対応する `warnings` を出します。判定材料はIDの構造だけで、
+LLR、`verdict`、`validity`、`promotion` は変えません。各IDがちょうど2回ずつ現れる場合と、
+`--paired-by-id` の使用時は、重複IDにペアとしての意味があるため警告しません。
 
 ライブラリからは、`SprtRunOptions` を渡す
 `sprt::run_with_options(records, config, options)` を推奨します。既定値はWald、非ペア、

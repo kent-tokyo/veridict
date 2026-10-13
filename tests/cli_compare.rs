@@ -54,6 +54,17 @@ fn mean_diff_clear_pass_exits_zero() {
 }
 
 #[test]
+fn mean_diff_overflow_is_an_input_error_not_a_pass() {
+    veridict()
+        .args(["compare", "-", "--metric", "mean-diff", "--min-effect", "1"])
+        .write_stdin("{\"id\":\"x\",\"baseline\":-1e308,\"candidate\":1e308}\n")
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("candidate_minus_baseline"));
+}
+
+#[test]
 fn small_sample_is_inconclusive_exits_two() {
     let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
     veridict()
@@ -572,6 +583,27 @@ fn sprt_rejects_alpha_beta_sum_at_or_above_one() {
 }
 
 #[test]
+fn sprt_rejects_numeric_settings_that_would_serialize_as_null() {
+    veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "1e308"])
+        .write_stdin("{\"result\":\"baseline_win\"}\n")
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("representable probability"));
+
+    veridict()
+        .args([
+            "sprt", "-", "--elo0", "0", "--elo1", "10", "--alpha", "5e-324",
+        ])
+        .write_stdin("{\"result\":\"candidate_win\"}\n")
+        .assert()
+        .code(3)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("finite SPRT bounds"));
+}
+
+#[test]
 fn sprt_trinomial_variant_reports_drawelo() {
     let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"draw\"}\n{\"result\":\"draw\"}\n{\"result\":\"baseline_win\"}\n";
     veridict()
@@ -634,6 +666,38 @@ fn sprt_report_md_flag_writes_markdown_file() {
         .code(0);
     let contents = std::fs::read_to_string(&path).unwrap();
     assert!(contents.contains("# Veridict SPRT Report"));
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn sprt_low_id_diversity_is_reported_in_json_and_markdown() {
+    let path = std::env::temp_dir().join("veridict_cli_test_sprt_id_warning.md");
+    let mut stdin = "{\"id\":\"dup\",\"result\":\"candidate_win\"}\n".repeat(5);
+    for i in 0..7 {
+        stdin.push_str(&format!(
+            "{{\"id\":\"unique-{i}\",\"result\":\"candidate_win\"}}\n"
+        ));
+    }
+
+    veridict()
+        .args([
+            "sprt",
+            "-",
+            "--elo0",
+            "0",
+            "--elo1",
+            "10",
+            "--report-md",
+            path.to_str().unwrap(),
+        ])
+        .write_stdin(stdin)
+        .assert()
+        .stdout(predicate::str::contains("\"low_id_diversity\": true"))
+        .stdout(predicate::str::contains("low id diversity"));
+
+    let markdown = std::fs::read_to_string(&path).unwrap();
+    assert!(markdown.contains("Warnings:\n"));
+    assert!(markdown.contains("low id diversity"));
     std::fs::remove_file(&path).ok();
 }
 

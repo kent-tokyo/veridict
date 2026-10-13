@@ -333,16 +333,81 @@ where
     }
     let max_id_count = id_counts.values().copied().max().unwrap_or(0);
 
-    aggregators
-        .into_iter()
-        .map(|agg| {
-            agg.finish(&failures).map(|mut out| {
-                out.records_with_id = records_with_id;
-                out.max_id_count = max_id_count;
-                out
-            })
+    metrics
+        .iter()
+        .copied()
+        .zip(aggregators)
+        .map(|(config, agg)| {
+            let mut out = agg.finish(&failures)?;
+            validate_finite_output(config.kind(), &out)?;
+            out.records_with_id = records_with_id;
+            out.max_id_count = max_id_count;
+            Ok(out)
         })
         .collect()
+}
+
+/// Computes the numeric observation shared by `mean-diff`, `quantile-diff`, and `sign-test`.
+/// Finite operands do not guarantee a finite subtraction (`f64::MAX - (-f64::MAX)` overflows),
+/// so the derived value is checked before it reaches pairing, bootstrap, or verdict logic.
+pub(crate) fn checked_difference(
+    line: usize,
+    baseline: f64,
+    candidate: f64,
+) -> Result<f64, VeridictError> {
+    let diff = candidate - baseline;
+    if !diff.is_finite() {
+        return Err(VeridictError::InvalidValue {
+            line,
+            field: "candidate_minus_baseline",
+            value: diff,
+        });
+    }
+    Ok(diff)
+}
+
+fn require_finite(
+    metric: MetricKind,
+    field: &'static str,
+    value: f64,
+) -> Result<(), VeridictError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(VeridictError::NonFiniteStatistic {
+            metric: metric_label(metric),
+            field,
+            value,
+        })
+    }
+}
+
+/// Last fail-closed boundary before a metric result can influence a verdict or be serialized.
+/// This is central rather than bootstrap-specific so a future metric cannot accidentally turn
+/// `NaN`/infinity into JSON `null` and then compare that non-finite value against thresholds.
+fn validate_finite_output(metric: MetricKind, out: &MetricOutput) -> Result<(), VeridictError> {
+    require_finite(metric, "effect", out.effect)?;
+    require_finite(metric, "ci_low", out.ci_low)?;
+    require_finite(metric, "ci_high", out.ci_high)?;
+    if let Some(value) = out.effective_sample_size {
+        require_finite(metric, "effective_sample_size", value)?;
+    }
+    if let Some(value) = out.design_effect {
+        require_finite(metric, "design_effect", value)?;
+    }
+    if let Some(diag) = out.scale_diagnostics {
+        require_finite(metric, "min_positive_baseline", diag.min_positive_baseline)?;
+        require_finite(metric, "max_positive_baseline", diag.max_positive_baseline)?;
+        require_finite(
+            metric,
+            "raw_orders_of_magnitude",
+            diag.raw_orders_of_magnitude,
+        )?;
+        if let Some(value) = diag.robust_orders_of_magnitude {
+            require_finite(metric, "robust_orders_of_magnitude", value)?;
+        }
+    }
+    Ok(())
 }
 
 /// Single-metric convenience wrapper around [`compute_many`].
@@ -772,6 +837,93 @@ mod tests {
     }
 
     #[test]
+    fn numeric_difference_metrics_reject_an_overflowed_derived_difference() {
+        let records = [(1, rec("a", Some(-1e308), Some(1e308), None, None, None))];
+        let configs = [
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            MetricConfig::QuantileDiff {
+                quantile: 0.5,
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            MetricConfig::SignTest {
+                ci_method: CiMethod::Wilson,
+            },
+        ];
+
+        for config in configs {
+            let result = compute(
+                records.iter().cloned(),
+                config,
+                0.95,
+                1000,
+                SEED,
+                false,
+                false,
+            );
+            assert!(matches!(
+                result,
+                Err(VeridictError::InvalidValue {
+                    line: 1,
+                    field: "candidate_minus_baseline",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn mean_diff_pair_average_stays_finite_for_extreme_values() {
+        let records = [
+            (1, rec("pair", Some(0.0), Some(f64::MAX), None, None, None)),
+            (2, rec("pair", Some(0.0), Some(f64::MAX), None, None, None)),
+        ];
+        let out = compute(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            100,
+            SEED,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(out.effect, f64::MAX);
+        assert_eq!(out.ci_low, f64::MAX);
+        assert_eq!(out.ci_high, f64::MAX);
+    }
+
+    #[test]
+    fn final_metric_boundary_rejects_non_finite_output() {
+        let records = [(1, rec("a", Some(1.0), Some(2.0), None, None, None))];
+        let mut out = compute(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            100,
+            SEED,
+            false,
+            false,
+        )
+        .unwrap();
+        out.ci_low = f64::NEG_INFINITY;
+
+        assert!(matches!(
+            validate_finite_output(MetricKind::MeanDiff, &out),
+            Err(VeridictError::NonFiniteStatistic {
+                metric: "metric mean-diff",
+                field: "ci_low",
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn mean_diff_rejects_duplicate_id() {
         let records = [
             (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),
@@ -1117,6 +1269,31 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn mean_diff_recovers_a_small_residual_after_severe_cancellation() {
+        let records = [
+            (1, rec("a", Some(0.0), Some(1e16), None, None, None)),
+            (2, rec("b", Some(0.0), Some(1.0), None, None, None)),
+            (3, rec("c", Some(0.0), Some(-1e16), None, None, None)),
+        ];
+        let out = compute(
+            records.iter().cloned(),
+            MetricConfig::MeanDiff {
+                bootstrap_method: BootstrapMethod::Percentile,
+            },
+            0.95,
+            100,
+            SEED,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert!((out.effect - 1.0 / 3.0).abs() < 1e-15);
+        assert!(out.ci_low.is_finite());
+        assert!(out.ci_high.is_finite());
+    }
+
     // --- relative-diff ---
 
     fn relative_diff_compute(
@@ -1254,6 +1431,15 @@ mod tests {
         let records = [(1, rec("a", Some(10.0), Some(-5.0), None, None, None))];
         let out = relative_diff_compute(&records, false).unwrap();
         assert!((out.effect - (-1.5)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn relative_diff_avoids_a_representable_subtraction_overflow() {
+        let records = [(1, rec("a", Some(1e308), Some(-1e308), None, None, None))];
+        let out = relative_diff_compute(&records, false).unwrap();
+        assert_eq!(out.effect, -2.0);
+        assert_eq!(out.ci_low, -2.0);
+        assert_eq!(out.ci_high, -2.0);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! requirement that bad input produce a clear, line-numbered error.
 
 use std::io::{BufRead, Read};
+use std::marker::PhantomData;
 
 use serde::Deserialize;
 
@@ -44,28 +45,79 @@ pub struct MatchRecord {
 pub fn parse_jsonl<T: serde::de::DeserializeOwned, R: BufRead>(
     reader: R,
 ) -> impl Iterator<Item = Result<(usize, T), VeridictError>> {
-    reader.lines().enumerate().filter_map(|(idx, line)| {
-        let line_no = idx + 1;
-        let line = match line {
-            Ok(l) => l,
-            Err(source) => {
-                return Some(Err(VeridictError::Io {
-                    path: "<stream>".to_string(),
-                    source,
-                }));
-            }
-        };
-        if line.trim().is_empty() {
+    JsonlIter {
+        reader,
+        buffer: Vec::with_capacity(8 * 1024),
+        line_no: 0,
+        finished: false,
+        marker: PhantomData,
+    }
+}
+
+/// Reuses one byte buffer across lines. `BufRead::lines` allocates a fresh `String` for every
+/// record; this keeps allocation capacity while still returning owned, deserialized records.
+struct JsonlIter<T, R> {
+    reader: R,
+    buffer: Vec<u8>,
+    line_no: usize,
+    finished: bool,
+    marker: PhantomData<T>,
+}
+
+impl<T: serde::de::DeserializeOwned, R: BufRead> Iterator for JsonlIter<T, R> {
+    type Item = Result<(usize, T), VeridictError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
             return None;
         }
-        match serde_json::from_str::<T>(&line) {
-            Ok(record) => Some(Ok((line_no, record))),
-            Err(source) => Some(Err(VeridictError::InvalidJson {
-                line: line_no,
-                source,
-            })),
+
+        loop {
+            self.buffer.clear();
+            match self.reader.read_until(b'\n', &mut self.buffer) {
+                Ok(0) => {
+                    self.finished = true;
+                    return None;
+                }
+                Ok(_) => self.line_no += 1,
+                Err(source) => {
+                    self.finished = true;
+                    return Some(Err(VeridictError::Io {
+                        path: "<stream>".to_string(),
+                        source,
+                    }));
+                }
+            }
+
+            // ASCII JSON needs no separate UTF-8 pass. Preserve `BufRead::lines`'s InvalidData
+            // behavior for malformed non-ASCII input, and its Unicode-whitespace blank-line rule.
+            if self.buffer.iter().any(|byte| !byte.is_ascii()) {
+                let line = match std::str::from_utf8(&self.buffer) {
+                    Ok(line) => line,
+                    Err(source) => {
+                        return Some(Err(VeridictError::Io {
+                            path: "<stream>".to_string(),
+                            source: std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+                        }));
+                    }
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+            } else if self.buffer.iter().all(|byte| byte.is_ascii_whitespace()) {
+                continue;
+            }
+
+            return Some(
+                serde_json::from_slice::<T>(&self.buffer)
+                    .map(|record| (self.line_no, record))
+                    .map_err(|source| VeridictError::InvalidJson {
+                        line: self.line_no,
+                        source,
+                    }),
+            );
         }
-    })
+    }
 }
 
 /// Parses one record per CSV row, using the header row to map columns onto
@@ -124,6 +176,24 @@ mod tests {
             .collect::<Result<_, VeridictError>>()
             .unwrap();
         assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn unicode_whitespace_only_lines_remain_blank() {
+        let input =
+            "{\"id\":\"a\",\"result\":\"draw\"}\n\u{2003}\n{\"id\":\"b\",\"result\":\"draw\"}\n";
+        let records: Vec<_> = parse_jsonl::<Record, _>(Cursor::new(input))
+            .collect::<Result<_, VeridictError>>()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].0, 3);
+    }
+
+    #[test]
+    fn invalid_utf8_remains_an_io_error() {
+        let input = [b'{', b'}', b'\n', 0xff, b'\n'];
+        let results: Vec<_> = parse_jsonl::<Record, _>(Cursor::new(input)).collect();
+        assert!(matches!(results[1], Err(VeridictError::Io { .. })));
     }
 
     #[test]

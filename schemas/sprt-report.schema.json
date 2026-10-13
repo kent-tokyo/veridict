@@ -29,6 +29,8 @@
     "invalid",
     "failure_breakdown",
     "reason",
+    "warnings",
+    "data_quality",
     "drawelo",
     "decision_drawelo",
     "sprt_variant",
@@ -117,6 +119,22 @@
       }
     },
     "reason": { "type": "string" },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-readable advisory input-quality signals. They never change the LLR, verdict, validity, or promotion."
+    },
+    "data_quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["low_id_diversity"],
+      "properties": {
+        "low_id_diversity": {
+          "type": "boolean",
+          "description": "True when one id occurs at least 3 times among at least 10 id-tagged records in unpaired mode. Always false under --paired-by-id."
+        }
+      }
+    },
     "drawelo": {
       "type": ["number", "null"],
       "description": "Full-input estimated draw-rate nuisance parameter. Some only for --sprt-variant trinomial; null for wald/pentanomial."

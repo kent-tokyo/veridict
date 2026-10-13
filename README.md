@@ -141,6 +141,7 @@ JSON is the machine-readable contract. Markdown is a human-readable summary. Use
 
 - [`docs/product-scope.md`](docs/product-scope.md): purpose, responsibilities, and development priorities.
 - [`docs/metrics.md`](docs/metrics.md): shipped statistical and report contracts.
+- [`docs/performance.md`](docs/performance.md): streaming, retained-state, and benchmark contract.
 - [`docs/research-map.md`](docs/research-map.md): unshipped candidates and activation conditions.
 - [`CHANGELOG.md`](CHANGELOG.md): release history.
 - [JSON Schemas](schemas/): machine-readable input and report contracts.
