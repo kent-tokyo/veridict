@@ -20,7 +20,7 @@ mod sign_test;
 mod winrate;
 
 pub(crate) use common::{DiffCollector, ROBUST_SPAN_MIN_POSITIVE_BASELINES};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::VeridictError;
@@ -34,14 +34,14 @@ use crate::{
 /// Per-side failure tally, so a report can distinguish "the baseline kept
 /// crashing" from "the candidate kept timing out" instead of one opaque
 /// combined number.
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureCounts {
     pub timeout: u64,
     pub crash: u64,
     pub invalid: u64,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureBreakdown {
     pub baseline: FailureCounts,
     pub candidate: FailureCounts,

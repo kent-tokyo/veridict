@@ -153,6 +153,16 @@ Library callers should prefer `sprt::run_with_options(records, config, options)`
 tolerated, and no paired-ID limits. The original positional `sprt::run` remains available as a
 compatibility wrapper and uses the same validation path.
 
+Long-running producers can use `sprt::SprtAccumulator` to add one record at a time. Call
+`snapshot()` and serialize the returned `SprtCheckpoint` with serde; after a restart, deserialize
+it and call `SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)`.
+The expected `SprtStreamPosition` must come from the producer's separately persisted cursor. A
+resume is rejected when the checkpoint version, hypotheses, options, record count, last line, or
+prefix fingerprint differs. Incremental `push` calls must use strictly increasing line numbers in
+the exact input order. This preserves the first boundary crossing and retains incomplete-pair and
+failure state across restarts. The prefix fingerprint detects accidental mix-ups; it is not an
+authentication mechanism.
+
 ## Supporting commands
 
 ### `matrix` and `plan`
@@ -196,9 +206,20 @@ not support Elo, draw-aware hypotheses, or online composite alternatives.
 - `inconclusive_kind` is `directional` when the interval excludes zero, `noise` when it spans zero,
   and `null` when no ordinary interval judgment exists.
 - `warnings` expose interpretation risks such as small samples, failures, draws, sparse tails, or
-  wide scales. Warnings do not change the verdict.
+  wide scales. Warnings normally do not change the verdict; independently, a fixed-sample report
+  with fewer than two independent analysis units is forced to `inconclusive` because a single
+  observation cannot estimate empirical uncertainty. `paired-elo` uses a completed pair;
+  other paired modes use an ID group or id-less observation; clustering uses a cluster. Exact
+  enumeration of one fair two-trial pair gives one raw
+  false pass among four equally likely outcomes; the floor changes all four reports to
+  `inconclusive`. Samples below 30 still carry a warning, but two units are not a general
+  small-sample error-rate guarantee.
 
-JSON Schemas in [`schemas/`](../schemas/) are the machine-readable field contracts.
+JSON Schemas in [`schemas/`](../schemas/) are the machine-readable field contracts. SPRT reports
+use schema v2 beginning after `0.19.5`, when `warnings` and `data_quality` became required fields;
+[`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) remains available for strict
+consumers of the earlier shape. There is no v1 output mode; consumers should select the schema by
+the report's `schema_version` and migrate before accepting v2.
 
 ## References
 

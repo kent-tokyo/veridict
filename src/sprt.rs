@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::VeridictError;
 use crate::input::Record;
@@ -34,6 +34,11 @@ use crate::stats::pentanomial_sprt;
 use crate::stats::sprt as math;
 use crate::stats::trinomial_sprt;
 use crate::{FailureCaps, FailurePolicy, Outcome, Promotion, Validity, Verdict};
+
+/// SPRT report schema v2 adds the required `warnings` and `data_quality` fields. Keeping this
+/// separate from the other report families prevents an SPRT-only contract change from falsely
+/// relabeling every JSON report in the crate.
+pub const SPRT_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Which SPRT is run. `Wald` (default): classic two-outcome test, draws
 /// excluded, `elo0`/`elo1` are logistic Elo (`stats::sprt::score_from_elo`).
@@ -49,7 +54,8 @@ use crate::{FailureCaps, FailurePolicy, Outcome, Promotion, Validity, Verdict};
 /// logistic Elo, the same scale as `Wald` (this model has no drawelo-style
 /// nuisance parameter to make BayesElo meaningful), and it always requires
 /// `--paired-by-id` (a 5-value pair score has no meaning for a lone game).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SprtVariant {
     Wald,
     Trinomial,
@@ -85,7 +91,7 @@ impl SprtVariant {
 /// };
 /// assert_eq!(options.max_paired_ids, None);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SprtRunOptions {
     pub variant: SprtVariant,
     pub paired_by_id: bool,
@@ -116,6 +122,7 @@ impl Default for SprtRunOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SprtConfig {
     /// H0 hypothesis gap. Logistic Elo for `SprtVariant::Wald`/`Pentanomial`,
     /// BayesElo for `SprtVariant::Trinomial` - see `SprtVariant`'s doc for
@@ -337,6 +344,7 @@ pub struct SprtDataQuality {
 /// bias-uncancelled observations into the same LLR sum. Rejecting it outright is the
 /// conservative choice: an ambiguous pairing structure should fail loudly, not get judged
 /// anyway (per this project's "false pass is worse than inconclusive" bias).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PentanomialCollector {
     groups: HashMap<String, Vec<(usize, Outcome)>>,
     /// `(completion_line, bucket)` pushed in the order each id's *second* record arrives - i.e.
@@ -511,7 +519,7 @@ fn net_pentanomial_buckets(buckets: &[u64; 5]) -> (u64, u64, u64) {
 
 /// One Wald/Trinomial analysis unit in schedule order. With `--paired-by-id`, a unit is the
 /// net result of two records and is scheduled when the second record completes the pair.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 struct OrderedOutcome {
     completion_line: usize,
     outcome: Outcome,
@@ -522,6 +530,7 @@ struct OrderedOutcome {
 /// sequential test must retain its schedule. This deliberately keeps the existing pairing
 /// contract: id-less records are single observations, a lone id is tolerated unless
 /// `require_complete_pairs` is set, and an id occurring more than twice is invalid.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SequentialOutcomeCollector {
     paired_by_id: bool,
     require_complete_pairs: bool,
@@ -667,7 +676,23 @@ struct RunAnalysis {
 /// Incremental Wald/Trinomial state for the common unpaired path. Full-input counts continue to
 /// advance after the first boundary crossing, while the decision-prefix counts freeze there.
 /// This preserves the report contract without retaining one `OrderedOutcome` per trial.
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SequentialStop {
+    UpperBoundCrossed,
+    LowerBoundCrossed,
+}
+
+impl SequentialStop {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UpperBoundCrossed => "upper_bound_crossed",
+            Self::LowerBoundCrossed => "lower_bound_crossed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 struct UnpairedOutcomeAccumulator {
     candidate_wins: u64,
     baseline_wins: u64,
@@ -678,7 +703,7 @@ struct UnpairedOutcomeAccumulator {
     available_observation_count: u64,
     analyzed_observation_count: u64,
     stopping_observation_count: Option<u64>,
-    stopping_reason: Option<&'static str>,
+    stopping_reason: Option<SequentialStop>,
 }
 
 impl UnpairedOutcomeAccumulator {
@@ -716,9 +741,9 @@ impl UnpairedOutcomeAccumulator {
             self.decision_draws,
         )?;
         self.stopping_reason = if llr >= bounds.upper {
-            Some("upper_bound_crossed")
+            Some(SequentialStop::UpperBoundCrossed)
         } else if llr <= bounds.lower {
-            Some("lower_bound_crossed")
+            Some(SequentialStop::LowerBoundCrossed)
         } else {
             None
         };
@@ -762,12 +787,349 @@ impl UnpairedOutcomeAccumulator {
             available_observation_count: self.available_observation_count,
             analyzed_observation_count: self.analyzed_observation_count,
             stopping_observation_count: self.stopping_observation_count,
-            stopping_observation_reason: self.stopping_reason.unwrap_or("insufficient_data"),
+            stopping_observation_reason: self
+                .stopping_reason
+                .map(SequentialStop::label)
+                .unwrap_or("insufficient_data"),
             available_record_count: self.available_observation_count,
             analyzed_record_count: self.analyzed_observation_count,
             pentanomial: None,
         })
     }
+}
+
+/// Version of the serialized [`SprtCheckpoint`] shape. This versions resumable state, not the
+/// final [`SprtReport`] JSON contract.
+pub const SPRT_CHECKPOINT_VERSION: u32 = 1;
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+/// Position and deterministic prefix identity of an incremental SPRT stream. Save this alongside
+/// the producer's own durable cursor and pass it back to [`SprtAccumulator::from_checkpoint`].
+/// The hash detects accidental prefix/config mix-ups; it is not a cryptographic authenticity tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SprtStreamPosition {
+    pub record_count: u64,
+    pub last_line: Option<usize>,
+    pub prefix_hash: u64,
+}
+
+impl Default for SprtStreamPosition {
+    fn default() -> Self {
+        Self {
+            record_count: 0,
+            last_line: None,
+            prefix_hash: FNV_OFFSET_BASIS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SprtAccumulationState {
+    failures: FailureBreakdown,
+    collector: SequentialOutcomeCollector,
+    unpaired: UnpairedOutcomeAccumulator,
+    pentanomial_collector: PentanomialCollector,
+    records_with_id: u64,
+    id_counts: HashMap<String, u64>,
+}
+
+impl SprtAccumulationState {
+    fn new(options: SprtRunOptions) -> Self {
+        Self {
+            failures: FailureBreakdown::default(),
+            collector: SequentialOutcomeCollector::new(
+                options.paired_by_id,
+                options.require_complete_pairs,
+            ),
+            unpaired: UnpairedOutcomeAccumulator::default(),
+            pentanomial_collector: PentanomialCollector::new(),
+            records_with_id: 0,
+            id_counts: HashMap::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        line: usize,
+        record: &Record,
+        config: &SprtConfig,
+        options: SprtRunOptions,
+    ) -> Result<(), VeridictError> {
+        // Parse into a local tally first. A malformed record must not partially mutate a resumable
+        // checkpoint before returning its error.
+        let mut failures = self.failures;
+        let mut baseline_status = None;
+        let mut candidate_status = None;
+        if let Some(status) = record.baseline_status.as_deref() {
+            baseline_status = Some(tally_status(
+                status,
+                line,
+                "baseline_status",
+                &mut failures.baseline,
+            )?);
+        }
+        if let Some(status) = record.candidate_status.as_deref() {
+            candidate_status = Some(tally_status(
+                status,
+                line,
+                "candidate_status",
+                &mut failures.candidate,
+            )?);
+        }
+        let used =
+            baseline_status.is_some() || candidate_status.is_some() || record.result.is_some();
+        let outcome = effective_outcome(
+            options.failure_policy,
+            baseline_status,
+            candidate_status,
+            record.result.as_deref(),
+            line,
+        )?;
+        if !used {
+            return Err(VeridictError::SchemaMismatch {
+                line,
+                context: "sprt",
+                detail: "record has no result and no status fields".to_string(),
+            });
+        }
+        if options.variant == SprtVariant::Pentanomial && outcome.is_some() && record.id.is_none() {
+            return Err(VeridictError::SchemaMismatch {
+                line,
+                context: "pentanomial",
+                detail: "record has no id; --sprt-variant pentanomial requires every record to \
+                         carry one"
+                    .to_string(),
+            });
+        }
+
+        if let Some(outcome) = outcome {
+            if options.variant == SprtVariant::Pentanomial {
+                self.pentanomial_collector.record(
+                    line,
+                    record.id.as_deref().expect("pentanomial id checked above"),
+                    outcome,
+                );
+            } else if options.paired_by_id {
+                self.collector.record(line, record.id.as_deref(), outcome);
+            } else {
+                let bounds = math::bounds(config.alpha, config.beta);
+                let mut unpaired = self.unpaired;
+                unpaired.record(outcome, config, options.variant, &bounds)?;
+                self.unpaired = unpaired;
+            }
+        }
+        if !options.paired_by_id
+            && let Some(id) = record.id.as_deref()
+        {
+            self.records_with_id += 1;
+            *self.id_counts.entry(id.to_string()).or_insert(0) += 1;
+        }
+        self.failures = failures;
+        Ok(())
+    }
+}
+
+/// Serializable state for resuming an incremental SPRT. Fields are private so callers cannot
+/// construct a partly-valid state; use [`SprtAccumulator::snapshot`] and serde.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SprtCheckpoint {
+    checkpoint_version: u32,
+    config: SprtConfig,
+    options: SprtRunOptions,
+    position: SprtStreamPosition,
+    state: SprtAccumulationState,
+}
+
+impl SprtCheckpoint {
+    pub fn position(&self) -> SprtStreamPosition {
+        self.position
+    }
+}
+
+/// Incremental, resumable counterpart to [`run_with_options`]. Records must be pushed in stream
+/// order. `snapshot()` contains the first-crossing state, failure tallies, incomplete pair state,
+/// configuration identity, and prefix fingerprint needed for a crash-safe resume.
+#[derive(Debug)]
+pub struct SprtAccumulator {
+    checkpoint: SprtCheckpoint,
+}
+
+impl SprtAccumulator {
+    /// Starts an empty incremental run after validating the hypotheses and execution options.
+    pub fn new(config: SprtConfig, options: SprtRunOptions) -> Result<Self, VeridictError> {
+        validate_sprt_run(&config, options)?;
+        Ok(Self {
+            checkpoint: SprtCheckpoint {
+                checkpoint_version: SPRT_CHECKPOINT_VERSION,
+                config,
+                options,
+                position: SprtStreamPosition::default(),
+                state: SprtAccumulationState::new(options),
+            },
+        })
+    }
+
+    /// Returns the durable stream position to persist alongside the producer's own cursor.
+    pub fn position(&self) -> SprtStreamPosition {
+        self.checkpoint.position
+    }
+
+    /// Adds the next record. `line` must be strictly greater than the preceding pushed line.
+    pub fn push(&mut self, line: usize, record: Record) -> Result<(), VeridictError> {
+        self.push_record(line, record, true)
+    }
+
+    fn push_batch(&mut self, line: usize, record: Record) -> Result<(), VeridictError> {
+        self.push_record(line, record, false)
+    }
+
+    fn push_record(
+        &mut self,
+        line: usize,
+        record: Record,
+        require_monotonic_line: bool,
+    ) -> Result<(), VeridictError> {
+        if let Some(previous) = self.checkpoint.position.last_line
+            && require_monotonic_line
+            && line <= previous
+        {
+            return Err(VeridictError::NonMonotonicSprtLine { line, previous });
+        }
+        self.checkpoint.state.push(
+            line,
+            &record,
+            &self.checkpoint.config,
+            self.checkpoint.options,
+        )?;
+        self.checkpoint.position.prefix_hash =
+            hash_record_prefix(self.checkpoint.position.prefix_hash, line, &record);
+        self.checkpoint.position.record_count += 1;
+        self.checkpoint.position.last_line = Some(line);
+        Ok(())
+    }
+
+    /// Clones the complete serializable state without changing the running test.
+    pub fn snapshot(&self) -> SprtCheckpoint {
+        self.checkpoint.clone()
+    }
+
+    /// Restores a checkpoint only when its version, hypotheses, execution policies, and durable
+    /// producer cursor all match. `expected_position` should come from the producer's own saved
+    /// run metadata rather than from the checkpoint being restored.
+    pub fn from_checkpoint(
+        checkpoint: SprtCheckpoint,
+        config: SprtConfig,
+        options: SprtRunOptions,
+        expected_position: SprtStreamPosition,
+    ) -> Result<Self, VeridictError> {
+        if checkpoint.checkpoint_version != SPRT_CHECKPOINT_VERSION {
+            return Err(VeridictError::UnsupportedSprtCheckpointVersion {
+                found: checkpoint.checkpoint_version,
+                supported: SPRT_CHECKPOINT_VERSION,
+            });
+        }
+        validate_sprt_run(&config, options)?;
+        if checkpoint.config != config {
+            return Err(VeridictError::SprtCheckpointMismatch {
+                detail: "hypotheses or alpha/beta differ".to_string(),
+            });
+        }
+        if checkpoint.options != options {
+            return Err(VeridictError::SprtCheckpointMismatch {
+                detail: "SPRT variant or execution options differ".to_string(),
+            });
+        }
+        if checkpoint.position != expected_position {
+            return Err(VeridictError::SprtCheckpointMismatch {
+                detail: "stream record count, last line, or prefix fingerprint differs".to_string(),
+            });
+        }
+        Ok(Self { checkpoint })
+    }
+
+    /// Returns a report for the prefix accumulated so far without consuming the accumulator.
+    /// The same final validation as the batch API applies, including incomplete-pair errors.
+    pub fn report(&self) -> Result<SprtReport, VeridictError> {
+        finalize_sprt(self.checkpoint.clone())
+    }
+
+    /// Consumes the accumulator and performs the same final validation as the batch API.
+    pub fn finish(self) -> Result<SprtReport, VeridictError> {
+        finalize_sprt(self.checkpoint)
+    }
+}
+
+fn hash_record_prefix(mut hash: u64, line: usize, record: &Record) -> u64 {
+    fn bytes(hash: &mut u64, data: &[u8]) {
+        for byte in data {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    fn option_str(hash: &mut u64, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                bytes(hash, &[1]);
+                bytes(hash, &(value.len() as u64).to_le_bytes());
+                bytes(hash, value.as_bytes());
+            }
+            None => bytes(hash, &[0]),
+        }
+    }
+    fn option_f64(hash: &mut u64, value: Option<f64>) {
+        match value {
+            Some(value) => {
+                bytes(hash, &[1]);
+                bytes(hash, &value.to_bits().to_le_bytes());
+            }
+            None => bytes(hash, &[0]),
+        }
+    }
+
+    bytes(&mut hash, &(line as u64).to_le_bytes());
+    option_str(&mut hash, record.id.as_deref());
+    option_f64(&mut hash, record.baseline);
+    option_f64(&mut hash, record.candidate);
+    option_str(&mut hash, record.result.as_deref());
+    option_str(&mut hash, record.baseline_status.as_deref());
+    option_str(&mut hash, record.candidate_status.as_deref());
+    hash
+}
+
+fn validate_sprt_run(config: &SprtConfig, options: SprtRunOptions) -> Result<(), VeridictError> {
+    SprtConfig::new(config.elo0, config.elo1, config.alpha, config.beta)?;
+    if options.variant == SprtVariant::Pentanomial && !options.paired_by_id {
+        return Err(VeridictError::InvalidThreshold(
+            "--sprt-variant pentanomial requires --paired-by-id".to_string(),
+        ));
+    }
+    if options.variant != SprtVariant::Pentanomial
+        && (options.min_paired_ids.is_some() || options.max_paired_ids.is_some())
+    {
+        return Err(VeridictError::InvalidThreshold(
+            "--min-paired-ids/--max-paired-ids require --sprt-variant pentanomial (the only \
+             variant with a paired_count)"
+                .to_string(),
+        ));
+    }
+    if let Some(min) = options.min_paired_ids
+        && min < 1
+    {
+        return Err(VeridictError::InvalidThreshold(
+            "--min-paired-ids must be >= 1".to_string(),
+        ));
+    }
+    if let (Some(min), Some(max)) = (options.min_paired_ids, options.max_paired_ids)
+        && min > max
+    {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "--min-paired-ids ({min}) must be <= --max-paired-ids ({max})"
+        )));
+    }
+    Ok(())
 }
 
 fn require_finite_sprt(field: &'static str, value: f64) -> Result<(), VeridictError> {
@@ -954,124 +1316,40 @@ pub fn run_with_options<I>(
 where
     I: IntoIterator<Item = Result<(usize, Record), VeridictError>>,
 {
-    // Fields remain public for API compatibility, so library callers can construct a config
-    // literal without going through `SprtConfig::new`. Revalidate at the execution boundary to
-    // keep that path from bypassing finite-bound/probability and ordering checks.
-    SprtConfig::new(config.elo0, config.elo1, config.alpha, config.beta)?;
+    let mut accumulator = SprtAccumulator::new(*config, options)?;
+    for item in records {
+        let (line, record) = item?;
+        // Preserve the batch API's historical contract: iterator order defines the sequential
+        // schedule, while `line` is diagnostic metadata and need not be monotonic. Incremental
+        // callers use `SprtAccumulator::push`, which enforces a durable stream order.
+        accumulator.push_batch(line, record)?;
+    }
+    accumulator.finish()
+}
 
+fn finalize_sprt(checkpoint: SprtCheckpoint) -> Result<SprtReport, VeridictError> {
+    if checkpoint.position.record_count == 0 {
+        return Err(VeridictError::EmptyInput);
+    }
+    validate_sprt_run(&checkpoint.config, checkpoint.options)?;
+    let config = checkpoint.config;
     let SprtRunOptions {
         variant,
         paired_by_id,
-        failure_policy,
+        failure_policy: _,
         require_complete_pairs,
         min_paired_ids,
         max_paired_ids,
-    } = options;
-    let mut records = records.into_iter().peekable();
-    if records.peek().is_none() {
-        return Err(VeridictError::EmptyInput);
-    }
-    if variant == SprtVariant::Pentanomial && !paired_by_id {
-        return Err(VeridictError::InvalidThreshold(
-            "--sprt-variant pentanomial requires --paired-by-id".to_string(),
-        ));
-    }
-    if variant != SprtVariant::Pentanomial && (min_paired_ids.is_some() || max_paired_ids.is_some())
-    {
-        return Err(VeridictError::InvalidThreshold(
-            "--min-paired-ids/--max-paired-ids require --sprt-variant pentanomial (the only \
-             variant with a paired_count)"
-                .to_string(),
-        ));
-    }
-    if let Some(min) = min_paired_ids
-        && min < 1
-    {
-        return Err(VeridictError::InvalidThreshold(
-            "--min-paired-ids must be >= 1".to_string(),
-        ));
-    }
-    if let (Some(min), Some(max)) = (min_paired_ids, max_paired_ids)
-        && min > max
-    {
-        return Err(VeridictError::InvalidThreshold(format!(
-            "--min-paired-ids ({min}) must be <= --max-paired-ids ({max})"
-        )));
-    }
-
+    } = checkpoint.options;
+    let SprtAccumulationState {
+        failures,
+        collector,
+        unpaired,
+        pentanomial_collector,
+        records_with_id,
+        id_counts,
+    } = checkpoint.state;
     let bounds = math::bounds(config.alpha, config.beta);
-    let mut failures = FailureBreakdown::default();
-    // Only paired Wald/Trinomial runs need to retain a replay schedule. The unpaired accumulator
-    // tracks full-input and frozen decision-prefix counts separately while input validation and
-    // status tallying continue after a boundary crossing.
-    let mut collector = SequentialOutcomeCollector::new(paired_by_id, require_complete_pairs);
-    let mut unpaired = UnpairedOutcomeAccumulator::default();
-    let mut pentanomial_collector = PentanomialCollector::new();
-    let mut records_with_id = 0u64;
-    let mut id_counts: HashMap<String, u64> = HashMap::new();
-
-    for item in records {
-        let (line, record) = item?;
-        if !paired_by_id && let Some(id) = record.id.as_deref() {
-            records_with_id += 1;
-            *id_counts.entry(id.to_string()).or_insert(0) += 1;
-        }
-        let mut baseline_status = None;
-        let mut candidate_status = None;
-
-        if let Some(status) = record.baseline_status.as_deref() {
-            baseline_status = Some(tally_status(
-                status,
-                line,
-                "baseline_status",
-                &mut failures.baseline,
-            )?);
-        }
-        if let Some(status) = record.candidate_status.as_deref() {
-            candidate_status = Some(tally_status(
-                status,
-                line,
-                "candidate_status",
-                &mut failures.candidate,
-            )?);
-        }
-        let used =
-            baseline_status.is_some() || candidate_status.is_some() || record.result.is_some();
-
-        if let Some(outcome) = effective_outcome(
-            failure_policy,
-            baseline_status,
-            candidate_status,
-            record.result.as_deref(),
-            line,
-        )? {
-            if variant == SprtVariant::Pentanomial {
-                let id = record
-                    .id
-                    .as_deref()
-                    .ok_or_else(|| VeridictError::SchemaMismatch {
-                        line,
-                        context: "pentanomial",
-                        detail: "record has no id; --sprt-variant pentanomial requires every \
-                             record to carry one"
-                            .to_string(),
-                    })?;
-                pentanomial_collector.record(line, id, outcome);
-            } else if paired_by_id {
-                collector.record(line, record.id.as_deref(), outcome);
-            } else {
-                unpaired.record(outcome, config, variant, &bounds)?;
-            }
-        }
-
-        if !used {
-            return Err(VeridictError::SchemaMismatch {
-                line,
-                context: "sprt",
-                detail: "record has no result and no status fields".to_string(),
-            });
-        }
-    }
 
     let timeouts = failures.baseline.timeout + failures.candidate.timeout;
     let crashes = failures.baseline.crash + failures.candidate.crash;
@@ -1085,7 +1363,7 @@ where
     let analysis = match variant {
         SprtVariant::Wald | SprtVariant::Trinomial => {
             if !paired_by_id {
-                unpaired.finish(config, variant)?
+                unpaired.finish(&config, variant)?
             } else {
                 let observations = collector.finish()?;
                 let (mut candidate_wins, mut baseline_wins, mut draws) = (0, 0, 0);
@@ -1098,8 +1376,8 @@ where
                     );
                 }
                 let (llr, drawelo) =
-                    outcome_llr(variant, config, candidate_wins, baseline_wins, draws)?;
-                let walk = evaluate_outcomes_sequential(&observations, config, variant, &bounds)?;
+                    outcome_llr(variant, &config, candidate_wins, baseline_wins, draws)?;
+                let walk = evaluate_outcomes_sequential(&observations, &config, variant, &bounds)?;
                 RunAnalysis {
                     llr,
                     drawelo,
@@ -1126,7 +1404,7 @@ where
             let (completed_in_order, raw_trial_count) = pentanomial_collector.finish()?;
             let walk = evaluate_pentanomial_sequential(
                 &completed_in_order,
-                config,
+                &config,
                 &bounds,
                 min_paired_ids,
                 max_paired_ids,
@@ -1224,7 +1502,7 @@ where
     };
 
     Ok(SprtReport {
-        schema_version: crate::report::REPORT_SCHEMA_VERSION,
+        schema_version: SPRT_REPORT_SCHEMA_VERSION,
         verdict,
         validity: Validity::Valid,
         promotion: Promotion::decide(Validity::Valid, verdict),
@@ -1447,6 +1725,231 @@ mod tests {
             SprtRunOptions::new(SprtVariant::Trinomial).variant,
             SprtVariant::Trinomial
         );
+    }
+
+    #[test]
+    fn sprt_report_uses_its_own_v2_schema_version() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records = [(1, rec(Some("draw")))];
+        let report =
+            run_with_options(ok_iter(&records), &config, SprtRunOptions::default()).unwrap();
+        assert_eq!(report.schema_version, SPRT_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.schema_version, 2);
+    }
+
+    fn assert_incremental_matches_batch(
+        records: &[(usize, Record)],
+        config: SprtConfig,
+        options: SprtRunOptions,
+    ) {
+        let batch = run_with_options(ok_iter(records), &config, options).unwrap();
+
+        let mut incremental = SprtAccumulator::new(config, options).unwrap();
+        for (line, record) in records.iter().cloned() {
+            incremental.push(line, record).unwrap();
+        }
+        assert_eq!(
+            incremental.finish().unwrap().to_json_pretty(),
+            batch.to_json_pretty()
+        );
+
+        let mut cut_points = vec![1, records.len() / 2, records.len() - 1];
+        cut_points.sort_unstable();
+        cut_points.dedup();
+        for cut in cut_points {
+            let mut before_restart = SprtAccumulator::new(config, options).unwrap();
+            for (line, record) in records[..cut].iter().cloned() {
+                before_restart.push(line, record).unwrap();
+            }
+            let expected_position = before_restart.position();
+            let encoded = serde_json::to_string(&before_restart.snapshot()).unwrap();
+            let checkpoint: SprtCheckpoint = serde_json::from_str(&encoded).unwrap();
+            let mut resumed =
+                SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)
+                    .unwrap();
+            for (line, record) in records[cut..].iter().cloned() {
+                resumed.push(line, record).unwrap();
+            }
+            assert_eq!(
+                resumed.finish().unwrap().to_json_pretty(),
+                batch.to_json_pretty()
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_and_resumed_reports_match_batch_for_every_variant() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+
+        // This stream crosses the upper bound and later reverses in its full-input aggregate.
+        // Exact report equality therefore also checks preservation of the first crossing.
+        let wald: Vec<_> = (0..240)
+            .map(|index| {
+                let outcome = if index < 120 {
+                    "candidate_win"
+                } else {
+                    "baseline_win"
+                };
+                (index + 1, rec(Some(outcome)))
+            })
+            .collect();
+        assert_incremental_matches_batch(&wald, config, SprtRunOptions::default());
+
+        let trinomial: Vec<_> = (0..240)
+            .map(|index| {
+                let outcome = match index % 4 {
+                    0 | 1 => "candidate_win",
+                    2 => "draw",
+                    _ => "baseline_win",
+                };
+                (index + 1, rec(Some(outcome)))
+            })
+            .collect();
+        assert_incremental_matches_batch(
+            &trinomial,
+            config,
+            SprtRunOptions::new(SprtVariant::Trinomial),
+        );
+
+        let pentanomial = pentanomial_records(120, ("candidate_win", "draw"));
+        assert_incremental_matches_batch(
+            &pentanomial,
+            config,
+            SprtRunOptions {
+                variant: SprtVariant::Pentanomial,
+                paired_by_id: true,
+                ..SprtRunOptions::default()
+            },
+        );
+    }
+
+    #[test]
+    fn incremental_failure_policy_matches_batch() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let options = SprtRunOptions {
+            failure_policy: FailurePolicy::Loss,
+            ..SprtRunOptions::default()
+        };
+        let records = [
+            (
+                1,
+                Record {
+                    baseline_status: Some("ok".to_string()),
+                    candidate_status: Some("timeout".to_string()),
+                    ..rec(None)
+                },
+            ),
+            (2, rec(Some("candidate_win"))),
+        ];
+        assert_incremental_matches_batch(&records, config, options);
+    }
+
+    #[test]
+    fn resumed_pair_errors_match_batch_errors() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let options = SprtRunOptions {
+            variant: SprtVariant::Pentanomial,
+            paired_by_id: true,
+            ..SprtRunOptions::default()
+        };
+        for records in [
+            vec![(1, rec_with_id(Some("incomplete"), Some("candidate_win")))],
+            vec![
+                (1, rec_with_id(Some("triple"), Some("candidate_win"))),
+                (2, rec_with_id(Some("triple"), Some("draw"))),
+                (3, rec_with_id(Some("triple"), Some("baseline_win"))),
+            ],
+        ] {
+            let batch_error = run_with_options(ok_iter(&records), &config, options)
+                .unwrap_err()
+                .to_string();
+            let mut accumulator = SprtAccumulator::new(config, options).unwrap();
+            for (line, record) in records {
+                accumulator.push(line, record).unwrap();
+            }
+            assert_eq!(accumulator.finish().unwrap_err().to_string(), batch_error);
+        }
+    }
+
+    #[test]
+    fn resume_rejects_context_or_prefix_mismatch() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let options = SprtRunOptions::default();
+        let mut accumulator = SprtAccumulator::new(config, options).unwrap();
+        accumulator.push(10, rec(Some("candidate_win"))).unwrap();
+        let checkpoint = accumulator.snapshot();
+        let position = checkpoint.position();
+
+        let other_config = SprtConfig::new(-1.0, 10.0, 0.05, 0.05).unwrap();
+        assert!(matches!(
+            SprtAccumulator::from_checkpoint(checkpoint.clone(), other_config, options, position),
+            Err(VeridictError::SprtCheckpointMismatch { .. })
+        ));
+        assert!(matches!(
+            SprtAccumulator::from_checkpoint(
+                checkpoint.clone(),
+                config,
+                SprtRunOptions::new(SprtVariant::Trinomial),
+                position
+            ),
+            Err(VeridictError::SprtCheckpointMismatch { .. })
+        ));
+        assert!(matches!(
+            SprtAccumulator::from_checkpoint(
+                checkpoint.clone(),
+                config,
+                options,
+                SprtStreamPosition {
+                    prefix_hash: position.prefix_hash ^ 1,
+                    ..position
+                }
+            ),
+            Err(VeridictError::SprtCheckpointMismatch { .. })
+        ));
+
+        let mut unsupported = checkpoint;
+        unsupported.checkpoint_version += 1;
+        assert!(matches!(
+            SprtAccumulator::from_checkpoint(unsupported, config, options, position),
+            Err(VeridictError::UnsupportedSprtCheckpointVersion { .. })
+        ));
+    }
+
+    #[test]
+    fn incremental_push_requires_strict_stream_order() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let mut accumulator = SprtAccumulator::new(config, SprtRunOptions::default()).unwrap();
+        accumulator.push(7, rec(Some("draw"))).unwrap();
+        assert!(matches!(
+            accumulator.push(7, rec(Some("draw"))),
+            Err(VeridictError::NonMonotonicSprtLine {
+                line: 7,
+                previous: 7
+            })
+        ));
+    }
+
+    #[test]
+    fn rejected_incremental_record_does_not_mutate_checkpoint() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let mut accumulator = SprtAccumulator::new(config, SprtRunOptions::default()).unwrap();
+        accumulator.push(1, rec(Some("candidate_win"))).unwrap();
+        let before = serde_json::to_string(&accumulator.snapshot()).unwrap();
+        assert!(accumulator.push(2, rec(Some("unknown"))).is_err());
+        assert_eq!(
+            serde_json::to_string(&accumulator.snapshot()).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn batch_api_keeps_iterator_order_when_line_metadata_is_not_monotonic() {
+        let config = SprtConfig::new(0.0, 10.0, 0.05, 0.05).unwrap();
+        let records = [
+            (20, rec(Some("candidate_win"))),
+            (10, rec(Some("baseline_win"))),
+        ];
+        assert!(run_with_options(ok_iter(&records), &config, SprtRunOptions::default()).is_ok());
     }
 
     #[test]

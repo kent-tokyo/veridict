@@ -189,6 +189,18 @@ pub enum VeridictError {
         value: f64,
     },
 
+    #[error("unsupported SPRT checkpoint version {found}; supported version is {supported}")]
+    UnsupportedSprtCheckpointVersion { found: u32, supported: u32 },
+
+    #[error("SPRT checkpoint does not match the requested resume context: {detail}")]
+    SprtCheckpointMismatch { detail: String },
+
+    #[error(
+        "SPRT accumulator line {line} is not after the previous line {previous}; resumed input \
+         must continue in strictly increasing stream order"
+    )]
+    NonMonotonicSprtLine { line: usize, previous: usize },
+
     #[error(
         "line {line}: relative-diff requires baseline > 0 (got {baseline}); this isn't only about \
          avoiding division by zero - a percentage change relative to a negative baseline doesn't \

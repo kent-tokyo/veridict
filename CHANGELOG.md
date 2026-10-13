@@ -11,6 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `sprt::SprtAccumulator` and serializable `SprtCheckpoint` for incremental, resumable Wald,
+  trinomial, and pentanomial runs. Resume validates checkpoint version, hypotheses, execution
+  options, and a separately persisted stream position; batch and resumed reports are identical.
+
+### Changed
+
+- SPRT reports now declare schema version 2 because `warnings` and `data_quality` are required.
+  The original strict v1 contract remains available as `schemas/sprt-report-v1.schema.json`; there
+  is no legacy-output mode.
+- Fixed-sample comparisons with fewer than two independent trials, completed pairs, or clusters
+  now return `inconclusive` instead of deriving a decisive verdict from a one-point interval.
+
+### Fixed
+
+- Mean and bootstrap aggregation now applies compensated summation consistently, including
+  mixed-sign inputs whose cancellation error was previously below a magnitude-ratio trigger.
+
 ## [0.19.5] - 2026-10-14
 
 ### Added

@@ -56,8 +56,8 @@
   ],
   "properties": {
     "schema_version": {
-      "const": 1,
-      "description": "Stays 1 across additive changes; bumps only when a field is removed or renamed."
+      "const": 2,
+      "description": "Version 2 adds the required warnings and data_quality fields. Use sprt-report-v1.schema.json for reports emitted before this contract change."
     },
     "verdict": {
       "type": "string",

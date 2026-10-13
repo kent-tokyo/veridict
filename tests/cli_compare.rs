@@ -83,6 +83,46 @@ fn small_sample_is_inconclusive_exits_two() {
 }
 
 #[test]
+fn one_mean_diff_observation_is_inconclusive_even_with_a_point_interval() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "mean-diff",
+            "--min-effect",
+            "0.01",
+        ])
+        .write_stdin("{\"baseline\":1.0,\"candidate\":1.1}\n")
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("at least 2 are required"));
+}
+
+#[test]
+fn one_paired_elo_pair_is_inconclusive_even_with_a_point_interval() {
+    veridict()
+        .args([
+            "compare",
+            "-",
+            "--metric",
+            "paired-elo",
+            "--paired-by-id",
+            "--min-effect",
+            "10",
+        ])
+        .write_stdin(
+            "{\"id\":\"p\",\"result\":\"candidate_win\"}\n\
+             {\"id\":\"p\",\"result\":\"candidate_win\"}\n",
+        )
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("\"verdict\": \"inconclusive\""))
+        .stdout(predicate::str::contains("independent pair"));
+}
+
+#[test]
 fn malformed_json_exits_three() {
     veridict()
         .args(["compare", "-", "--metric", "winrate"])
@@ -2284,11 +2324,77 @@ fn schema_version_appears_in_compare_sprt_and_matrix_reports() {
         .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
         .write_stdin(stdin)
         .assert()
-        .stdout(predicate::str::contains("\"schema_version\": 1"));
+        .stdout(predicate::str::contains("\"schema_version\": 2"));
     veridict()
         .args(["matrix", "examples/winloss.jsonl"])
         .assert()
         .stdout(predicate::str::contains("\"schema_version\": 1"));
+}
+
+fn validate_top_level_contract(
+    report: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<(), String> {
+    let report = report
+        .as_object()
+        .ok_or_else(|| "report is not an object".to_string())?;
+    let properties = schema["properties"]
+        .as_object()
+        .ok_or_else(|| "schema has no properties".to_string())?;
+    for required in schema["required"]
+        .as_array()
+        .ok_or_else(|| "schema has no required array".to_string())?
+    {
+        let required = required.as_str().unwrap();
+        if !report.contains_key(required) {
+            return Err(format!("missing required field {required}"));
+        }
+    }
+    if schema["additionalProperties"] == serde_json::Value::Bool(false) {
+        for field in report.keys() {
+            if !properties.contains_key(field) {
+                return Err(format!("unknown field {field}"));
+            }
+        }
+    }
+    let expected_version = schema["properties"]["schema_version"]["const"]
+        .as_u64()
+        .ok_or_else(|| "schema_version has no integer const".to_string())?;
+    if report["schema_version"].as_u64() != Some(expected_version) {
+        return Err("schema_version does not match schema const".to_string());
+    }
+    Ok(())
+}
+
+#[test]
+fn sprt_v1_and_v2_top_level_contracts_are_unambiguous() {
+    let stdin = "{\"result\":\"candidate_win\"}\n{\"result\":\"baseline_win\"}\n";
+    let output = veridict()
+        .args(["sprt", "-", "--elo0", "0", "--elo1", "10"])
+        .write_stdin(stdin)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let v1: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("schemas/sprt-report-v1.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let v2: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("schemas/sprt-report.schema.json")).unwrap(),
+    )
+    .unwrap();
+
+    assert!(validate_top_level_contract(&report, &v2).is_ok());
+    assert!(validate_top_level_contract(&report, &v1).is_err());
+
+    let mut legacy = report;
+    let legacy_object = legacy.as_object_mut().unwrap();
+    legacy_object.insert("schema_version".to_string(), serde_json::json!(1));
+    legacy_object.remove("warnings");
+    legacy_object.remove("data_quality");
+    assert!(validate_top_level_contract(&legacy, &v1).is_ok());
+    assert!(validate_top_level_contract(&legacy, &v2).is_err());
 }
 
 #[test]
@@ -3258,10 +3364,12 @@ fn relative_diff_rejects_negative_baseline_exits_three() {
 
 #[test]
 fn relative_diff_paired_by_id_averages_ratios_not_raw_values() {
-    // id "op1": +10% then -2% -> paired relative observation +4%, not the ratio of averaged
-    // baseline/candidate.
+    // Each id: +10% then -2% -> paired relative observation +4%, not the ratio of averaged
+    // baseline/candidate. Use two independent pairs so the fixed-sample safety floor is met.
     let stdin = "{\"id\":\"op1\",\"baseline\":100.0,\"candidate\":110.0}\n\
-                 {\"id\":\"op1\",\"baseline\":1000.0,\"candidate\":980.0}\n";
+                 {\"id\":\"op1\",\"baseline\":1000.0,\"candidate\":980.0}\n\
+                 {\"id\":\"op2\",\"baseline\":100.0,\"candidate\":110.0}\n\
+                 {\"id\":\"op2\",\"baseline\":1000.0,\"candidate\":980.0}\n";
     let output = veridict()
         .args([
             "compare",
@@ -3277,7 +3385,7 @@ fn relative_diff_paired_by_id_averages_ratios_not_raw_values() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["paired_count"], 1);
+    assert_eq!(json["paired_count"], 2);
     assert!((json["effect"].as_f64().unwrap() - 0.04).abs() < 1e-9);
 }
 

@@ -25,6 +25,7 @@ use veridict::metrics::{compute, compute_many};
 use veridict::{BootstrapMethod, CiMethod, FailurePolicy, MetricConfig};
 
 const N: usize = 20_000;
+const BOOTSTRAP_N: usize = 2_000;
 
 fn synthetic_records() -> Vec<(usize, Record)> {
     (0..N)
@@ -169,11 +170,32 @@ fn bench_independent_calls_cheap_metrics(c: &mut Criterion) {
     );
 }
 
+fn bench_mean_diff_release_workload(c: &mut Criterion) {
+    let records: Vec<_> = synthetic_records().into_iter().take(BOOTSTRAP_N).collect();
+    c.bench_function("mean-diff (N=2000, resamples=10000)", |b| {
+        b.iter(|| {
+            compute(
+                records.iter().cloned(),
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+                0.95,
+                10_000,
+                0x5EED,
+                false,
+                false,
+            )
+            .unwrap()
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_single_pass_all_metrics,
     bench_independent_calls_all_metrics,
     bench_single_pass_cheap_metrics,
-    bench_independent_calls_cheap_metrics
+    bench_independent_calls_cheap_metrics,
+    bench_mean_diff_release_workload
 );
 criterion_main!(benches);

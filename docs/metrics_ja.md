@@ -142,6 +142,15 @@ LLR、`verdict`、`validity`、`promotion` は変えません。各IDがちょ�
 `FailurePolicy::ReportOnly`、不完全IDを許容、ペアID上下限なしです。従来の位置引数版
 `sprt::run` も互換ラッパーとして残り、同じ検証経路を使います。
 
+長時間動くデータ生成側では、`sprt::SprtAccumulator` にレコードを1件ずつ追加できます。
+`snapshot()` が返す `SprtCheckpoint` をserdeで保存し、再起動後に復号して
+`SprtAccumulator::from_checkpoint(checkpoint, config, options, expected_position)` に渡します。
+`expected_position` は、生成側がcheckpointとは別に永続化したcursorから取得してください。
+checkpoint version、仮説、option、レコード数、最終行、prefix fingerprintのいずれかが異なる場合は
+復元を拒否します。増分の `push` は、実際の入力順どおりに単調増加する行番号を渡す必要があります。
+最初の境界到達、不完全ペア、失敗集計も再起動をまたいで保持します。prefix fingerprintは取り違えの
+検出用であり、改ざん検知や認証には使えません。
+
 ## 補助コマンド
 
 ### `matrix` と `plan`
@@ -183,9 +192,19 @@ LLR、`verdict`、`validity`、`promotion` は変えません。各IDがちょ�
 - `inconclusive_kind` は、区間がゼロを除外すれば `directional`、ゼロをまたげば `noise`、通常の
   区間判定が成立しなければ `null` です。
 - `warnings` は小標本、失敗、引き分け、疎な裾、広いスケールなどの解釈リスクを示します。
-  判定は変えません。
+  通常は判定を変えません。ただし、固定標本レポートの独立した分析単位が2件未満の場合は、
+  1件だけでは経験的な不確実性を推定できないため、warningとは別の判定規則で`inconclusive`に
+  します。`paired-elo`では完成ペア、その他のペアモードではIDグループまたはIDなしの観測、
+  クラスタ分析ではクラスタが独立単位です。公平な2試行1組を全列挙すると、従来は同確率の4通り中
+  1通りが誤passでしたが、この下限により4通りとも
+  `inconclusive`になります。30件未満のwarningは引き続き出します。2件あれば小標本の誤判定率が
+  一般に保証される、という意味ではありません。
 
-機械可読なフィールド契約は [`schemas/`](../schemas/) のJSON Schemaです。
+機械可読なフィールド契約は [`schemas/`](../schemas/) のJSON Schemaです。SPRTレポートは、
+`warnings`と`data_quality`を必須項目にした`0.19.5`後の出力からschema v2を使います。以前の厳格な
+consumer向けには [`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) を残します。
+v1出力モードは設けません。consumerはレポートの`schema_version`に対応するschemaを選び、v2を
+受理する前に移行してください。
 
 ## 参考文献
 

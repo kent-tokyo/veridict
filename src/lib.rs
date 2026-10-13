@@ -20,6 +20,11 @@ pub mod verify_run;
 pub use error::VeridictError;
 pub use report::{MultiReport, Report};
 
+/// A fixed-sample result needs at least this many independent analysis units before it may return
+/// `pass` or `fail`. One observation produces a point bootstrap distribution and can otherwise
+/// look certain despite containing no empirical variance information.
+pub const MIN_DECISIVE_UNITS: u64 = 2;
+
 use serde::{Deserialize, Serialize};
 
 /// Final decision returned for a comparison run.
@@ -163,7 +168,8 @@ impl TrialStatus {
 }
 
 /// Result of a single win/loss/draw comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     BaselineWin,
     CandidateWin,
@@ -267,7 +273,8 @@ pub enum BootstrapMethod {
 /// meaningful for outcome-based metrics - `mean-diff`/`sign-test` have no win/loss/draw outcome
 /// for a failed numeric trial to become, so requesting `Exclude`/`Loss` with either is a config
 /// error (`VeridictError::IncompatibleFailurePolicy`), not an arbitrary numeric penalty.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FailurePolicy {
     ReportOnly,
     Exclude,
@@ -568,27 +575,46 @@ fn build_report(
     ci_method: CiMethod,
     paired_by_id: bool,
 ) -> Report {
+    let independent_units = out.cluster_count.unwrap_or(out.paired_count);
+    let below_decisive_floor = out.warning.is_none() && independent_units < MIN_DECISIVE_UNITS;
+    let analysis_unit = if out.cluster_count.is_some() {
+        "cluster"
+    } else if metric == MetricKind::PairedElo {
+        "pair"
+    } else if paired_by_id {
+        "paired unit"
+    } else {
+        "trial"
+    };
     // Zero usable trials means "no signal", not "the CLI ran a threshold
     // check on a fabricated zero": force Inconclusive rather than letting
     // (0.0, 0.0) accidentally satisfy a threshold that includes zero.
-    let (verdict, reason) = match &out.warning {
-        Some(warning) => (Verdict::Inconclusive, warning.clone()),
-        None => verdict::decide(out.ci_low, out.ci_high, thresholds),
+    let (verdict, reason) = match (&out.warning, below_decisive_floor) {
+        (Some(warning), _) => (Verdict::Inconclusive, warning.clone()),
+        (None, true) => (
+            Verdict::Inconclusive,
+            format!(
+                "Only {independent_units} independent {analysis_unit}(s) were available; at least \
+                 {MIN_DECISIVE_UNITS} are required for a decisive fixed-sample verdict."
+            ),
+        ),
+        (None, false) => verdict::decide(out.ci_low, out.ci_high, thresholds),
     };
     // `None` for `Pass`/`Fail`, and for the `out.warning.is_some()` zero-trial path above (where
     // ci_low == ci_high == 0.0 would misleadingly read as `Noise` - it's a data-availability
     // problem, not a real CI judgment). `apply_failure_caps` clears this the same way it clears
     // `estimated_additional_trials` below, for the same reason.
-    let inconclusive_kind = if verdict == Verdict::Inconclusive && out.warning.is_none() {
-        Some(verdict::classify_inconclusive(out.ci_low, out.ci_high))
-    } else {
-        None
-    };
+    let inconclusive_kind =
+        if verdict == Verdict::Inconclusive && out.warning.is_none() && !below_decisive_floor {
+            Some(verdict::classify_inconclusive(out.ci_low, out.ci_high))
+        } else {
+            None
+        };
     // `estimate_additional_trials` binary-searches wilson/jeffreys/exact -
     // none of which describe a cluster bootstrap CI's width at a hypothetical
     // n, and the independent unit under clustering is the cluster, not the
     // trial, so `paired_count` isn't even the right n to scale from.
-    let estimated_additional_trials = if out.cluster_count.is_some() {
+    let estimated_additional_trials = if out.cluster_count.is_some() || below_decisive_floor {
         None
     } else {
         verdict::estimate_additional_trials(
@@ -922,6 +948,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn one_numeric_observation_cannot_pass_or_fail() {
+        let thresholds = Thresholds::symmetric(0.01).unwrap();
+        for candidate in [1.1, 0.9] {
+            let records = [(1, rec("only", Some(1.0), Some(candidate), None, None, None))];
+            let report = compare_one(
+                records,
+                MetricConfig::MeanDiff {
+                    bootstrap_method: BootstrapMethod::Percentile,
+                },
+                0.95,
+                &thresholds,
+                2000,
+                DEFAULT_SEED,
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(report.verdict, Verdict::Inconclusive);
+            assert_eq!(report.promotion, Promotion::NotPromoted);
+            assert_eq!(report.inconclusive_kind, None);
+            assert!(report.reason.contains("at least 2"));
+        }
+    }
+
+    #[test]
+    fn one_paired_elo_pair_cannot_pass() {
+        let records = [
+            (
+                1,
+                rec("pair", None, None, Some("candidate_win"), None, None),
+            ),
+            (
+                2,
+                rec("pair", None, None, Some("candidate_win"), None, None),
+            ),
+        ];
+        let report = compare_one(
+            records,
+            MetricConfig::PairedElo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
+            0.95,
+            &Thresholds::symmetric(10.0).unwrap(),
+            2000,
+            DEFAULT_SEED,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.paired_count, 1);
+        assert!(report.reason.contains("independent pair"));
+    }
+
+    #[test]
+    fn one_cluster_cannot_produce_a_decisive_verdict() {
+        let records: Vec<_> = (0..30)
+            .map(|i| {
+                (
+                    i + 1,
+                    rec("one-cluster", None, None, Some("candidate_win"), None, None),
+                )
+            })
+            .collect();
+        let report = compare_one(
+            records,
+            MetricConfig::Elo {
+                failure_policy: FailurePolicy::ReportOnly,
+            },
+            0.95,
+            &Thresholds::symmetric(10.0).unwrap(),
+            200,
+            DEFAULT_SEED,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(report.verdict, Verdict::Inconclusive);
+        assert_eq!(report.cluster_count, Some(1));
+        assert!(report.reason.contains("independent cluster"));
     }
 
     #[test]

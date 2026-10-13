@@ -6,6 +6,9 @@
 #[path = "calibration/binomial_coverage.rs"]
 mod binomial_coverage;
 
+#[path = "calibration/decisive_floor.rs"]
+mod decisive_floor;
+
 #[path = "calibration/bootstrap_coverage.rs"]
 mod bootstrap_coverage;
 

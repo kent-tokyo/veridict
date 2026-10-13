@@ -34,13 +34,9 @@ impl PairScoreCounts {
     }
 }
 
-/// Current JSON report schema version, for `Report`/`MultiReport`/
-/// `SprtReport`/`ComparisonMatrix` alike. Every change so far (including
-/// this sprint's) has been additive (new fields, new enum variants) - this
-/// stays `1` until a future change actually removes or renames a field,
-/// which is the point of having it: a place for that change to signal
-/// itself, per AGENTS.md's "breaking schema changes must be intentional and
-/// documented."
+/// Current JSON report schema version for fixed-sample and non-SPRT reports. SPRT has an
+/// independent version because its v2 contract added required fields that strict v1 consumers
+/// correctly reject; see `sprt::SPRT_REPORT_SCHEMA_VERSION`.
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Minimum "effective" orders-of-magnitude span across positive baselines before

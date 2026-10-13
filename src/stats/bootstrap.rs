@@ -494,63 +494,62 @@ fn combine_means(left: f64, left_count: usize, right: f64, right_count: usize) -
     }
 }
 
-/// Keeps the established left-to-right sum for ordinary inputs, adds a Neumaier correction for
-/// severe mixed-sign cancellation, and retains the online-mean overflow fallback. The selective
-/// correction avoids changing pinned bootstrap output merely because harmless rounding differs by
-/// an ulp, while recovering information in inputs such as `[1e16, 1, -1e16]`.
+/// Uses a Neumaier correction for every finite sum and retains the online-mean overflow fallback.
+/// Applying the correction consistently avoids a magnitude-ratio threshold that can miss real
+/// cancellation, for example `[1e16, 100001, -1e16]`.
 #[derive(Default)]
 struct MeanAccumulator {
     sum: f64,
     correction: f64,
-    online_mean: f64,
+    overflow_mean: Option<f64>,
     count: usize,
-    max_abs: f64,
-    min_nonzero_abs: f64,
-    has_positive: bool,
-    has_negative: bool,
 }
 
 impl MeanAccumulator {
     fn push(&mut self, value: f64) {
-        let next = self.sum + value;
-        if self.sum.abs() >= value.abs() {
-            self.correction += (self.sum - next) + value;
-        } else {
-            self.correction += (value - next) + self.sum;
+        if let Some(mean) = self.overflow_mean {
+            self.count += 1;
+            self.overflow_mean = Some(update_mean(mean, value, self.count));
+            return;
         }
-        self.sum = next;
-        self.count += 1;
-        self.online_mean = update_mean(self.online_mean, value, self.count);
 
-        let magnitude = value.abs();
-        self.max_abs = self.max_abs.max(magnitude);
-        if magnitude > 0.0 && (self.min_nonzero_abs == 0.0 || magnitude < self.min_nonzero_abs) {
-            self.min_nonzero_abs = magnitude;
+        let next = self.sum + value;
+        let delta = if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        let correction = self.correction + delta;
+        if next.is_finite() && correction.is_finite() {
+            self.sum = next;
+            self.correction = correction;
+            self.count += 1;
+            return;
         }
-        self.has_positive |= value > 0.0;
-        self.has_negative |= value < 0.0;
+
+        // Switch only when the compensated sum itself can no longer be represented. This keeps
+        // the common bootstrap loop small while retaining an overflow-safe running mean.
+        let previous_mean = (self.sum + self.correction) / self.count as f64;
+        self.count += 1;
+        self.overflow_mean = Some(update_mean(previous_mean, value, self.count));
     }
 
     fn corrected_sum(&self) -> Option<f64> {
         let corrected = self.sum + self.correction;
-        let severe_cancellation_risk = self.has_positive
-            && self.has_negative
-            && self.min_nonzero_abs > 0.0
-            && self.max_abs / self.min_nonzero_abs >= 1e12;
-        (severe_cancellation_risk && corrected.is_finite()).then_some(corrected)
+        corrected.is_finite().then_some(corrected)
     }
 
     fn sum_for_subtraction(&self) -> f64 {
-        self.corrected_sum().unwrap_or(self.sum)
+        self.overflow_mean
+            .map(|mean| mean * self.count as f64)
+            .or_else(|| self.corrected_sum())
+            .unwrap_or(self.sum)
     }
 
     fn finish(&self) -> f64 {
         debug_assert!(self.count > 0, "mean accumulator is empty");
-        if self.sum.is_finite() {
-            self.corrected_sum().unwrap_or(self.sum) / self.count as f64
-        } else {
-            self.online_mean
-        }
+        self.overflow_mean
+            .unwrap_or_else(|| self.corrected_sum().unwrap_or(self.sum) / self.count as f64)
     }
 }
 
@@ -799,6 +798,11 @@ mod tests {
     }
 
     #[test]
+    fn mean_does_not_gate_compensation_on_a_magnitude_ratio() {
+        assert_close(mean(&[1e16, 100001.0, -1e16]), 100001.0 / 3.0, 1e-12);
+    }
+
+    #[test]
     fn quantile_interpolation_of_opposite_extremes_stays_finite() {
         assert_eq!(quantile(&[-f64::MAX, f64::MAX], 0.5), 0.0);
     }
@@ -920,13 +924,16 @@ mod tests {
 
     #[test]
     fn bca_matches_fixture_at_fixed_seed() {
+        // Pinned after switching every resampled mean to compensated summation. The seed and
+        // percentile convention are unchanged; the corrected means can move tied order
+        // statistics at a percentile boundary.
         let (lo, hi) = bootstrap_mean_diff_ci_bca(&SKEWED, 0.95, 2000, DEFAULT_SEED);
         assert_close(lo, 0.07850, 1e-4);
-        assert_close(hi, 0.22550, 1e-4);
+        assert_close(hi, 0.22400, 1e-4);
 
         let (lo, hi) = bootstrap_mean_diff_ci_bca(&SKEWED, 0.95, 10_000, DEFAULT_SEED);
-        assert_close(lo, 0.07650, 1e-4);
-        assert_close(hi, 0.22350, 1e-4);
+        assert_close(lo, 0.07550, 1e-4);
+        assert_close(hi, 0.22250, 1e-4);
     }
 
     #[test]
