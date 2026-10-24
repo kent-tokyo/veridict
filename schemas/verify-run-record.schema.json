@@ -11,6 +11,7 @@
     },
     "global_index": {
       "type": ["integer", "null"],
+      "minimum": 0,
       "description": "Caller-declared per-record sequence number, unique across the whole run. Drives global_index_uniqueness."
     },
     "role": {

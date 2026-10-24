@@ -2,8 +2,8 @@
 
 English | [日本語](research-map_ja.md)
 
-This file records plausible but unimplemented features; it is not a schedule. Current-source
-behavior belongs in [`metrics.md`](metrics.md). Product boundaries and priorities are defined in
+This file records plausible but unimplemented features; it is not a schedule. Current-source behavior
+belongs in [`metrics.md`](metrics.md). Product boundaries and priorities are defined in
 [Product scope](product-scope.md).
 
 Correctness fixes to shipped decisions take priority over these candidates. In particular, false
@@ -49,16 +49,12 @@ If numeric clustering is activated, priority is `mean-diff`, `relative-diff`, `q
 
 | Candidate | Why it is deferred | Activation condition |
 |---|---|---|
-| Training/checkpoint lineage | `verify-run` validates an envelope, not an experiment database | A generic need for opaque parent, data, and configuration hashes |
+| Lineage graph or database | `verify-run` stores opaque lineage and hash fields but does not traverse relationships | A generic need to validate relationships across runs without becoming experiment infrastructure |
 | Trinomial or pentanomial time policies | Three- or five-outcome state, e-process, and reward semantics are undefined | A concrete time-valued workflow and calibration |
 | Composite or online alternatives | Estimating `p1` from the same stream changes validity | A mixture or confidence-sequence construction |
 | Elo flags and policy presets | Elo-only conversion adds no draw model; domain schedules do not belong in core | Real usage evidence for a generic refinement |
 
 ## Out of scope
 
-The exclusions in [Product scope](product-scope.md#work-owned-by-other-tools) apply here. In
-particular, runners, domain-specific judges, experiment infrastructure, adaptive control, and
-presets tied to one engine, model, or dataset do not move into the core through this research map.
-
-External tools may emit generic scores, outcomes, statuses, or run envelopes for `veridict` to
-judge. The dependency remains one-way.
+The exclusions and one-way dependency in [Product scope](product-scope.md#work-owned-by-other-tools)
+also apply to every candidate in this map.

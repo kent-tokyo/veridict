@@ -11,16 +11,10 @@ This document defines product direction and feature boundaries. Current behavior
 are defined in [metrics.md](metrics.md); a product objective is not a guarantee that every current
 implementation already meets it.
 
-## The primary workflow is a candidate adoption decision
-
-A developer changes an implementation, model, algorithm, or configuration and needs to decide
-whether to adopt it. The relevant evidence may be paired numeric scores, win/loss/draw outcomes,
-or execution failures. Some evaluations have a fixed sample size; others collect observations in
-order until a sequential rule reaches a decision.
-
-The product should make this workflow reproducible and usable in CI. Success means traceable
-decisions, explicit reasons to collect more evidence, and fewer unsupported adoptions. Method
-count and unrelated statistical breadth are not success measures.
+The primary workflow is a reproducible, CI-ready decision about adopting a changed implementation,
+model, algorithm, or configuration. Evidence may be paired scores, outcomes, or execution
+failures, collected at a fixed size or under a declared sequential rule. Success means traceable
+decisions and clear reasons to collect more evidence, not a larger catalog of methods.
 
 ## Responsibilities stay at the result-to-decision boundary
 
@@ -39,12 +33,11 @@ configuration. `power`, `matrix`, and `plan` support the decision workflow. Exis
 `time-sensitive` testing remains bounded by its documented model and should not drive expansion
 into experiment orchestration.
 
-## Real workflows guide generic interfaces
+## Generic interfaces, one-way dependencies
 
-Development priorities come from repeatable adoption decisions. Features express their
-statistical meaning through generic trials, pairs, scores, outcomes, statuses, hypotheses, or
-opaque identifiers. Paired outcomes, draws, Elo, and sequential stopping remain in scope when
-their assumptions are explicit.
+Features use generic trials, pairs, scores, outcomes, statuses, hypotheses, and identifiers whose
+contents veridict does not interpret. Paired outcomes, draws, Elo, and sequential stopping remain
+in scope when their assumptions are explicit.
 
 Consumers produce their own metrics and records, either using the library or invoking the CLI.
 Domain adapters, runner settings, model access, and application-specific adoption policies stay
@@ -54,11 +47,10 @@ with those consumers. The dependency direction is always:
 external evaluation tools -> veridict
 ```
 
-`veridict` must build, test, and run without any consuming project's source tree, artifacts,
-services, or credentials. Public documentation describes reusable workflows and contracts;
-private consumer names and internal prioritization context stay outside published materials.
-Existing serialized field names remain compatible unless a separately documented schema change
-is necessary.
+`veridict` must build, test, and run without a consumer's source, artifacts, services, or
+credentials. Public materials contain only reusable contracts. Private consumer names and
+prioritization stay outside them. Serialized fields remain compatible unless a schema change is
+documented separately.
 
 ## Correct decisions take priority over additional methods
 
@@ -73,8 +65,8 @@ is necessary.
    calibrated behavior, and a manageable API and maintenance cost. The [research map](research-map.md)
    records candidates rather than a commitment to implement them.
 
-Evidence requirements depend on the method and data structure. A universal sample-count cutoff
-is not a substitute for checking whether an interval or stopping rule supports the claimed decision.
+Evidence requirements depend on the method and data structure; no universal sample cutoff can
+replace checking whether the interval or stopping rule supports the claim.
 
 ## Work owned by other tools
 
@@ -84,6 +76,5 @@ dashboards, cloud services, distributed execution, artifact deployment, or adapt
 control. It does not select favorable thresholds after seeing results or certify general
 superiority outside the supplied evaluation conditions.
 
-Integrations may perform these tasks and supply generic observations to `veridict`. A proposed
-feature belongs here only when it improves the result-to-decision contract without taking over
-those responsibilities.
+Integrations may perform these tasks and supply generic observations. A feature belongs here only
+when it improves the result-to-decision contract without taking over those responsibilities.

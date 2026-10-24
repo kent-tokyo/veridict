@@ -28,7 +28,7 @@ on:
         type: string
     outputs:
       exit_code:
-        description: "veridict exit code: 0 pass, 1 fail, 2 inconclusive, 3 invalid"
+        description: "compare/sprt: 0 pass, 1 fail, 2 inconclusive, 3 error; verify-run: 0 valid, 1 structurally invalid, 3 error"
         value: ${{ jobs.gate.outputs.exit_code }}
 
 permissions:

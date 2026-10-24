@@ -9,6 +9,7 @@
   "properties": {
     "manifest_schema_version": {
       "type": "integer",
+      "const": 1,
       "description": "Versions this manifest's own (non-envelope) shape. A mismatch against the version this veridict build supports is a hard error (exit 3, no report produced) - distinct from a violation, since an unrecognized manifest shape can't be safely checked at all. Currently 1."
     },
     "experiment_id": {

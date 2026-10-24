@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kent-tokyo/veridict/schemas/match-record.schema.json",
   "title": "veridict named-competitor match record",
-  "description": "One JSONL line of input to `veridict matrix --matches`: a head-to-head match between two named competitors. Unlike input-record.schema.json, there is no sparse/status-only variant - a/b/result are required, not optional. Use the literal name \"baseline\" in a/b to connect this data to the baseline node implied by legacy per-file input.",
+  "description": "One JSONL line of input to `veridict matrix --matches`: a head-to-head match between two named competitors. Unlike input-record.schema.json, there is no sparse/status-only variant - a/b/result are required, not optional. Extra caller metadata is accepted and ignored. Use the literal name \"baseline\" in a/b to connect this data to the baseline node implied by legacy per-file input.",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "required": ["a", "b", "result"],
   "properties": {
     "id": {

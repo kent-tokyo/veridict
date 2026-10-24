@@ -16,8 +16,9 @@ The central workflow is a reproducible regression gate, including paired results
 testing, and execution failures. Evaluation runners and adoption actions stay with the caller.
 See [Product scope](docs/product-scope.md) for responsibilities and development priorities.
 
-Repository documentation describes the current source tree. This release is `0.19.6`; use the
-[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6) for its exact source and docs.
+Repository documentation describes the current source tree. The latest published release is
+`0.19.6`; use the [v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6) for its exact
+source and docs.
 
 ## Install
 
@@ -36,7 +37,7 @@ cargo add veridict
 Compare win/loss/draw results:
 
 ```bash
-veridict compare results.jsonl \
+veridict compare examples/winloss.jsonl \
   --metric winrate \
   --pass-above 0.02 \
   --fail-below -0.01
@@ -45,7 +46,7 @@ veridict compare results.jsonl \
 Compare paired numeric scores and save reports:
 
 ```bash
-veridict compare scores.jsonl \
+veridict compare examples/paired_scores.jsonl \
   --metric mean-diff \
   --min-effect 0.01 \
   --report-json report.json \
@@ -55,7 +56,7 @@ veridict compare scores.jsonl \
 Run a sequential Elo test:
 
 ```bash
-veridict sprt results.jsonl --elo0 0 --elo1 10
+veridict sprt examples/winloss.jsonl --elo0 0 --elo1 10
 ```
 
 Use `-` for stdin. JSONL is the default; `.csv` or `--format csv` selects CSV.
@@ -105,7 +106,7 @@ unsupported combinations are documented in [`docs/metrics.md`](docs/metrics.md).
 Example with pair-preserving fixed-sample Elo:
 
 ```bash
-veridict compare paired.jsonl \
+veridict compare examples/chess_engine_paired_openings.jsonl \
   --metric paired-elo \
   --paired-by-id \
   --min-effect 10
@@ -116,8 +117,8 @@ Important contracts:
 - `--paired-by-id` combines up to two records with the same ID. `paired-elo` is stricter and
   requires exactly two usable outcomes for every ID.
 - `--cluster-by-id` cluster-bootstraps `winrate` or `elo`; it is not pairing.
-- `--failure-policy` controls outcome treatment. Failure counts and validity caps are always
-  reported.
+- `--failure-policy` controls outcome treatment. Failure counts are always reported; a breached
+  validity cap appears in `validity` and `reason`.
 - Repeating `--metric` creates a joint gate. Overall precedence is
   `fail > inconclusive > pass`.
 - `--claim-correction bonferroni|holm` adds family-adjusted results where supported.
@@ -128,7 +129,8 @@ Important contracts:
 
 For confidence-interval gates, `pass` requires the lower bound to clear the pass threshold,
 `fail` requires the upper bound to fall below the fail threshold, and all other valid results are
-`inconclusive`. Breaching a validity cap prevents promotion.
+`inconclusive`. Breaching a validity cap forces `validity=invalid`, `verdict=inconclusive`, and
+`promotion=not_promoted`.
 
 `compare` and `sprt` use deterministic exit codes:
 
@@ -138,6 +140,9 @@ For confidence-interval gates, `pass` requires the lower bound to clear the pass
 | `1` | fail |
 | `2` | inconclusive |
 | `3` | invalid input or configuration |
+
+`time-sensitive` uses `0` for pass, `2` for inconclusive, and `3` for invalid input or
+configuration; its one-sided contract has no statistical-fail exit code `1`.
 
 JSON is the machine-readable contract. Markdown is a human-readable summary. Use `verdict` and
 `promotion` rather than reconstructing decisions from intermediate fields.
@@ -161,16 +166,14 @@ jobs:
 This workflow revision installs veridict `0.19.6`. For production use:
 
 - Pin the workflow to a release tag or full commit SHA.
-- Valid statistical runs upload `report.json` and `report.md` before preserving exit code `0`,
-  `1`, `2`, or `3`.
-- Invalid input uploads `gate.json`, `gate.md`, and `stderr.txt` without fabricating a statistical
-  report.
+- Valid `compare` and `sprt` runs upload `report.json` and `report.md` before preserving exit code
+  `0`, `1`, or `2`. A valid `verify-run` report uses code `0` or `1`.
+- Input or configuration errors use code `3` and upload `gate.json`, `gate.md`, and `stderr.txt`
+  without fabricating a statistical report.
 - Pass `arguments_json` as a JSON array. Each argument retains its boundary and is never evaluated
   by a shell.
 
-For `compare` and `sprt`, exit codes mean pass, fail, inconclusive, and invalid configuration in
-the order `0` through `3`. For `verify-run`, code `1` means structural invalidity; it is not a
-statistical `fail` verdict.
+For `verify-run`, code `1` means structural invalidity; it is not a statistical `fail` verdict.
 
 ## Documentation
 

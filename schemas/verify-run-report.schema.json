@@ -71,7 +71,7 @@
       }
     },
     "manifest": {
-      "description": "The whole manifest.toml, echoed back verbatim - see manifest.schema.json.",
+      "description": "Normalized typed representation of the parsed manifest.toml; comments, key order, and source spelling are not preserved. See manifest.schema.json.",
       "$ref": "manifest.schema.json"
     }
   },

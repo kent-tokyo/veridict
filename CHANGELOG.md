@@ -11,6 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated and shortened public documentation, aligned workflow exit-code descriptions, and made
+  input schemas match the values accepted by the Rust types.
+
+### Fixed
+
+- Reject `--max-paired-ids 0` in the CLI and library so pentanomial SPRT cannot evaluate a pair
+  beyond a zero-sized stopping cap.
+
 ## [0.19.6] - 2026-10-14
 
 ### Added
@@ -774,8 +784,8 @@ The first published release. Covers:
   shared baseline - closed-form Elo-vs-baseline per candidate, no iterative solver.
 - **`--paired-by-id`** (`compare`/`sprt`/`matrix`): nets two records sharing an `id` into one
   observation instead of two independent ones.
-- **Input**: JSONL (default) or CSV (`--format csv`, or auto-detected from `.csv`), streaming
-  (bounded memory regardless of input size).
+- **Input**: JSONL (default) or CSV (`--format csv`, or auto-detected from `.csv`). Parsing is
+  streaming; retained state depends on the metric, pairing, clustering, and bootstrap settings.
 - **Reports**: JSON (default) and Markdown (`--report-md`), with a `failure_breakdown` split by
   which side timed out/crashed/produced an invalid result.
 - Bilingual README (`README.md`/`README_ja.md`), dual MIT/Apache-2.0 license, CI

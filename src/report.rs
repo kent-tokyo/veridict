@@ -77,6 +77,17 @@ pub(crate) fn id_diversity_advisory(
     (low_id_diversity, warning)
 }
 
+/// Appends the shared Markdown warning block without changing report-specific content around it.
+pub(crate) fn append_markdown_warnings(body: &mut String, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    body.push_str("\nWarnings:\n");
+    for warning in warnings {
+        body.push_str(&format!("- {warning}\n"));
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub schema_version: u32,
@@ -406,12 +417,7 @@ impl Report {
                     .unwrap_or_default(),
             ));
         }
-        if !self.warnings.is_empty() {
-            body.push_str("\nWarnings:\n");
-            for warning in &self.warnings {
-                body.push_str(&format!("- {warning}\n"));
-            }
-        }
+        append_markdown_warnings(&mut body, &self.warnings);
         body
     }
 }

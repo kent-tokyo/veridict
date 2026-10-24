@@ -197,7 +197,7 @@ pub struct VerifyRunReport {
     pub crashes: u64,
     pub invalid: u64,
     pub failure_breakdown: FailureBreakdown,
-    /// The whole manifest, echoed back verbatim.
+    /// Normalized typed representation of the parsed manifest.
     pub manifest: Manifest,
 }
 

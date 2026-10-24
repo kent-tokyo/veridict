@@ -234,7 +234,7 @@
     },
     "max_paired_ids": {
       "type": ["integer", "null"],
-      "minimum": 0,
+      "minimum": 1,
       "description": "Echoes --max-paired-ids, Some only when it was passed (requires --sprt-variant pentanomial). If the walk reaches this many completed pairs without a boundary crossing, it stops there with an inconclusive verdict; pairs completed after this point never affect the verdict, llr, or bucket counts."
     },
     "require_complete_pairs": {

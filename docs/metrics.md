@@ -2,10 +2,10 @@
 
 English | [日本語](metrics_ja.md)
 
-This document defines behavior in release `0.19.6`. The exact source remains in the
+This document defines behavior in the current source tree. The latest published release is
+`0.19.6`; its exact contract remains in the
 [v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6). Start with the
-[README](../README.md) for examples; unimplemented ideas belong in the
-[research map](research-map.md).
+[README](../README.md) for examples; unimplemented ideas belong in the [research map](research-map.md).
 
 ## Decision contract
 
@@ -19,8 +19,9 @@ For a reported effect interval `[L, U]`:
 multi-metric run when units differ. Input or configuration errors exit with code `3`; they are not
 statistical verdicts.
 
-`promotion` also includes evidence-validity checks. A breached validity cap can demote a
-statistical pass to `inconclusive`, but cannot create a pass or a fail.
+`promotion` also includes evidence-validity checks. A breached validity cap forces
+`validity=invalid`, `verdict=inconclusive`, and `promotion=not_promoted`, regardless of the
+uncapped verdict. It cannot create a pass or a fail.
 
 ## Fixed-sample metrics
 
@@ -61,7 +62,7 @@ Elo = 400 * log10(p / (1 - p))
 ```
 
 Scores are clamped to `[0.0001, 0.9999]` before conversion, so shutouts remain finite (about
-`+/-1600` Elo). Elo summarizes the observed result population; it does not establish strength
+`±1600` Elo). Elo summarizes the observed result population; it does not establish strength
 outside that population.
 
 `paired-elo` requires `--paired-by-id`, a non-empty ID on every record, and exactly two usable
@@ -92,7 +93,8 @@ Statuses are `ok`, `timeout`, `crash`, and `invalid`.
 
 Failure counts are never hidden. `exclude` and `loss` apply only to outcome metrics and sequential
 tests. `--max-timeouts`, `--max-crashes`, and `--max-invalid` are validity caps; breaching one
-prevents promotion.
+forces invalid validity and an inconclusive verdict. Reports preserve counts and the breach reason,
+not every configured cap value.
 
 ## Multiple metrics
 
@@ -139,7 +141,7 @@ All variants replay input order and retain the first eligible crossing. Wald and
 each usable trial, or each completed net pair with pairing; pentanomial evaluates each completed
 pair. Records after stopping do not change the decision prefix but are still validated and counted
 for failure caps. `--min-paired-ids`, `--max-paired-ids`, and `--require-complete-pairs` further
-constrain supported paired modes.
+constrain supported paired modes; paired-ID limits must be at least `1`.
 
 ### Report fields and input replay
 
@@ -154,12 +156,14 @@ unpaired mode. The signal depends only on ID structure and never changes the LLR
 validity, or promotion. It stays silent when every ID appears exactly twice and whenever
 `--paired-by-id` is active, because repeated IDs have pairing semantics there.
 
-### Library API and checkpoints
+### Library API
 
 Library callers should prefer `sprt::run_with_options(records, config, options)` with
-`SprtRunOptions`. Its default is Wald, unpaired, `FailurePolicy::ReportOnly`, incomplete IDs
-tolerated, and no paired-ID limits. The original positional `sprt::run` remains available as a
-compatibility wrapper and uses the same validation path.
+`SprtRunOptions`. Defaults are Wald, unpaired, `FailurePolicy::ReportOnly`, incomplete IDs allowed,
+and no paired-ID limits. The positional `sprt::run` remains as a compatibility wrapper and uses
+the same validation path.
+
+### Checkpoints and resume
 
 Long-running producers can add records through `sprt::SprtAccumulator` and serialize a
 `SprtCheckpoint` returned by `snapshot()`. Resume with
@@ -168,10 +172,9 @@ separately persisted producer cursor for `expected_position`.
 
 Resume rejects changes to the checkpoint version, hypotheses, options, record count, last line,
 or prefix fingerprint. `push` line numbers must increase in input order. Checkpoints preserve the
-first crossing, incomplete pairs, and failure counts. The fingerprint detects accidental stream
-mix-ups; it does not authenticate data. Failure caps are not checkpoint options; callers that need
-CLI-equivalent validity and promotion must apply the same `FailureCaps` to the finished batch or
-resumed report.
+first crossing, incomplete pairs, and failure counts. The fingerprint detects stream mix-ups; it
+does not authenticate data. Failure caps are not checkpoint options, so apply the same
+`FailureCaps` to batch and resumed reports for CLI-equivalent validity and promotion.
 
 ## Supporting commands
 
@@ -199,8 +202,8 @@ planning estimates, not verdicts or sample-size guarantees.
 ### `verify-run`
 
 `verify-run` validates pairing, order, contamination, and consistency between manifest values and
-recorded opaque identifiers or hashes. It does not open artifacts, recompute hashes, or prove
-benchmark quality.
+recorded identifiers or hashes, treating their contents as opaque. It does not open artifacts,
+recompute hashes, or prove benchmark quality.
 
 ### `time-sensitive`
 
@@ -226,13 +229,16 @@ pair; for other paired modes, it is an ID group or an ID-less observation; for c
 cluster. Samples below 30 still carry a warning. Two units permit evaluation but do not guarantee
 adequate small-sample error rates.
 
-JSON Schemas in [`schemas/`](../schemas/) cover the listed record and report formats, except the
-experimental `time-sensitive` report. Current-source SPRT reports use schema v2 because `warnings`
-and `data_quality` are required. [`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json)
-captures the strict shape before those fields were added; published `0.19.5` reports used version
-number 1 with those extra fields and therefore do not satisfy that strict archived schema. There
-is no v1 output mode in the current source tree. Select schemas by `schema_version`; pin the
-producer version when validating historical output.
+### Schema versions
+
+JSON Schemas in [`schemas/`](../schemas/) cover the listed record and report formats. The
+experimental `time-sensitive` report has no schema yet.
+
+Current SPRT output uses schema v2, where `warnings` and `data_quality` are required. The archived
+[`sprt-report-v1.schema.json`](../schemas/sprt-report-v1.schema.json) captures the earlier strict
+shape. Published `0.19.5` reports kept version number 1 while emitting the two new fields, so they
+do not satisfy that archived schema. Current code has no v1 output mode. For historical output,
+pin the producer version and select the schema by `schema_version`.
 
 ## References
 
