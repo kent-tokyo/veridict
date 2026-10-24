@@ -17,7 +17,7 @@ testing, and execution failures. Evaluation runners and adoption actions stay wi
 See [Product scope](docs/product-scope.md) for responsibilities and development priorities.
 
 Repository documentation describes the current source tree. The latest published release is
-`0.19.6`; use the [v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6) for its exact
+`0.19.7`; use the [v0.19.7 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.7) for its exact
 source and docs.
 
 ## Install
@@ -156,14 +156,14 @@ and requires no consumer secret.
 ```yaml
 jobs:
   gate:
-    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.6
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.7
     with:
       command: compare
       input_path: results.jsonl
       arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
 ```
 
-This workflow revision installs veridict `0.19.6`. For production use:
+This workflow revision installs veridict `0.19.7`. For production use:
 
 - Pin the workflow to a release tag or full commit SHA.
 - Valid `compare` and `sprt` runs upload `report.json` and `report.md` before preserving exit code

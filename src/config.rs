@@ -74,8 +74,10 @@ impl MetricConfig {
     /// `QuantileDiff` - see `VeridictError::IncompatibleBootstrapMethod`), now
     /// run once at construction instead of once per call. A caller that
     /// already knows which knobs its metric needs can construct a variant
-    /// directly (e.g. `MetricConfig::MeanDiff { .. }`) and skip this - it's
-    /// valid by construction, no runtime check needed.
+    /// directly (e.g. `MetricConfig::MeanDiff { .. }`). Execution entry
+    /// points still call [`MetricConfig::validate`] because public enum
+    /// variants can also be constructed with an invalid quantile or an
+    /// incompatible quantile bootstrap method.
     ///
     /// `quantile` for any kind other than `QuantileDiff` is silently unused,
     /// not a config error - same precedent as `bootstrap_method` for
@@ -140,6 +142,28 @@ impl MetricConfig {
             }
             MetricKind::RelativeDiff => Ok(Self::RelativeDiff { bootstrap_method }),
         }
+    }
+
+    /// Re-validates invariants that cannot be enforced by the public enum's
+    /// type shape. Library entry points call this at the execution boundary
+    /// so a direct variant construction is as safe as [`MetricConfig::new`].
+    pub fn validate(&self) -> Result<(), VeridictError> {
+        if let Self::QuantileDiff {
+            quantile,
+            bootstrap_method,
+        } = self
+        {
+            if !quantile.is_finite() || *quantile <= 0.0 || *quantile >= 1.0 {
+                return Err(VeridictError::InvalidQuantile(*quantile));
+            }
+            if *bootstrap_method == BootstrapMethod::Bca {
+                return Err(VeridictError::IncompatibleBootstrapMethod {
+                    method: metrics::bootstrap_method_label(*bootstrap_method),
+                    metric: metrics::metric_label(MetricKind::QuantileDiff),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The `CiMethod` to feed `build_report`/`estimate_additional_trials` -

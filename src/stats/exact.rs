@@ -24,14 +24,12 @@ pub fn clopper_pearson_ci(
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    debug_assert!(
-        n > 0,
-        "clopper_pearson_ci called with n == 0; caller must guard"
-    );
-    debug_assert!(
-        successes <= n,
-        "clopper_pearson_ci called with successes > n"
-    );
+    if n == 0 || successes > n {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "Clopper-Pearson interval requires 0 <= successes <= trials and trials > 0, got \
+             successes={successes}, trials={n}"
+        )));
+    }
 
     let alpha = 1.0 - confidence;
     let x = successes as f64;
@@ -96,6 +94,12 @@ mod tests {
                 Err(VeridictError::InvalidConfidence(_))
             ));
         }
+    }
+
+    #[test]
+    fn rejects_invalid_counts_without_panicking() {
+        assert!(clopper_pearson_ci(0, 0, 0.95).is_err());
+        assert!(clopper_pearson_ci(11, 10, 0.95).is_err());
     }
 
     #[test]

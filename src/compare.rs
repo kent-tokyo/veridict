@@ -92,7 +92,13 @@ where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
-    debug_assert_eq!(metrics.len(), thresholds.len());
+    if metrics.len() != thresholds.len() {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "metric/threshold count mismatch: {} metric(s), {} threshold configuration(s)",
+            metrics.len(),
+            thresholds.len()
+        )));
+    }
     let outs = metrics::compute_many(
         records,
         metrics,

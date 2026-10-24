@@ -8,6 +8,11 @@
 
 use crate::error::VeridictError;
 
+/// A tabulated schedule is deliberately dense (`rewards[t]`), so cap the
+/// sparse-file expansion before allocation. Larger horizons should use a
+/// formula-backed schedule rather than materializing millions of entries.
+const MAX_TABULATED_HORIZON: u64 = 1_000_000;
+
 #[derive(Debug, Clone)]
 pub enum RewardSchedule {
     HardDeadline {
@@ -209,7 +214,7 @@ pub struct RewardScheduleFile {
 /// nonzero tail isn't a value this schedule shape can express, not merely an unusual one.
 pub fn expand_schedule_file(file: &RewardScheduleFile) -> Result<RewardSchedule, VeridictError> {
     let mut untils: Vec<(u64, f64)> = Vec::new();
-    let mut after: Option<f64> = None;
+    let mut after: Option<(u64, f64)> = None;
     for entry in &file.rewards {
         match (entry.until, entry.after) {
             (Some(u), None) => untils.push((u, entry.value)),
@@ -218,7 +223,7 @@ pub fn expand_schedule_file(file: &RewardScheduleFile) -> Result<RewardSchedule,
                     "reward schedule file must declare at most one 'after' entry".to_string(),
                 ));
             }
-            (None, Some(_)) => after = Some(entry.value),
+            (None, Some(boundary)) => after = Some((boundary, entry.value)),
             _ => {
                 return Err(VeridictError::InvalidThreshold(
                     "each reward schedule entry must set exactly one of 'until'/'after'"
@@ -227,7 +232,7 @@ pub fn expand_schedule_file(file: &RewardScheduleFile) -> Result<RewardSchedule,
             }
         }
     }
-    let Some(after) = after else {
+    let Some((after_boundary, after)) = after else {
         return Err(VeridictError::InvalidThreshold(
             "reward schedule file must declare exactly one 'after' entry for the tail value"
                 .to_string(),
@@ -255,7 +260,28 @@ pub fn expand_schedule_file(file: &RewardScheduleFile) -> Result<RewardSchedule,
         }
     }
     let horizon = untils.last().unwrap().0;
-    let mut rewards = vec![after; horizon as usize + 1];
+    if after_boundary != horizon {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "reward schedule file's 'after' boundary ({after_boundary}) must equal the largest \
+             'until' boundary ({horizon})"
+        )));
+    }
+    if horizon > MAX_TABULATED_HORIZON {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "tabulated reward schedule horizon {horizon} exceeds the supported maximum of \
+             {MAX_TABULATED_HORIZON}; use a formula-backed hard-deadline or exponential schedule \
+             for larger horizons"
+        )));
+    }
+    let len = usize::try_from(horizon)
+        .ok()
+        .and_then(|h| h.checked_add(1))
+        .ok_or_else(|| {
+            VeridictError::InvalidThreshold(format!(
+                "tabulated reward schedule horizon {horizon} cannot be represented on this platform"
+            ))
+        })?;
+    let mut rewards = vec![after; len];
     // Fill widest-range (largest `until`) first, then let each narrower, smaller-`until` entry
     // overwrite its own prefix - matches the format's "first matching until wins" reading of a
     // breakpoint list (see the spec's own 400/1600/3200 example).
@@ -407,5 +433,44 @@ mod tests {
             }],
         };
         assert!(expand_schedule_file(&file).is_err());
+    }
+
+    #[test]
+    fn expand_schedule_file_rejects_mismatched_after_boundary() {
+        let file = RewardScheduleFile {
+            rewards: vec![
+                RewardScheduleEntry {
+                    until: Some(100),
+                    after: None,
+                    value: 1.0,
+                },
+                RewardScheduleEntry {
+                    until: None,
+                    after: Some(99),
+                    value: 0.0,
+                },
+            ],
+        };
+        assert!(expand_schedule_file(&file).is_err());
+    }
+
+    #[test]
+    fn expand_schedule_file_rejects_huge_horizon_before_allocation() {
+        let file = RewardScheduleFile {
+            rewards: vec![
+                RewardScheduleEntry {
+                    until: Some(u64::MAX),
+                    after: None,
+                    value: 1.0,
+                },
+                RewardScheduleEntry {
+                    until: None,
+                    after: Some(u64::MAX),
+                    value: 0.0,
+                },
+            ],
+        };
+        let error = expand_schedule_file(&file).unwrap_err();
+        assert!(error.to_string().contains("supported maximum"));
     }
 }

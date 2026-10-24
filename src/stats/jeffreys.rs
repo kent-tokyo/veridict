@@ -33,8 +33,12 @@ pub fn jeffreys_ci(successes: u64, n: u64, confidence: f64) -> Result<(f64, f64)
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    debug_assert!(n > 0, "jeffreys_ci called with n == 0; caller must guard");
-    debug_assert!(successes <= n, "jeffreys_ci called with successes > n");
+    if n == 0 || successes > n {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "Jeffreys interval requires 0 <= successes <= trials and trials > 0, got \
+             successes={successes}, trials={n}"
+        )));
+    }
 
     let alpha = 1.0 - confidence;
     let x = successes as f64;
@@ -103,6 +107,12 @@ mod tests {
                 Err(VeridictError::InvalidConfidence(_))
             ));
         }
+    }
+
+    #[test]
+    fn rejects_invalid_counts_without_panicking() {
+        assert!(jeffreys_ci(0, 0, 0.95).is_err());
+        assert!(jeffreys_ci(11, 10, 0.95).is_err());
     }
 
     // Independent-of-scipy pinned checkpoint: Beta(1.5, 0.5) has a

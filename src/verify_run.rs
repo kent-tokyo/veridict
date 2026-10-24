@@ -431,6 +431,19 @@ fn check_experiment_contamination(
             }),
         );
     };
+    if !records
+        .iter()
+        .any(|(_, record)| record.experiment_id.is_some())
+    {
+        return (
+            Vec::new(),
+            Some(SkippedCheck {
+                check: "experiment_contamination",
+                field: Some("experiment_id"),
+                reason: "no record declared experiment_id".to_string(),
+            }),
+        );
+    }
     let violations = records
         .iter()
         .filter_map(|(line, record)| {
@@ -468,6 +481,16 @@ fn check_one_hash_field(
             }),
         );
     };
+    if !records.iter().any(|(_, record)| get(record).is_some()) {
+        return (
+            Vec::new(),
+            Some(SkippedCheck {
+                check: "environment_consistency",
+                field: Some(field),
+                reason: format!("no record declared {field}"),
+            }),
+        );
+    }
     let violations = records
         .iter()
         .filter_map(|(line, record)| {
@@ -1110,6 +1133,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn declared_experiment_id_without_record_values_is_reported_as_skipped() {
+        let mut manifest = empty_manifest();
+        manifest.experiment_id = Some("exp1".to_string());
+        let report = run(&manifest, clean_pairs(1)).unwrap();
+        assert!(report.checks_skipped.iter().any(|s| {
+            s.check == "experiment_contamination"
+                && s.field == Some("experiment_id")
+                && s.reason.contains("no record declared")
+        }));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("experiment_contamination"))
+        );
+    }
+
     // --- check_environment_consistency ---
 
     #[test]
@@ -1167,6 +1208,24 @@ mod tests {
             .filter_map(|s| s.field)
             .collect();
         assert_eq!(skipped_fields.len(), 4); // dataset/binary/weight/config all undeclared
+    }
+
+    #[test]
+    fn declared_hash_without_record_values_is_reported_as_skipped() {
+        let mut manifest = empty_manifest();
+        manifest.binary_sha256 = Some("expected".to_string());
+        let report = run(&manifest, clean_pairs(1)).unwrap();
+        assert!(report.checks_skipped.iter().any(|s| {
+            s.check == "environment_consistency"
+                && s.field == Some("binary_sha256")
+                && s.reason.contains("no record declared")
+        }));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("binary_sha256"))
+        );
     }
 
     // --- ordering determinism ---

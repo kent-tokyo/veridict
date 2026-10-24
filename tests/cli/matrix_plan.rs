@@ -100,6 +100,46 @@ fn matrix_general_graph_reports_real_bootstrap_cis() {
 }
 
 #[test]
+fn matrix_general_graph_rejects_invalid_bootstrap_configuration() {
+    let dir = std::env::temp_dir();
+    let matches_path = dir.join("veridict_cli_test_matrix_invalid_bootstrap.jsonl");
+    std::fs::write(
+        &matches_path,
+        concat!(
+            "{\"id\":\"ab\",\"a\":\"a\",\"b\":\"b\",\"result\":\"draw\"}\n",
+            "{\"id\":\"bc\",\"a\":\"b\",\"b\":\"c\",\"result\":\"draw\"}\n",
+            "{\"id\":\"ca\",\"a\":\"c\",\"b\":\"a\",\"result\":\"draw\"}\n",
+        ),
+    )
+    .unwrap();
+
+    veridict()
+        .args([
+            "matrix",
+            "--matches",
+            matches_path.to_str().unwrap(),
+            "--resamples",
+            "0",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("resample count"));
+    veridict()
+        .args([
+            "matrix",
+            "--matches",
+            matches_path.to_str().unwrap(),
+            "--confidence",
+            "NaN",
+        ])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("confidence"));
+
+    std::fs::remove_file(&matches_path).ok();
+}
+
+#[test]
 fn plan_recommends_the_narrower_ci_candidate_last() {
     let dir = std::env::temp_dir();
     let well_sampled = dir.join("veridict_cli_test_plan_a.jsonl");

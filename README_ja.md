@@ -10,8 +10,8 @@
 採用後の操作は呼び出し側が担います。責任範囲と開発の優先順位は
 [プロダクトの目的と範囲](docs/product-scope_ja.md)にまとめています。
 
-リポジトリ内の文書は現在のソースツリーを説明します。最新の公開版は `0.19.6` です。その時点のソースと
-文書は [v0.19.6タグ](https://github.com/kent-tokyo/veridict/tree/v0.19.6)を参照してください。
+リポジトリ内の文書は現在のソースツリーを説明します。最新の公開版は `0.19.7` です。その時点のソースと
+文書は [v0.19.7タグ](https://github.com/kent-tokyo/veridict/tree/v0.19.7)を参照してください。
 
 ## インストール
 
@@ -148,14 +148,14 @@ JSONが機械処理向けの契約で、Markdownは人向けの要約です。�
 ```yaml
 jobs:
   gate:
-    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.6
+    uses: kent-tokyo/veridict/.github/workflows/veridict-gate.yml@v0.19.7
     with:
       command: compare
       input_path: results.jsonl
       arguments_json: '["--metric","winrate","--pass-above","0.02","--fail-below","-0.01"]'
 ```
 
-このワークフローはveridict `0.19.6`をインストールします。本番利用では、次の点を守ってください。
+このワークフローはveridict `0.19.7`をインストールします。本番利用では、次の点を守ってください。
 
 - ワークフローの参照先をリリースタグまたは完全なコミットSHAに固定する。
 - 有効な `compare` と `sprt` は、終了コード `0`、`1`、`2` をジョブへ反映する前に

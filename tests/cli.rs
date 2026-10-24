@@ -34,5 +34,7 @@ mod power;
 mod relative_min_effect;
 #[path = "cli/sprt.rs"]
 mod sprt;
+#[path = "cli/time_sensitive.rs"]
+mod time_sensitive;
 #[path = "cli/verify_run.rs"]
 mod verify_run;

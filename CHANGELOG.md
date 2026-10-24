@@ -11,15 +11,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.7] - 2026-10-24
+
 ### Changed
 
+- Split the CLI, comparison, metric, and SPRT implementations into focused modules while
+  preserving the public API, schemas, report output, and command behavior.
 - Updated and shortened public documentation, aligned workflow exit-code descriptions, and made
   input schemas match the values accepted by the Rust types.
+- Custom time-sensitive reward schedules now require the `after` boundary to match the largest
+  `until` boundary and cap dense expansion at a horizon of 1,000,000.
 
 ### Fixed
 
 - Reject `--max-paired-ids 0` in the CLI and library so pentanomial SPRT cannot evaluate a pair
   beyond a zero-sized stopping cap.
+- Reject invalid confidence and zero-resample settings in matches-only `matrix` and `plan` runs
+  instead of panicking or emitting non-numeric JSON fields.
+- Reject empty metric families and metric/threshold count mismatches in `compare_many` instead of
+  allowing an empty or truncated family to be promoted.
+- Revalidate directly constructed `MetricConfig` values and reject invalid public confidence-
+  interval and Bradley-Terry inputs with typed errors instead of debug-only panics.
+- Report manifest-declared verify-run fields as skipped when no record supplies the corresponding
+  value, rather than silently treating the check as completed.
+- Reject oversized custom reward schedules before allocating their dense table, preventing
+  integer-overflow panics and unbounded allocation attempts.
 
 ## [0.19.6] - 2026-10-14
 

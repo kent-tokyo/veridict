@@ -594,7 +594,9 @@ pub(super) struct TimeSensitiveArgs {
     pub(super) horizon: Option<u64>,
 
     /// Path to a custom reward-schedule JSON file: {"rewards": [{"until": N, "value": V}, ...,
-    /// {"after": N, "value": 0.0}]}. Exactly one of --reward/--reward-schedule is required.
+    /// {"after": N, "value": 0.0}]}. The after boundary must equal the largest until boundary;
+    /// dense custom schedules support horizons up to 1,000,000. Exactly one of
+    /// --reward/--reward-schedule is required.
     #[arg(long, conflicts_with_all = ["reward", "deadline", "time_scale", "horizon"])]
     pub(super) reward_schedule: Option<PathBuf>,
 

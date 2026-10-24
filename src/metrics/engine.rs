@@ -109,9 +109,9 @@ fn build_aggregator(
 /// resampling and out of scope to remove. `paired_by_id`: see each
 /// aggregator's module doc - two records sharing the same `id` are combined
 /// into one net observation instead of two independent ones. Each
-/// `MetricConfig` is valid by construction (see `MetricConfig::new`), so
-/// there's no ci_method/bootstrap_method compatibility check here anymore -
-/// it moved to construction time, once, instead of running on every call.
+/// `MetricConfig::new` validates CLI-shaped construction, while this entry
+/// point revalidates the remaining public-enum invariants so direct library
+/// construction cannot bypass quantile validation.
 /// `records_with_id`/`max_id_count` (see `MetricOutput`'s doc) are tracked
 /// here, centrally, rather than per-aggregator - it's the same fact
 /// regardless of which metrics are requested, and per-aggregator tracking is
@@ -131,6 +131,14 @@ where
     I: IntoIterator,
     I::Item: IntoRecordResult,
 {
+    if metrics.is_empty() {
+        return Err(VeridictError::InvalidThreshold(
+            "at least one metric is required".to_string(),
+        ));
+    }
+    for config in metrics {
+        config.validate()?;
+    }
     if metrics
         .iter()
         .any(|config| config.kind() == MetricKind::PairedElo)

@@ -40,7 +40,7 @@ jobs:
     outputs:
       exit_code: ${{ steps.run-gate.outputs.exit_code }}
     env:
-      VERIDICT_VERSION: "0.19.6"
+      VERIDICT_VERSION: "0.19.7"
     steps:
       - name: Check out caller repository
         uses: actions/checkout@v7

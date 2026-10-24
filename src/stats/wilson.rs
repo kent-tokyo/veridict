@@ -67,11 +67,8 @@ pub(crate) fn inverse_normal_cdf(p: f64) -> f64 {
 /// as-half-a-win scoring - doesn't need to pretend it has an integer count)
 /// trials, at the given two-sided confidence level.
 ///
-/// Preconditions (caller's responsibility, not re-validated here since this
-/// is an internal helper always called after they're already known): `n >
-/// 0`, `0.0 <= p_hat <= 1.0`. `confidence` is validated here since it comes
-/// straight from user-supplied CLI input and `f64::from_str` happily parses
-/// `"nan"`.
+/// Rejects non-finite/out-of-range proportions and non-positive/non-finite
+/// trial counts instead of relying on debug-only caller preconditions.
 pub fn wilson_ci_from_proportion(
     p_hat: f64,
     n: f64,
@@ -80,14 +77,16 @@ pub fn wilson_ci_from_proportion(
     if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
         return Err(VeridictError::InvalidConfidence(confidence));
     }
-    debug_assert!(
-        n > 0.0,
-        "wilson_ci_from_proportion called with n == 0; caller must guard"
-    );
-    debug_assert!(
-        (0.0..=1.0).contains(&p_hat),
-        "p_hat {p_hat} out of [0, 1]; caller must guard"
-    );
+    if !n.is_finite() || n <= 0.0 {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "Wilson interval trial count must be finite and > 0, got {n}"
+        )));
+    }
+    if !p_hat.is_finite() || !(0.0..=1.0).contains(&p_hat) {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "Wilson interval proportion must be finite and in [0, 1], got {p_hat}"
+        )));
+    }
 
     let alpha = 1.0 - confidence;
     let z = inverse_normal_cdf(1.0 - alpha / 2.0);
@@ -105,7 +104,12 @@ pub fn wilson_ci_from_proportion(
 /// wrapper around [`wilson_ci_from_proportion`] for the common integer-count
 /// case (winrate, sign-test).
 pub fn wilson_ci(successes: u64, n: u64, confidence: f64) -> Result<(f64, f64), VeridictError> {
-    debug_assert!(n > 0, "wilson_ci called with n == 0; caller must guard");
+    if n == 0 || successes > n {
+        return Err(VeridictError::InvalidThreshold(format!(
+            "Wilson interval requires 0 <= successes <= trials and trials > 0, got \
+             successes={successes}, trials={n}"
+        )));
+    }
     let p_hat = successes as f64 / n as f64;
     wilson_ci_from_proportion(p_hat, n as f64, confidence)
 }
@@ -140,6 +144,21 @@ mod tests {
         let (low, high) = wilson_ci(60, 100, 0.95).unwrap();
         assert_close(low, 0.5020026, 1e-6);
         assert_close(high, 0.6905987, 1e-6);
+    }
+
+    #[test]
+    fn rejects_invalid_public_inputs_without_panicking() {
+        for (p_hat, n) in [
+            (0.5, 0.0),
+            (0.5, f64::INFINITY),
+            (-0.1, 10.0),
+            (1.1, 10.0),
+            (f64::NAN, 10.0),
+        ] {
+            assert!(wilson_ci_from_proportion(p_hat, n, 0.95).is_err());
+        }
+        assert!(wilson_ci(0, 0, 0.95).is_err());
+        assert!(wilson_ci(11, 10, 0.95).is_err());
     }
 
     #[test]

@@ -330,6 +330,38 @@ fn final_metric_boundary_rejects_non_finite_output() {
 }
 
 #[test]
+fn direct_quantile_config_construction_is_revalidated() {
+    let records = [(1, rec("a", Some(1.0), Some(2.0), None, None, None))];
+    for config in [
+        MetricConfig::QuantileDiff {
+            quantile: f64::NAN,
+            bootstrap_method: BootstrapMethod::Percentile,
+        },
+        MetricConfig::QuantileDiff {
+            quantile: 0.0,
+            bootstrap_method: BootstrapMethod::Percentile,
+        },
+        MetricConfig::QuantileDiff {
+            quantile: 0.5,
+            bootstrap_method: BootstrapMethod::Bca,
+        },
+    ] {
+        assert!(
+            compute(
+                records.iter().cloned(),
+                config,
+                0.95,
+                100,
+                SEED,
+                false,
+                false,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn mean_diff_rejects_duplicate_id() {
     let records = [
         (1, rec("dup", Some(1.0), Some(1.1), None, None, None)),

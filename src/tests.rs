@@ -313,6 +313,33 @@ fn compare_many_fails_overall_if_any_metric_fails() {
     assert_eq!(report.verdict, Verdict::Fail);
 }
 
+#[test]
+fn compare_many_rejects_an_empty_metric_family() {
+    let records = [(1, rec("a", None, None, Some("candidate_win"), None, None))];
+    let result = compare_many(records, &[], 0.95, &[], 100, DEFAULT_SEED, false, false);
+    assert!(matches!(result, Err(VeridictError::InvalidThreshold(_))));
+}
+
+#[test]
+fn compare_many_rejects_metric_threshold_count_mismatch() {
+    let records = [(1, rec("a", None, None, Some("candidate_win"), None, None))];
+    let metrics = [MetricConfig::WinRate {
+        ci_method: CiMethod::Wilson,
+        failure_policy: FailurePolicy::ReportOnly,
+    }];
+    let result = compare_many(
+        records,
+        &metrics,
+        0.95,
+        &[],
+        100,
+        DEFAULT_SEED,
+        false,
+        false,
+    );
+    assert!(matches!(result, Err(VeridictError::InvalidThreshold(_))));
+}
+
 // --- Report.warnings ---
 
 #[test]

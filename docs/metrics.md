@@ -3,8 +3,8 @@
 English | [日本語](metrics_ja.md)
 
 This document defines behavior in the current source tree. The latest published release is
-`0.19.6`; its exact contract remains in the
-[v0.19.6 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.6). Start with the
+`0.19.7`; its exact contract remains in the
+[v0.19.7 tag](https://github.com/kent-tokyo/veridict/tree/v0.19.7). Start with the
 [README](../README.md) for examples; unimplemented ideas belong in the [research map](research-map.md).
 
 ## Decision contract
@@ -210,7 +210,9 @@ recompute hashes, or prove benchmark quality.
 `time-sensitive` is an experimental, one-sided, anytime-valid Bernoulli simple-vs-simple test with
 a finite reward horizon. Policies are `bellman`, `edo`, and `gro`; rewards are `hard-deadline`,
 `exponential`, or a custom schedule. Draws advance time without changing wealth. The command does
-not support Elo, draw-aware hypotheses, or online composite alternatives.
+not support Elo, draw-aware hypotheses, or online composite alternatives. A custom schedule is
+expanded densely, so its `after` boundary must equal its largest `until` boundary and its horizon
+must not exceed 1,000,000; use a formula-backed deadline or exponential schedule for larger values.
 
 ## Report interpretation
 

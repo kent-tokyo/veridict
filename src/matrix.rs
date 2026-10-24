@@ -354,6 +354,9 @@ where
     J: IntoIterator<Item = Result<K, VeridictError>>,
     K: IntoIterator<Item = Result<(usize, MatchRecord), VeridictError>>,
 {
+    if !confidence.is_finite() || confidence <= 0.0 || confidence >= 1.0 {
+        return Err(VeridictError::InvalidConfidence(confidence));
+    }
     let mut legacy_order = Vec::new();
     let mut legacy_summaries: HashMap<String, CandidateSummary> = HashMap::new();
     let mut edges: HashMap<(String, String), (u64, u64, u64)> = HashMap::new();
@@ -425,6 +428,10 @@ where
 
     let has_baseline = edges.keys().any(|(a, b)| a == BASELINE || b == BASELINE);
     let star_shaped = edges.keys().all(|(a, b)| a == BASELINE || b == BASELINE);
+
+    if !star_shaped && resamples == 0 {
+        return Err(VeridictError::InvalidResamples(resamples));
+    }
 
     let (candidates, matrix) = if star_shaped {
         build_star_graph(&candidate_order, &legacy_summaries, &edges, confidence)?
@@ -869,6 +876,48 @@ mod tests {
             ),
             Err(VeridictError::EmptyInput)
         ));
+    }
+
+    fn general_graph_matches() -> Vec<Result<MatchFile, VeridictError>> {
+        ok_matches(vec![vec![
+            match_rec("ab", "a", "b", "draw"),
+            match_rec("bc", "b", "c", "draw"),
+            match_rec("ca", "c", "a", "draw"),
+        ]])
+    }
+
+    #[test]
+    fn general_graph_rejects_zero_resamples_before_bootstrap() {
+        assert!(matches!(
+            run(
+                ok_named(vec![]),
+                general_graph_matches(),
+                0.95,
+                false,
+                0,
+                TEST_SEED,
+                BootstrapMethod::Percentile,
+            ),
+            Err(VeridictError::InvalidResamples(0))
+        ));
+    }
+
+    #[test]
+    fn matches_only_rejects_invalid_confidence() {
+        for confidence in [f64::NAN, 0.0, 1.0, 2.0] {
+            assert!(matches!(
+                run(
+                    ok_named(vec![]),
+                    general_graph_matches(),
+                    confidence,
+                    false,
+                    TEST_RESAMPLES,
+                    TEST_SEED,
+                    BootstrapMethod::Percentile,
+                ),
+                Err(VeridictError::InvalidConfidence(_))
+            ));
+        }
     }
 
     fn stream_mixed(

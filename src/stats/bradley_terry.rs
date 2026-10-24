@@ -170,17 +170,34 @@ pub fn fit_graph(
     n_competitors: usize,
     pairs: &[PairRecord],
 ) -> Result<Vec<CompetitorFit>, VeridictError> {
-    debug_assert!(n_competitors > 0, "fit_graph called with zero competitors");
-    for p in pairs {
-        debug_assert!(p.a != p.b, "fit_graph given a self-pair");
-        debug_assert!(
-            p.a < n_competitors && p.b < n_competitors,
-            "fit_graph given an out-of-range competitor index"
-        );
-        debug_assert!(
-            p.a_wins + p.b_wins + p.draws > 0,
-            "fit_graph given a pair with zero games"
-        );
+    if n_competitors == 0 {
+        return Err(VeridictError::InvalidThreshold(
+            "Bradley-Terry graph requires at least one competitor".to_string(),
+        ));
+    }
+    for (index, p) in pairs.iter().enumerate() {
+        if p.a == p.b {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "Bradley-Terry pair {index} is a self-pair at competitor {}",
+                p.a
+            )));
+        }
+        if p.a >= n_competitors || p.b >= n_competitors {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "Bradley-Terry pair {index} refers to competitor indices ({}, {}) outside \
+                 0..{n_competitors}",
+                p.a, p.b
+            )));
+        }
+        if p.a_wins
+            .checked_add(p.b_wins)
+            .and_then(|n| n.checked_add(p.draws))
+            .is_none_or(|n| n == 0)
+        {
+            return Err(VeridictError::InvalidThreshold(format!(
+                "Bradley-Terry pair {index} must contain at least one game and counts must not overflow"
+            )));
+        }
     }
 
     let connectivity = strongly_connected_components(n_competitors, pairs);
@@ -748,6 +765,43 @@ mod tests {
         assert_close(fits[0].elo, 0.0, 1e-9);
         assert_close(fits[1].elo - fits[0].elo, -215.5356238480202, 1e-6);
         assert_close(fits[2].elo - fits[0].elo, -268.53764941971946, 1e-6);
+    }
+
+    #[test]
+    fn fit_graph_rejects_invalid_public_inputs_without_panicking() {
+        assert!(fit_graph(0, &[]).is_err());
+        for pair in [
+            PairRecord {
+                a: 0,
+                b: 0,
+                a_wins: 1,
+                b_wins: 0,
+                draws: 0,
+            },
+            PairRecord {
+                a: 0,
+                b: 2,
+                a_wins: 1,
+                b_wins: 0,
+                draws: 0,
+            },
+            PairRecord {
+                a: 0,
+                b: 1,
+                a_wins: 0,
+                b_wins: 0,
+                draws: 0,
+            },
+            PairRecord {
+                a: 0,
+                b: 1,
+                a_wins: u64::MAX,
+                b_wins: 1,
+                draws: 0,
+            },
+        ] {
+            assert!(fit_graph(2, &[pair]).is_err());
+        }
     }
 
     #[test]
